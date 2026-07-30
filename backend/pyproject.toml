@@ -1,0 +1,58 @@
+[project]
+name = "evidwell-backend"
+version = "0.1.0"
+description = "Evidence-checked wellness content — API and generation pipeline"
+requires-python = ">=3.12"
+
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30",
+    "pgvector>=0.3.6",
+    "httpx>=0.28",
+    "anthropic>=0.69",
+    "voyageai>=0.3",
+    "pyjwt>=2.10",
+    "argon2-cffi>=23.1",
+]
+
+[project.optional-dependencies]
+openai = ["openai>=1.60"]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "respx>=0.22",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+# Explicit, because `app/`, `tests/` and `migrations/` sit side by side and
+# setuptools' auto-discovery refuses to guess between them.
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 96
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+
+[tool.ruff.lint.per-file-ignores]
+# Prose in docstrings legitimately uses en/em dashes and typographic quotes.
+"*" = ["RUF002", "RUF003"]

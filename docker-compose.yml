@@ -1,0 +1,20 @@
+# Local development only. Production uses managed Postgres (RDS/Neon) — see
+# DESIGN.md §10.
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: evidwell
+      POSTGRES_PASSWORD: evidwell
+      POSTGRES_DB: evidwell
+    ports:
+      - "5432:5432"
+    volumes:
+      - evidwell_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U evidwell"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  evidwell_pgdata:
