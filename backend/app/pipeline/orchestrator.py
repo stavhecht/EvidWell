@@ -175,19 +175,30 @@ class PipelineOrchestrator:
             await session.commit()
 
     async def _finish_run(self, run_id: str, ctx: PipelineContext) -> None:
-        async with self._bookkeeping() as session:
-            await session.execute(
-                update(PipelineRun)
-                .where(PipelineRun.id == run_id)
-                .values(
-                    status=RunStatus.SUCCEEDED,
-                    article_id=ctx.article_id,
-                    input_tokens=ctx.usage.input_tokens,
-                    output_tokens=ctx.usage.output_tokens,
-                    finished_at=datetime.now(UTC),
-                )
+        # This one write does NOT use the bookkeeping session, unlike every
+        # other write in this class. ``article_id`` is a foreign key into
+        # ``articles``, and the article was written by PersistStage into the
+        # *pipeline* session, which the caller commits only after this method
+        # returns. A bookkeeping write commits immediately, so it would point at
+        # a row no other transaction can see yet — a ForeignKeyViolationError
+        # that aborts the run and takes the uncommitted article down with it.
+        #
+        # Using the pipeline session makes "succeeded, article=X" atomic with X
+        # itself, which is also the honest semantics: if the article fails to
+        # commit, the run did not succeed. The failure paths stay on the
+        # bookkeeping session — they carry no such FK, and surviving a
+        # rolled-back pipeline transaction is exactly their purpose (§3.3).
+        await self._session.execute(
+            update(PipelineRun)
+            .where(PipelineRun.id == run_id)
+            .values(
+                status=RunStatus.SUCCEEDED,
+                article_id=ctx.article_id,
+                input_tokens=ctx.usage.input_tokens,
+                output_tokens=ctx.usage.output_tokens,
+                finished_at=datetime.now(UTC),
             )
-            await session.commit()
+        )
 
         validation = ctx.validation
         logger.info(
@@ -219,7 +230,9 @@ def build_default_pipeline(session: AsyncSession, settings: Settings) -> list[St
     )
 
     return [
-        ExtractStage(AnthropicExtractionClient(anthropic_client, settings.llm_model)),
+        ExtractStage(
+            AnthropicExtractionClient(anthropic_client, settings.extraction_model)
+        ),
         RetrieveStage(
             providers,
             TemplateQueryStrategy(min_year=settings.retrieval_min_year),
@@ -227,7 +240,9 @@ def build_default_pipeline(session: AsyncSession, settings: Settings) -> list[St
             settings.retrieval_max_candidates_per_claim,
         ),
         RankStage(reranker, cache, rerank_config),
-        SynthesizeStage(AnthropicSynthesisClient(anthropic_client, settings.llm_model)),
+        SynthesizeStage(
+            AnthropicSynthesisClient(anthropic_client, settings.synthesis_model)
+        ),
         ValidateStage(session),
         PersistStage(session),
     ]

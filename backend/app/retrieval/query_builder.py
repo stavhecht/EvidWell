@@ -16,10 +16,13 @@ be ranked.
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Protocol
 
 from app.retrieval.base import SearchQuery
+
+logger = logging.getLogger(__name__)
 
 #: Hand-mapped MeSH terms for the ingredients we expect to see early. Not a
 #: general solution — a real MeSH lookup against NCBI is Phase 4 — but it makes
@@ -122,7 +125,22 @@ class TemplateQueryStrategy:
         ]
 
     def _compose(self, claim: str, ingredients: list[str]) -> str:
-        subject = self._subject_group(ingredients) or self._keyword_group(claim)
+        subject = self._subject_group(ingredients)
+        if not subject:
+            # No ingredients means nothing anchors the query to the *substance*,
+            # and the keyword fallback is drawn from the claim — so "reduces
+            # stress" degrades to a search for stress in general, which happily
+            # returns mindfulness and music-therapy trials. The draft that comes
+            # out is grounded and passes validation; it is just answering a
+            # question nobody asked. Loud on purpose: this used to fail silently.
+            subject = self._keyword_group(claim)
+            logger.warning(
+                "no ingredients supplied for claim %r — falling back to claim "
+                "keywords %r. Retrieval is NOT anchored to a substance and "
+                "results will be off-topic; check the extraction model.",
+                claim,
+                subject,
+            )
         outcome = self._outcome_group(claim)
         if subject and outcome:
             return f"{subject} AND {outcome}"

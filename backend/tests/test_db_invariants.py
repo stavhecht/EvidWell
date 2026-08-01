@@ -208,6 +208,60 @@ async def test_validation_failed_article_cannot_be_approved(
         await ReviewService(session).approve(article_id, reviewer_id)
 
 
+async def test_validation_failed_article_can_be_discarded_by_rejecting_it(
+    session: AsyncSession,
+) -> None:
+    """The discard path. Unapprovable is not the same as stuck.
+
+    Rejection is the only way a draft leaves a queue tab — there is no delete —
+    so it has to be reachable from ``validation_failed``. The reason is
+    recorded, which is the whole argument for rejecting rather than deleting.
+    """
+    reviewer_id = await _make_user(session)
+    article_id = await _make_article(
+        session,
+        status=ArticleStatus.VALIDATION_FAILED,
+        content={"type": "doc", "content": []},
+    )
+
+    await ReviewService(session).reject(article_id, reviewer_id, "unsalvageable draft")
+
+    row = (
+        await session.execute(
+            sa.text(
+                "SELECT status, rejection_reason, reviewed_by FROM articles WHERE id = :id"
+            ),
+            {"id": article_id},
+        )
+    ).one()
+
+    assert row.status == "rejected"
+    assert row.rejection_reason == "unsalvageable draft"
+    assert str(row.reviewed_by) == reviewer_id
+
+
+async def test_published_article_cannot_be_rejected(session: AsyncSession) -> None:
+    """Widening the rejectable set must not turn reject into an unpublish."""
+    reviewer_id = await _make_user(session)
+    article_id = await _make_article(
+        session,
+        content={
+            "type": "doc",
+            "content": [
+                {
+                    "type": "paragraph",
+                    "attrs": {"beat": 1},
+                    "content": [{"type": "text", "text": "It claims to help."}],
+                }
+            ],
+        },
+    )
+    await ReviewService(session).approve(article_id, reviewer_id)
+
+    with pytest.raises(ReviewError, match="published"):
+        await ReviewService(session).reject(article_id, reviewer_id, "changed my mind")
+
+
 async def test_rejected_article_requires_a_reason(session: AsyncSession) -> None:
     article_id = await _make_article(session, content={"type": "doc", "content": []})
 

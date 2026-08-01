@@ -98,8 +98,14 @@ class SourceCache:
         ]
 
         statement = insert(Source).values(rows)
+        # The DOI target must be ``lower(doi)``, not ``doi``: the unique index is
+        # ``sources_doi_key ON sources (lower(doi)) WHERE doi IS NOT NULL`` —
+        # case-insensitive because the same paper arrives from different
+        # providers with differently-cased DOIs (DESIGN.md §4). Postgres matches
+        # an ON CONFLICT target against the index *expression*, so inferring on
+        # the bare column finds no index and raises InvalidColumnReferenceError.
         index_elements = (
-            [Source.doi] if conflict == "doi" else [Source.pmid]
+            [func.lower(Source.doi)] if conflict == "doi" else [Source.pmid]
         )
         index_where = (
             Source.doi.isnot(None) if conflict == "doi" else Source.pmid.isnot(None)

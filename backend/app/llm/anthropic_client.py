@@ -2,16 +2,25 @@
 
 Model choices and constraints, for reviewers unfamiliar with this API surface:
 
-* ``claude-opus-5`` for both calls.
+* **The two calls run on different models**, because they are different jobs.
+  Extraction is a short, mechanical structured response — a small model is
+  sufficient. Synthesis is where the product's guarantees live: it must cite
+  only supplied handles (invariant #2) and keep its verdict under the evidence
+  ceiling (invariant #3), so it gets the stronger model. Both are config, not
+  constants — see ``settings.extraction_model`` / ``settings.synthesis_model``.
 * Structured outputs via ``messages.parse(output_format=...)``. The response is
   constrained to the Pydantic schema and comes back as a validated instance,
-  which eliminates malformed-JSON handling entirely.
-* ``temperature`` / ``top_p`` / ``top_k`` are **rejected** by this model — a
-  request carrying them returns a 400. Behaviour is steered by prompt only.
-  (If you have used earlier Claude models, this is the surprising one.)
-* Thinking is on by default and ``max_tokens`` caps thinking **plus** visible
-  output. Synthesis is therefore given 8K even though the article is ~300
-  words; sizing ``max_tokens`` to the article would truncate mid-response.
+  which eliminates malformed-JSON handling entirely. Supported on every model
+  named below; verify before configuring an older one.
+* ``temperature`` / ``top_p`` / ``top_k`` are **rejected** on Opus 5 and
+  Sonnet 5 — a request carrying them returns a 400. Behaviour is steered by
+  prompt only. (Older/smaller models still accept them; this code sends none
+  either way, so it is safe across the range.)
+* ``max_tokens`` caps thinking **plus** visible output on models where thinking
+  is on by default (Opus 5, Sonnet 5). Synthesis is therefore given 8K even
+  though the article is ~300 words; sizing ``max_tokens`` to the article would
+  truncate mid-response. Both calls always pass an explicit cap — never rely on
+  a default.
 * The system prompt is byte-stable across every call and carries the
   ``cache_control`` breakpoint. Anything per-article goes in the user turn,
   after it — a single volatile byte in the prefix would invalidate the cache
@@ -44,8 +53,13 @@ from app.llm.prompts.synthesis import (
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-opus-5"
+# Defaults only — the orchestrator passes settings.extraction_model /
+# settings.synthesis_model. Split by job: extraction is mechanical, synthesis
+# carries the grounding and verdict-ceiling guarantees.
+EXTRACTION_MODEL = "claude-haiku-4-5"
+SYNTHESIS_MODEL = "claude-sonnet-5"
 
+# Every call passes an explicit cap; there is no unbounded request in this file.
 # Extraction is a short structured response; synthesis needs headroom for
 # thinking on top of a ~300-word article.
 EXTRACTION_MAX_TOKENS = 2_000
@@ -95,7 +109,7 @@ def _check_refusal(response: Any, call: str) -> None:
 class AnthropicExtractionClient:
     """LLM call 1 — claim and ingredient extraction."""
 
-    def __init__(self, client: AsyncAnthropic, model: str = MODEL) -> None:
+    def __init__(self, client: AsyncAnthropic, model: str = EXTRACTION_MODEL) -> None:
         self._client = client
         self._model = model
 
@@ -134,7 +148,7 @@ class AnthropicExtractionClient:
 class AnthropicSynthesisClient:
     """LLM call 2 — the RAG generation."""
 
-    def __init__(self, client: AsyncAnthropic, model: str = MODEL) -> None:
+    def __init__(self, client: AsyncAnthropic, model: str = SYNTHESIS_MODEL) -> None:
         self._client = client
         self._model = model
 

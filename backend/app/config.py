@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     debug: bool = False
 
     # --- database ---
-    database_url: str = "postgresql+asyncpg://evidwell:evidwell@localhost:5432/evidwell"
+    database_url: str = "postgresql+asyncpg://evidwell:evidwell@localhost:5433/evidwell"
     db_echo: bool = False
 
     # --- auth ---
@@ -37,7 +37,18 @@ class Settings(BaseSettings):
 
     # --- Claude ---
     anthropic_api_key: str = ""
-    llm_model: str = "claude-opus-5"
+    #: Split by job, not by tier-for-its-own-sake. Extraction is a short,
+    #: mechanical structured response. Synthesis is where invariants #2 and #3
+    #: are produced, so it keeps the stronger model — raise it back to
+    #: "claude-opus-5" if drafts start failing citation or grade validation.
+    #: Measured, not assumed: claude-haiku-4-5 left `ingredients` empty in 9 of
+    #: 10 samples, and an empty ingredient list silently unanchors the PubMed
+    #: query (query_builder._compose falls back to claim keywords, turning
+    #: "ashwagandha for stress" into a search for stress in general).
+    #: claude-sonnet-5 was 0/10 on the same test. Do not lower this without
+    #: re-running that check.
+    extraction_model: str = "claude-sonnet-5"
+    synthesis_model: str = "claude-sonnet-5"
 
     # --- embeddings ---
     embedding_provider: str = "voyage"  # 'voyage' | 'openai'
