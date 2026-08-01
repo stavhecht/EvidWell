@@ -18,7 +18,7 @@ from app.llm.embeddings.base import EmbeddingError
 
 logger = logging.getLogger(__name__)
 
-VOYAGE_MODEL = "voyage-3"
+VOYAGE_MODEL = "voyage-4"
 VOYAGE_DIMENSION = 1024
 
 # Voyage caps documents per request; abstracts are short enough that the batch

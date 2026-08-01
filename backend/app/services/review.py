@@ -104,15 +104,28 @@ class ReviewService:
         await self._session.flush()
         logger.info("article %s published by reviewer %s", article_id, reviewer_id)
 
+    #: States a draft can be rejected from.
+    #:
+    #: ``validation_failed`` is included because rejection is the only way a
+    #: draft leaves the queue — there is no delete — and without it those
+    #: drafts have no available action at all and accumulate in their tab
+    #: forever. They are still never approvable; this is the discard path, not
+    #: a route around invariant #2.
+    _REJECTABLE = frozenset(
+        {ArticleStatus.PENDING_REVIEW, ArticleStatus.VALIDATION_FAILED}
+    )
+
     async def reject(self, article_id: str, reviewer_id: str, reason: str) -> None:
         """Reject a draft. Terminal, with a required reason.
 
         There is no delete: rejection is a recorded state. The reasons drafts
         get rejected are the highest-value signal available for improving the
-        synthesis prompt, and deleting them throws that away.
+        synthesis prompt, and deleting them throws that away. That argument
+        applies with most force to ``validation_failed`` drafts, which is why
+        discarding one records a reason rather than removing the row.
         """
         article = await self._get(article_id)
-        if article.status != ArticleStatus.PENDING_REVIEW:
+        if article.status not in self._REJECTABLE:
             raise ReviewError(
                 f"cannot reject an article in state '{article.status}'"
             )

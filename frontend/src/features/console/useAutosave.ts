@@ -33,7 +33,14 @@ export interface Autosave {
   /** True while an edit has not yet been persisted. Gates Approve. */
   hasUnsavedChanges: boolean;
   schedule: (doc: TipTapDoc) => void;
-  flush: () => Promise<void>;
+  /**
+   * Persist immediately. Resolves `true` when nothing is left pending.
+   *
+   * The boolean exists because `hasUnsavedChanges` is React state: a caller
+   * that awaits `flush()` still holds the value from its own render and cannot
+   * tell whether the save it just awaited actually landed.
+   */
+  flush: () => Promise<boolean>;
 }
 
 export function useAutosave(articleId: string): Autosave {
@@ -50,7 +57,9 @@ export function useAutosave(articleId: string): Autosave {
       timer.current = null;
     }
     const doc = pending.current;
-    if (!doc || inFlight.current) return;
+    if (!doc) return true;
+    // A save is already running; its own completion decides the outcome.
+    if (inFlight.current) return false;
 
     inFlight.current = true;
     setState("saving");
@@ -62,10 +71,12 @@ export function useAutosave(articleId: string): Autosave {
         setHasUnsavedChanges(false);
       }
       setState("saved");
+      return pending.current === null;
     } catch {
       // Keep `pending` so the next schedule() or flush() retries the edit
       // rather than silently discarding the reviewer's work.
       setState("error");
+      return false;
     } finally {
       inFlight.current = false;
     }

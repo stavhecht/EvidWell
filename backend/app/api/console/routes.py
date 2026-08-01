@@ -191,7 +191,13 @@ async def reject(
     session: SessionDep,
     reviewer: ReviewerDep,
 ) -> None:
-    """Reject with a required reason. Terminal."""
+    """Reject with a required reason. Terminal.
+
+    Reachable from ``pending_review`` and from ``validation_failed``. The
+    latter is the console's discard action: with no DELETE on articles this is
+    the only way a draft leaves a queue tab, and a failed draft with no
+    available action simply accumulates.
+    """
     try:
         await ReviewService(session).reject(article_id, reviewer.id, payload.reason)
     except ReviewError as exc:

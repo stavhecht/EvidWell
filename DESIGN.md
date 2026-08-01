@@ -145,21 +145,42 @@ abstracts. `EmbeddingProvider` is a Protocol with one method, so OpenAI is a con
 changing it is a table migration and an index rebuild, not a config change. The migration
 templates the dimension.
 
-### 3.6 LLM: Claude Opus 5, structured outputs, no sampling params
+### 3.6 LLM: a model per job, structured outputs, no sampling params
 
-Both generative calls use `claude-opus-5` via `client.messages.parse()` with a Pydantic
-`output_format`, which constrains the response to the schema and hands back a validated model
-instance. This removes a whole class of failure (malformed JSON, missing keys) before our own
-validation runs.
+Both generative calls go through `client.messages.parse()` with a Pydantic `output_format`,
+which constrains the response to the schema and hands back a validated model instance. This
+removes a whole class of failure (malformed JSON, missing keys) before our own validation runs.
+
+**The two calls run on different models, because they are different jobs:**
+
+| Call | Model | Why |
+|---|---|---|
+| Extraction | `claude-haiku-4-5` | Topic → product + claims. Short, mechanical, schema-constrained. A failure here is loud and cheap: the schema rejects it, or retrieval returns nothing. |
+| Synthesis | `claude-sonnet-5` | Where the guarantees are produced. Must cite only supplied `S`-handles (#2) and keep the verdict under the evidence ceiling (#3). A failure here is the expensive kind. |
+
+Both are config (`settings.extraction_model` / `settings.synthesis_model`), not constants.
+**If drafts start landing in `validation_failed`, raise the synthesis model first** — that is
+the signal this split was too aggressive, and `pipeline_runs` records it per stage.
+
+Note the asymmetry is deliberate: validation is a hard post-check that no model talks its way
+past, so a weaker synthesis model degrades *yield* (more rejected drafts), not *correctness*.
+That is the property that makes downgrading safe to try at all.
 
 Notes that matter for implementation:
-- `temperature` / `top_p` / `top_k` are **rejected** on this model. Behaviour is steered by
-  prompt only.
-- Thinking is on by default. `max_tokens` caps thinking **plus** output, so synthesis is sized
-  generously (8K) even though the article is ~300 words.
+- `temperature` / `top_p` / `top_k` are **rejected** on Opus 5 and Sonnet 5 — a request
+  carrying them returns a 400. We send none on either call, so the code is safe across the
+  whole model range. Behaviour is steered by prompt only.
+- Thinking is on by default on Sonnet 5 and Opus 5, and `max_tokens` caps thinking **plus**
+  output — so synthesis is sized generously (8K) even though the article is ~300 words.
+  Every call passes an explicit cap; there is no unbounded request in the codebase.
 - The synthesis system prompt is stable across calls and marked with `cache_control`; the
-  per-article source block is volatile and goes after it. Minimum cacheable prefix on this
-  model is 512 tokens, which the system prompt clears comfortably.
+  per-article source block is volatile and goes after it. **The minimum cacheable prefix is
+  per-model and not monotonic** — 512 tokens on Opus 5, 1024 on Sonnet 5, 4096 on Haiku 4.5 —
+  and a prompt below it silently fails to cache, with no error. Measured with
+  `messages.count_tokens`: the synthesis prompt is **1285 tokens**, so it still caches on
+  Sonnet 5, but with only ~260 tokens of headroom — trimming it would silently break caching.
+  The extraction prompt is **306 tokens** and caches on no model; it never did on Opus 5
+  either (512 minimum), so that is not a regression, and at 306 tokens it does not matter.
 
 ---
 
@@ -314,6 +335,12 @@ it, reword it, or drop it.
 States: `pending_review` → `published` | `rejected`, plus `validation_failed` as a terminal
 pre-queue state and `draft_failed` for pipeline errors.
 
+`validation_failed` → `rejected` is also allowed, and it is the console's "discard" action.
+Since there is no delete, rejection is the only way a draft leaves a queue tab; without this
+edge, failed drafts have no available action at all and accumulate forever in the tab that
+exists to make prompt regressions visible. They are still never approvable — the discard path
+records a reason, it does not route around invariant #2.
+
 The review screen is the editor and the sources panel side by side:
 
 - **Sources panel** lists each paper's title, journal, year, study type, and a direct DOI/PMID
@@ -353,7 +380,7 @@ Full request/response models are in `backend/app/api/*/schemas.py`. Summary:
 | `GET` | `/api/console/articles/{id}` | Draft + sources + validation report |
 | `PATCH` | `/api/console/articles/{id}/content` | Autosave into `edited_content` |
 | `POST` | `/api/console/articles/{id}/approve` | → `published` |
-| `POST` | `/api/console/articles/{id}/reject` | → `rejected` (reason required) |
+| `POST` | `/api/console/articles/{id}/reject` | → `rejected` (reason required); also the discard path from `validation_failed` |
 | `POST` | `/api/console/pipeline/runs` | Enqueue a topic |
 | `GET` | `/api/console/pipeline/runs` | Run history + per-stage status |
 | `GET` | `/api/console/pipeline/runs/{id}` | One run, all stages, errors, token cost |

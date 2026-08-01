@@ -13,11 +13,11 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, Trash2 } from "lucide-react";
 
-import { consoleKeys, createRun, fetchQueue } from "@/lib/api/console";
+import { consoleKeys, createRun, fetchQueue, rejectArticle } from "@/lib/api/console";
 import { VerdictBadge } from "@/features/feed/VerdictBadge";
-import type { ArticleStatus } from "@/types/api";
+import type { ArticleStatus, QueueItem } from "@/types/api";
 import { useAuth } from "./auth";
 
 const TABS: { status: ArticleStatus; label: string }[] = [
@@ -77,31 +77,77 @@ export function ReviewQueue() {
       ) : (
         <ul className="divide-y divide-stone-200">
           {data?.items.map((item) => (
-            <li key={item.id} className="py-3">
-              <Link
-                to={`/console/review/${item.id}`}
-                className="block rounded-lg px-2 py-1 hover:bg-stone-50"
-              >
-                <div className="flex flex-wrap items-center gap-2">
-                  <VerdictBadge verdict={item.verdict} size="sm" />
-                  <span className="text-xs text-stone-500">
-                    {item.validationBadge}
-                  </span>
-                  {item.hasWeakEvidence ? (
-                    <span className="flex items-center gap-1 text-xs text-verdict-weak">
-                      <AlertTriangle size={12} aria-hidden />
-                      rests on weak study types
-                    </span>
-                  ) : null}
-                </div>
-                <p className="mt-1 font-medium text-stone-900">{item.headline}</p>
-                <p className="text-sm text-stone-500">{item.topic}</p>
-              </Link>
-            </li>
+            <QueueRow key={item.id} item={item} tab={status} />
           ))}
         </ul>
       )}
     </div>
+  );
+}
+
+/**
+ * One queue row, with its discard action.
+ *
+ * The action sits *beside* the link rather than inside it — a button nested in
+ * an anchor is invalid markup and swallows the click on some browsers.
+ *
+ * Discard is a rejection, not a delete. There is no DELETE on articles by
+ * design: the reason a draft was thrown away is the best available signal for
+ * fixing the synthesis prompt. Rejected rows stay readable under the Rejected
+ * tab. It is offered on validation_failed too, because otherwise those drafts
+ * have no action at all and pile up in a tab nobody can clear.
+ */
+function QueueRow({ item, tab }: { item: QueueItem; tab: ArticleStatus }) {
+  const queryClient = useQueryClient();
+  const [error, setError] = useState<string | null>(null);
+
+  const discardable = tab === "pending_review" || tab === "validation_failed";
+
+  const discard = useMutation({
+    mutationFn: (reason: string) => rejectArticle(item.id, reason),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["console"] }),
+    onError: () => setError("Could not discard this draft."),
+  });
+
+  return (
+    <li className="flex items-start gap-2 py-3">
+      <Link
+        to={`/console/review/${item.id}`}
+        className="min-w-0 flex-1 rounded-lg px-2 py-1 hover:bg-stone-50"
+      >
+        <div className="flex flex-wrap items-center gap-2">
+          <VerdictBadge verdict={item.verdict} size="sm" />
+          <span className="text-xs text-stone-500">{item.validationBadge}</span>
+          {item.hasWeakEvidence ? (
+            <span className="flex items-center gap-1 text-xs text-verdict-weak">
+              <AlertTriangle size={12} aria-hidden />
+              rests on weak study types
+            </span>
+          ) : null}
+        </div>
+        <p className="mt-1 font-medium text-stone-900">{item.headline}</p>
+        <p className="text-sm text-stone-500">{item.topic}</p>
+        {error ? <p className="mt-1 text-xs text-verdict-weak">{error}</p> : null}
+      </Link>
+
+      {discardable ? (
+        <button
+          onClick={() => {
+            setError(null);
+            const reason = window.prompt(
+              `Reason for discarding “${item.headline}” (required)`,
+            );
+            if (reason?.trim()) discard.mutate(reason.trim());
+          }}
+          disabled={discard.isPending}
+          title="Moves this draft to Rejected. The reason is kept."
+          aria-label={`Discard ${item.headline}`}
+          className="mt-1 shrink-0 rounded-lg border border-stone-300 p-1.5 text-stone-500 transition hover:bg-stone-50 hover:text-verdict-weak disabled:opacity-40"
+        >
+          <Trash2 size={14} aria-hidden />
+        </button>
+      ) : null}
+    </li>
   );
 }
 

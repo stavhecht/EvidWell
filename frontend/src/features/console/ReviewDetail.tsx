@@ -18,6 +18,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
+import { ArrowLeft } from "lucide-react";
 
 import { ApiError } from "@/lib/api/client";
 import {
@@ -76,41 +77,80 @@ export function ReviewDetail() {
   }
 
   const canApprove = article.status === "pending_review";
+  // Rejection is the only way a draft leaves the queue — there is no delete —
+  // so it has to be reachable from validation_failed too, or those drafts have
+  // no available action at all. They remain unapprovable.
+  const canDiscard = canApprove || article.status === "validation_failed";
   const blockedByUnsaved = autosave.state === "error";
+
+  /**
+   * Leaving flushes first. Unmount flushes too, but that fires after the route
+   * has already changed — if the save then fails there is no screen left to
+   * report it on, and the reviewer walks away believing an edit was kept.
+   */
+  async function goBack() {
+    const saved = await autosave.flush();
+    if (!saved) {
+      const leave = window.confirm(
+        "Some edits could not be saved. Leave anyway and lose them?",
+      );
+      if (!leave) return;
+    }
+    void navigate("/console");
+  }
 
   return (
     <div className="flex h-screen flex-col">
       <header className="border-b border-stone-200 px-4 py-3">
         <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0">
-            <h1 className="truncate font-semibold text-stone-900">
-              {article.headline}
-            </h1>
-            <div className="mt-1 flex flex-wrap items-center gap-2">
-              <VerdictBadge
-                verdict={article.verdict}
-                qualifier={article.verdictQualifier}
-                size="sm"
-              />
-              <span className="text-xs text-stone-500">{article.topic}</span>
-              {!canApprove ? (
-                <span className="rounded bg-stone-100 px-1.5 py-0.5 text-xs text-stone-600">
-                  {article.status.replace("_", " ")}
-                </span>
-              ) : null}
+          <div className="flex min-w-0 items-start gap-3">
+            <button
+              onClick={() => void goBack()}
+              aria-label="Back to review queue"
+              className="mt-0.5 shrink-0 rounded-lg border border-stone-300 p-1.5 text-stone-600 transition hover:bg-stone-50 hover:text-stone-900"
+            >
+              <ArrowLeft size={16} aria-hidden />
+            </button>
+            <div className="min-w-0">
+              <h1 className="truncate font-semibold text-stone-900">
+                {article.headline}
+              </h1>
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                <VerdictBadge
+                  verdict={article.verdict}
+                  qualifier={article.verdictQualifier}
+                  size="sm"
+                />
+                <span className="text-xs text-stone-500">{article.topic}</span>
+                {!canApprove ? (
+                  <span className="rounded bg-stone-100 px-1.5 py-0.5 text-xs text-stone-600">
+                    {article.status.replace("_", " ")}
+                  </span>
+                ) : null}
+              </div>
             </div>
           </div>
 
           <div className="flex shrink-0 gap-2">
             <button
               onClick={() => {
-                const reason = window.prompt("Reason for rejection (required)");
+                setActionError(null);
+                const reason = window.prompt(
+                  canApprove
+                    ? "Reason for rejection (required)"
+                    : "Reason for discarding this draft (required)",
+                );
                 if (reason?.trim()) reject.mutate(reason.trim());
               }}
-              disabled={!canApprove || reject.isPending}
+              disabled={!canDiscard || reject.isPending}
               className="rounded-lg border border-stone-300 px-3 py-1.5 text-sm disabled:opacity-40"
+              title={
+                canDiscard
+                  ? "Removes this draft from the queue. The reason is kept."
+                  : "Already resolved"
+              }
             >
-              Reject
+              {canApprove ? "Reject" : "Discard"}
             </button>
             <button
               onClick={() => {
