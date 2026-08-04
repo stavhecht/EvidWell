@@ -96,17 +96,32 @@ class CandidatePaper(BaseModel):
 
     @property
     def dedup_key(self) -> str:
-        """Cross-provider identity.
+        """Cross-provider identity. The first of :attr:`identity_keys`.
 
         DOI, then PMID, then a normalised title. The same paper routinely
         arrives from three providers with three different identifier subsets,
         so the fallback chain matters more than it looks.
         """
+        return self.identity_keys[0]
+
+    @property
+    def identity_keys(self) -> list[str]:
+        """*Every* key this paper could be recognised by, strongest first.
+
+        A single key is not enough to match across providers. PubMed can return
+        a record with a PMID and no DOI while OpenAlex returns the same paper
+        with both — one would key on ``pmid:``, the other on ``doi:``, and
+        matching on ``dedup_key`` alone would treat them as two studies. Two
+        handles for one paper is the failure that makes thin evidence look
+        corroborated, so the merge matches on any shared key.
+        """
+        keys = []
         if self.doi:
-            return f"doi:{self.doi.strip().lower()}"
+            keys.append(f"doi:{self.doi.strip().lower()}")
         if self.pmid:
-            return f"pmid:{self.pmid.strip()}"
-        return "title:" + re.sub(r"[^a-z0-9]+", "", self.title.lower())
+            keys.append(f"pmid:{self.pmid.strip()}")
+        keys.append("title:" + re.sub(r"[^a-z0-9]+", "", self.title.lower()))
+        return keys
 
 
 class RankedSource(BaseModel):

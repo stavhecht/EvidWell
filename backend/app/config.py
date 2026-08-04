@@ -9,10 +9,22 @@ write — or worse, as silently degraded retrieval.
 
 from __future__ import annotations
 
+import json
 from functools import lru_cache
+from typing import Annotated
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+#: A list field that accepts `a,b,c` as well as a JSON array.
+#:
+#: ``NoDecode`` is load-bearing, not decoration. pydantic-settings treats any
+#: complex-typed field as JSON and calls ``json.loads`` inside the dotenv
+#: *source*, which is upstream of every validator — so a plain
+#: ``mode="before"`` validator never sees the value, and `FOO=a,b` raises
+#: SettingsError before it can be split. ``NoDecode`` suppresses that decode and
+#: hands the raw string to `_split_csv` below.
+CsvList = Annotated[list[str], NoDecode]
 
 
 class Settings(BaseSettings):
@@ -33,7 +45,7 @@ class Settings(BaseSettings):
         min_length=32,
         description="HS256 signing key",
     )
-    cors_origins: list[str] = ["http://localhost:5173"]
+    cors_origins: CsvList = ["http://localhost:5173"]
 
     # --- Claude ---
     anthropic_api_key: str = ""
@@ -63,7 +75,7 @@ class Settings(BaseSettings):
     openalex_mailto: str = ""
     #: Providers enabled for retrieval. Phase 1 runs PubMed alone by design —
     #: one API learned properly beats four half-integrated.
-    enabled_providers: list[str] = ["pubmed"]
+    enabled_providers: CsvList = ["pubmed"]
     http_timeout_seconds: float = 30.0
 
     # --- retrieval tuning ---
@@ -78,10 +90,22 @@ class Settings(BaseSettings):
     @field_validator("cors_origins", "enabled_providers", mode="before")
     @classmethod
     def _split_csv(cls, value: object) -> object:
-        """Allow comma-separated env values as well as JSON lists."""
-        if isinstance(value, str) and not value.strip().startswith("["):
-            return [item.strip() for item in value.split(",") if item.strip()]
-        return value
+        """Allow comma-separated env values as well as JSON lists.
+
+        These fields are ``CsvList``, so pydantic-settings hands the raw string
+        over undecoded and both forms have to be handled here — including the
+        JSON one, which nothing upstream will parse any more.
+        """
+        if not isinstance(value, str):
+            return value
+
+        text = value.strip()
+        if text.startswith("["):
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"not valid JSON: {value!r}") from exc
+        return [item.strip() for item in text.split(",") if item.strip()]
 
     def validate_embedding_dim(self, provider_dimension: int) -> None:
         """Fail fast when the configured width disagrees with the provider.
