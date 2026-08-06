@@ -14,6 +14,7 @@ dependencies = [
     "pgvector>=0.3.6",
     "httpx>=0.28",
     "anthropic>=0.69",
+    "ollama>=0.4",
     "voyageai>=0.3",
     "pyjwt>=2.10",
     "argon2-cffi>=23.1",
@@ -52,6 +53,14 @@ testpaths = ["tests"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
+
+# `openai` is an optional extra and is normally not installed — the guarded
+# imports in llm/embeddings/openai.py are the point, not an oversight. Declared
+# here rather than as per-line ignores because those would themselves go stale
+# the moment someone does install the extra.
+[[tool.mypy.overrides]]
+module = ["openai.*"]
+ignore_missing_imports = true
 
 [tool.ruff.lint.per-file-ignores]
 # Prose in docstrings legitimately uses en/em dashes and typographic quotes.

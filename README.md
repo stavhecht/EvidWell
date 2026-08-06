@@ -30,9 +30,9 @@ enforced, retrieval design, AI contracts, API surface, and the phased roadmap.
 backend/
   app/
     domain/        contracts.py is the spec — every stage's input/output
-    llm/           Claude clients + the two prompt templates
+    llm/           Ollama + Claude clients, factory, and the two prompt templates
       prompts/     extraction.py, synthesis.py
-      embeddings/  swappable provider (Voyage default, OpenAI documented)
+      embeddings/  swappable provider (Ollama default, Voyage/OpenAI hosted)
     retrieval/     scholarly providers, query building, cache, pgvector re-rank
     evidence/      study-type grading, verdict caps, citation validation
     pipeline/      six stages, orchestrator, local worker
@@ -51,8 +51,13 @@ frontend/
 ## Quickstart
 
 ```bash
-cp .env.example .env          # add ANTHROPIC_API_KEY and VOYAGE_API_KEY
+cp backend/.env.example backend/.env    # defaults are local-only; no key needed
 docker compose up -d db
+
+# Every model call runs locally by default (LLM_PROVIDER=ollama,
+# EMBEDDING_PROVIDER=ollama). Pull the two models once:
+ollama pull llama3.1:8b          # both generative calls
+ollama pull mxbai-embed-large    # embeddings, 1024-d to match EMBEDDING_DIM
 
 cd backend
 python -m venv .venv && source .venv/bin/activate
@@ -74,6 +79,32 @@ cd ../frontend && npm install && npm run dev   # web on :5173, console at /conso
 Then sign in at `/console`, enter a topic such as `ashwagandha for stress`, and
 the worker will produce a draft for review. Nothing it produces can publish
 itself.
+
+## Model providers
+
+Both the generative calls and the embeddings sit behind Protocols
+(`llm/base.py`, `llm/embeddings/base.py`), and the concrete client is chosen in
+one place per call type — `llm/factory.py` and `llm/embeddings/factory.py`. So
+the local/hosted switch is config, not a refactor:
+
+| | local (default) | hosted |
+|---|---|---|
+| `LLM_PROVIDER` | `ollama` — free, offline, no key | `anthropic` — `ANTHROPIC_API_KEY` + `EXTRACTION_MODEL`/`SYNTHESIS_MODEL` |
+| `EMBEDDING_PROVIDER` | `ollama` — `mxbai-embed-large`, 1024-d | `voyage` / `openai` |
+
+Two caveats when you make the switch:
+
+- **Local quality is not hosted quality.** An 8B model extracts thinner claim
+  lists and fails citation validation more often. The invariants still hold —
+  a draft that fails validation is written as `validation_failed` and never
+  reaches the review queue — you will just see more of them. Point
+  `OLLAMA_SYNTHESIS_MODEL` at a larger local model if that gets noisy.
+- **Changing the embedding provider needs a re-embed**, because vectors from
+  different models are not comparable and the failure is silent. `sources.
+  embedding_model` records which model produced each vector (local ones are
+  namespaced `ollama/…`), so the cache re-embeds on mismatch — but the backfill
+  is yours to run. `mxbai-embed-large` and `voyage-4` are both 1024-d, so that
+  particular move is a re-embed and not also a migration.
 
 ## Verification status
 
