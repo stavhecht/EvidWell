@@ -51,9 +51,20 @@ class SourceCache:
         last-seen, and any newly-available identifier are updated, but
         ``embedding`` and ``abstract`` are left alone. Overwriting the embedding
         would discard the cache benefit this class exists to provide.
+
+        Callers may pass the same paper twice — candidates are collected per
+        claim, and one paper routinely answers several claims. Postgres rejects
+        an ON CONFLICT DO UPDATE whose statement proposes two rows with the same
+        conflict key (CardinalityViolationError), so collapse on ``dedup_key``
+        here rather than trusting every caller to have done it.
         """
         if not papers:
             return []
+
+        by_dedup_key: dict[str, CandidatePaper] = {}
+        for paper in papers:
+            by_dedup_key.setdefault(paper.dedup_key, paper)
+        papers = list(by_dedup_key.values())
 
         with_doi = [paper for paper in papers if paper.doi]
         without_doi = [paper for paper in papers if not paper.doi and paper.pmid]

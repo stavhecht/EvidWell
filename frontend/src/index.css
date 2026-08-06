@@ -1,3 +1,16 @@
+/* Load order matters and is not arbitrary:
+ *
+ *   1. `design-system.css` declares the Modernist `:root` tokens. Custom
+ *      properties are immune to Tailwind's preflight, so they can sit first.
+ *   2. `@tailwind base` (preflight) then resets elements.
+ *   3. `evidwell.css` wraps its rules in `@layer base`, which Tailwind hoists
+ *      to the *end* of the base layer — after preflight, so the theme wins.
+ *
+ * Swapping (1) and (3) would leave `body` reset to white on every load.
+ */
+@import "./styles/design-system.css";
+@import "./styles/evidwell.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

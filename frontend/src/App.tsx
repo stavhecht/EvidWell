@@ -17,6 +17,8 @@ import { Suspense, lazy } from "react";
 import { Route, Routes } from "react-router-dom";
 
 import { AuthProvider } from "./features/console/auth";
+import { SiteHeader } from "./features/shell/SiteHeader";
+import { ROUTE_MESSAGE } from "./features/shell/styles";
 import { ArticleRoute } from "./routes/article";
 import { FeedRoute } from "./routes/feed";
 
@@ -32,6 +34,10 @@ const ConsoleRoutes = lazy(() => import("./routes/console"));
 export function App() {
   return (
     <AuthProvider>
+      {/* The one piece of chrome both groups share — the Next.js root layout.
+          It is rendered above the router rather than per-route so the sticky
+          bar does not remount (and lose its scroll position) on navigation. */}
+      <SiteHeader />
       <Routes>
         <Route path="/" element={<FeedRoute />} />
         <Route path="/a/:slug" element={<ArticleRoute />} />
@@ -40,7 +46,9 @@ export function App() {
           path="/console/*"
           element={
             <Suspense
-              fallback={<p className="p-8 text-sm text-stone-500">Loading console…</p>}
+              fallback={
+                <p className={ROUTE_MESSAGE}>Loading console…</p>
+              }
             >
               <ConsoleRoutes />
             </Suspense>

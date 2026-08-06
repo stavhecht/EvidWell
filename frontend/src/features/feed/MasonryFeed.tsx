@@ -1,10 +1,15 @@
 /**
- * The public masonry feed.
+ * The public masonry grid.
  *
  * Virtualised with `masonic`, which only renders cards near the viewport. That
  * matters more here than in a typical grid: this feed is designed to grow
  * indefinitely and cards are variable-height, so an unvirtualised list degrades
  * on exactly the axis the product is meant to scale on.
+ *
+ * The design comp lays the feed out with plain CSS `column-width`, which is the
+ * simpler mechanism and produces the same picture — but CSS columns render
+ * every card in the document, so it is the one part of the comp not carried
+ * over literally. The measurements are: 320px columns, 18px gutter.
  *
  * Note for a future Next.js port (DESIGN.md §3.1): `masonic` measures DOM
  * nodes, so it is client-only. It would need `dynamic(..., { ssr: false })`
@@ -14,32 +19,39 @@
 
 import { useCallback, useEffect, useRef } from "react";
 import { Masonry } from "masonic";
-import { useInfiniteQuery } from "@tanstack/react-query";
 
-import { fetchFeed, feedKeys } from "@/lib/api/feed";
 import { ArticleCard } from "./ArticleCard";
-import type { FeedCard, Verdict } from "@/types/api";
+import {
+  CLEAR_FILTERS_ACTION,
+  FEED_STATE,
+  FEED_STATE_BODY,
+  FEED_STATE_TITLE,
+  LOADING_MORE,
+  RETRY_BUTTON,
+  SCROLL_SENTINEL,
+  SKELETON_CARD,
+  SKELETON_GRID,
+} from "./styles";
+import type { Feed } from "./useFeed";
+import type { FeedCard } from "@/types/api";
 
-interface Props {
-  verdict?: Verdict;
+interface Props extends Feed {
+  /** True when the reader has narrowed the feed, so "empty" needs a way out. */
+  filtered: boolean;
+  onClearFilters: () => void;
 }
 
-export function MasonryFeed({ verdict }: Props) {
-  const {
-    data,
-    error,
-    status,
-    fetchNextPage,
-    hasNextPage,
-    isFetchingNextPage,
-    refetch,
-  } = useInfiniteQuery({
-    queryKey: feedKeys.list(verdict),
-    queryFn: ({ pageParam }) => fetchFeed({ cursor: pageParam, verdict }),
-    initialPageParam: undefined as string | undefined,
-    getNextPageParam: (last) => last.nextCursor ?? undefined,
-  });
-
+export function MasonryFeed({
+  items,
+  status,
+  error,
+  hasNextPage,
+  isFetchingNextPage,
+  fetchNextPage,
+  refetch,
+  filtered,
+  onClearFilters,
+}: Props) {
   const sentinel = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -48,9 +60,7 @@ export function MasonryFeed({ verdict }: Props) {
 
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries[0]?.isIntersecting && !isFetchingNextPage) {
-          void fetchNextPage();
-        }
+        if (entries[0]?.isIntersecting && !isFetchingNextPage) fetchNextPage();
       },
       // Start loading before the sentinel is visible, so the next page is
       // usually in place by the time the reader reaches the bottom.
@@ -71,86 +81,80 @@ export function MasonryFeed({ verdict }: Props) {
     return (
       <ErrorState
         message={error instanceof Error ? error.message : "Could not load the feed"}
-        onRetry={() => void refetch()}
+        onRetry={refetch}
       />
     );
   }
 
-  const items = data.pages.flatMap((page) => page.items);
-  if (items.length === 0) return <EmptyState verdict={verdict} />;
+  if (items.length === 0) {
+    return <EmptyState filtered={filtered} onClearFilters={onClearFilters} />;
+  }
 
   return (
     <>
       <Masonry
         items={items}
-        columnWidth={280}
-        columnGutter={16}
+        columnWidth={320}
+        columnGutter={18}
         overscanBy={2}
         // Keyed by slug so masonic reuses cells across page appends rather
         // than remounting the whole grid on every fetch.
         itemKey={(card: FeedCard) => card.slug}
         render={renderCard}
       />
-      <div ref={sentinel} aria-hidden className="h-px" />
-      {isFetchingNextPage ? (
-        <p className="py-6 text-center text-sm text-stone-500">Loading more…</p>
-      ) : null}
+      <div ref={sentinel} aria-hidden className={SCROLL_SENTINEL} />
+      {isFetchingNextPage ? <p className={LOADING_MORE}>Loading more…</p> : null}
     </>
   );
 }
 
 /**
  * Skeleton cards rather than a spinner: a spinner collapses the layout, so the
- * page jumps when content lands. Varied heights match the real masonry shape.
+ * page jumps when content lands. Varied heights match the real masonry shape,
+ * and the 3px top rule keeps the grid's structure visible while it fills.
  */
 function FeedSkeleton() {
   const heights = [180, 140, 220, 160, 200, 150, 190, 170];
   return (
-    <div
-      className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-4"
-      aria-busy="true"
-      aria-label="Loading articles"
-    >
+    <div className={SKELETON_GRID} aria-busy="true" aria-label="Loading articles">
       {heights.map((height, index) => (
-        <div
-          key={index}
-          style={{ height }}
-          className="animate-pulse rounded-xl border border-stone-200 bg-stone-100"
-        />
+        <div key={index} style={{ height }} className={SKELETON_CARD} />
       ))}
     </div>
   );
 }
 
-function EmptyState({ verdict }: { verdict?: Verdict }) {
+function EmptyState({
+  filtered,
+  onClearFilters,
+}: {
+  filtered: boolean;
+  onClearFilters: () => void;
+}) {
   return (
-    <div className="py-16 text-center">
-      <p className="text-stone-600">
-        {verdict
-          ? "No published articles with that verdict yet."
-          : "No published articles yet."}
+    <div className={FEED_STATE}>
+      <p className={FEED_STATE_TITLE}>
+        {filtered
+          ? "Nothing published with that filter yet."
+          : "Nothing published yet."}
       </p>
-      <p className="mt-1 text-sm text-stone-500">
+      <p className={FEED_STATE_BODY}>
         Every article here is reviewed by a person before it goes live.
       </p>
+      {filtered ? (
+        <button onClick={onClearFilters} className={CLEAR_FILTERS_ACTION}>
+          Clear filters
+        </button>
+      ) : null}
     </div>
   );
 }
 
-function ErrorState({
-  message,
-  onRetry,
-}: {
-  message: string;
-  onRetry: () => void;
-}) {
+function ErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
-    <div className="py-16 text-center">
-      <p className="text-stone-700">{message}</p>
-      <button
-        onClick={onRetry}
-        className="mt-3 rounded-lg border border-stone-300 px-3 py-1.5 text-sm hover:bg-stone-50"
-      >
+    <div className={FEED_STATE}>
+      <p className={FEED_STATE_TITLE}>{message}</p>
+      <button onClick={onRetry} className={RETRY_BUTTON}>
         Try again
       </button>
     </div>

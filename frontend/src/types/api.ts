@@ -29,6 +29,17 @@ export type ArticleStatus =
   | "draft_failed";
 
 /**
+ * What kind of thing is being assessed. Drives the one chromatic axis in the
+ * design (see `features/evidence/subject.ts`).
+ *
+ * PROPOSED — the server does not send this yet. It is optional on every model
+ * below and every consumer degrades to ink when it is absent, so the field can
+ * land without a coordinated release. Shipping it needs an editor-set enum on
+ * the article model: it cannot be derived from `product`, which is free text.
+ */
+export type Subject = "supplement" | "device" | "protocol" | "food" | "topical";
+
+/**
  * TipTap document node.
  *
  * Structurally compatible with TipTap's own `JSONContent`, so documents pass
@@ -58,6 +69,8 @@ export interface FeedCard {
   verdict: Verdict;
   verdictQualifier: string | null;
   publishedAt: string;
+  /** Proposed; see {@link Subject}. Absent today. */
+  subject?: Subject | null;
 }
 
 export interface FeedPage {
@@ -96,6 +109,8 @@ export interface Article {
   evidenceGrade: StudyType;
   publishedAt: string;
   disclaimer: string;
+  /** Proposed; see {@link Subject}. Absent today. */
+  subject?: Subject | null;
 }
 
 // --- console ---------------------------------------------------------------
@@ -111,6 +126,8 @@ export interface QueueItem {
   validationBadge: string;
   hasWeakEvidence: boolean;
   createdAt: string;
+  /** Proposed; see {@link Subject}. Absent today. */
+  subject?: Subject | null;
 }
 
 export interface ReviewSource extends Source {

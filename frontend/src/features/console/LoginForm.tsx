@@ -4,12 +4,29 @@
  * The server returns one identical 401 for unknown email and wrong password,
  * and this form shows that message verbatim — narrowing it to "no such user"
  * would hand back the account enumeration the API deliberately avoids.
+ *
+ * The standfirst says what signing in commits you to rather than welcoming you:
+ * every approval is recorded against a name, and this is the screen where a
+ * reviewer takes that on.
  */
 
 import { useState, type FormEvent } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { useAuth } from "./auth";
+import {
+  FIELD_LABEL,
+  LOGIN_COLUMN,
+  LOGIN_ERROR,
+  LOGIN_FIELD,
+  LOGIN_FIELD_GROUP,
+  LOGIN_FORM,
+  LOGIN_INTRO,
+  LOGIN_PAGE,
+  LOGIN_STANDFIRST,
+  LOGIN_SUBMIT,
+  LOGIN_TITLE,
+} from "./styles";
 
 export function LoginForm() {
   const { login } = useAuth();
@@ -40,51 +57,62 @@ export function LoginForm() {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-sm flex-col justify-center px-4">
-      <h1 className="text-lg font-semibold text-stone-900">Editorial console</h1>
-      <p className="mt-1 text-sm text-stone-500">
-        Sign in to review drafts before they go live.
-      </p>
+    <main className={LOGIN_PAGE}>
+      <div className={LOGIN_COLUMN}>
+        <div className={LOGIN_INTRO}>
+          <h1 className={LOGIN_TITLE}>Editorial console</h1>
+          <p className={LOGIN_STANDFIRST}>
+            Reviewer access only. Every approval is recorded against the name you sign
+            in with, and nothing in the queue can publish without one.
+          </p>
+        </div>
 
-      <form onSubmit={onSubmit} className="mt-6 space-y-3">
-        <label className="block">
-          <span className="text-sm text-stone-700">Email</span>
+        <form onSubmit={onSubmit} className={LOGIN_FORM}>
+          <FieldLabel htmlFor="console-email">Work email</FieldLabel>
           <input
+            id="console-email"
             type="email"
             value={email}
             onChange={(event) => setEmail(event.target.value)}
             required
             autoComplete="username"
-            className="mt-1 w-full rounded-lg border border-stone-300 px-3 py-2 text-sm"
+            placeholder="you@evidwell.com"
+            className={LOGIN_FIELD}
           />
-        </label>
 
-        <label className="block">
-          <span className="text-sm text-stone-700">Password</span>
-          <input
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            required
-            autoComplete="current-password"
-            className="mt-1 w-full rounded-lg border border-stone-300 px-3 py-2 text-sm"
-          />
-        </label>
+          <div className={LOGIN_FIELD_GROUP}>
+            <FieldLabel htmlFor="console-password">Password</FieldLabel>
+            <input
+              id="console-password"
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              required
+              autoComplete="current-password"
+              className={LOGIN_FIELD}
+            />
+          </div>
 
-        {error ? (
-          <p role="alert" className="text-sm text-verdict-weak">
-            {error}
-          </p>
-        ) : null}
+          {error ? (
+            <p role="alert" className={LOGIN_ERROR}>
+              {error}
+            </p>
+          ) : null}
 
-        <button
-          type="submit"
-          disabled={pending}
-          className="w-full rounded-lg bg-stone-900 px-3 py-2 text-sm text-white disabled:opacity-40"
-        >
-          {pending ? "Signing in…" : "Sign in"}
-        </button>
-      </form>
+          <button type="submit" disabled={pending} className={LOGIN_SUBMIT}>
+            {pending ? "Signing in…" : "Sign in"}
+          </button>
+        </form>
+      </div>
     </main>
   );
 }
+
+function FieldLabel({ htmlFor, children }: { htmlFor: string; children: string }) {
+  return (
+    <label htmlFor={htmlFor} className={FIELD_LABEL}>
+      {children}
+    </label>
+  );
+}
+

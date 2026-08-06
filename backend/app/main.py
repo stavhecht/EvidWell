@@ -69,9 +69,9 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    app.include_router(public_feed.router, prefix="/api")
-    app.include_router(console_routes.auth_router, prefix="/api/console")
-    app.include_router(console_routes.router, prefix="/api/console")
+    app.include_router(public_feed.router, prefix="/api")                      # app client
+    app.include_router(console_routes.auth_router, prefix="/api/console")     # login
+    app.include_router(console_routes.router, prefix="/api/console")           # reviewer
 
     @app.exception_handler(ReviewError)
     async def _review_error(_: Request, exc: ReviewError) -> JSONResponse:
