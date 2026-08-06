@@ -19,15 +19,19 @@ from typing import TYPE_CHECKING
 
 from app.llm.embeddings.base import EmbeddingError
 
+# `openai` is an optional extra (pip install -e ".[openai]") and is normally
+# NOT installed — the default stack is local Ollama. So every reference to it
+# here is guarded, and the type-checker ignores mean "absent by design", not
+# "unresolved import". Importing this module must stay free: the embeddings
+# factory imports it lazily, but selecting Ollama or Voyage cannot require the
+# OpenAI package to be present.
 if TYPE_CHECKING:
-    from openai import AsyncOpenAI
+    from openai import AsyncOpenAI  # ty: ignore[unresolved-import]
 
-# `openai` is an optional extra (pip install -e ".[openai]"). Importing this
-# module must not fail when it is absent, or selecting Voyage would still
-# require the OpenAI package to be installed.
 try:  # pragma: no cover - trivial import guard
-    from openai import OpenAIError
+    from openai import OpenAIError  # ty: ignore[unresolved-import]
 except ModuleNotFoundError:  # pragma: no cover
+
     class OpenAIError(Exception):  # type: ignore[no-redef]
         """Placeholder so `except` clauses below stay valid without openai."""
 
@@ -82,12 +86,14 @@ class OpenAIEmbeddingProvider:
             response = await self._client.embeddings.create(input=[text], model=self._model)
         except OpenAIError as exc:
             raise EmbeddingError(f"openai embed_query failed: {exc}") from exc
-        return response.data[0].embedding
+        # Coerced like the Voyage and Ollama providers do, so the vector handed
+        # to pgvector has one consistent element type whichever provider is live.
+        return [float(value) for value in response.data[0].embedding]
 
 
 def build_openai_provider(api_key: str) -> OpenAIEmbeddingProvider:
     try:
-        from openai import AsyncOpenAI
+        from openai import AsyncOpenAI  # ty: ignore[unresolved-import]
     except ModuleNotFoundError as exc:  # pragma: no cover
         raise EmbeddingError(
             "embedding_provider='openai' requires the optional dependency: "

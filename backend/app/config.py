@@ -35,7 +35,27 @@ class Settings(BaseSettings):
     )
     cors_origins: list[str] = ["http://localhost:5173"]
 
-    # --- Claude ---
+    # --- generative provider ---
+    #: 'ollama' | 'anthropic'. Ollama is the default while the pipeline is being
+    #: built: every generative call runs locally, costs nothing, and needs no
+    #: key. Set LLM_PROVIDER=anthropic for real deployment — the hosted client
+    #: is fully wired and nothing else changes. See llm/factory.py.
+    llm_provider: str = "ollama"          # "ollama" | "anthropic"
+
+    # --- Ollama (local, free) ---
+    ollama_base_url: str = "http://localhost:11434"
+    #: Minutes, not seconds: a cold model is loaded into memory before the first
+    #: token, and a CPU-only synthesis turn over eight abstracts is slow.
+    ollama_timeout_seconds: float = 600.0
+    #: Both default to the same small model. Extraction is mechanical enough to
+    #: survive it; synthesis is where a bigger local model
+    #: (qwen2.5:14b-instruct, llama3.3:70b) actually shows, since that call
+    #: carries invariants #2 and #3. Pull whatever you set here first —
+    #: `ollama pull llama3.1:8b`.
+    ollama_extraction_model: str = "llama3.1:8b"
+    ollama_synthesis_model: str = "llama3.1:8b"
+
+    # --- Claude (hosted; used when llm_provider='anthropic') ---
     anthropic_api_key: str = ""
     #: Split by job, not by tier-for-its-own-sake. Extraction is a short,
     #: mechanical structured response. Synthesis is where invariants #2 and #3
@@ -51,9 +71,17 @@ class Settings(BaseSettings):
     synthesis_model: str = "claude-sonnet-5"
 
     # --- embeddings ---
-    embedding_provider: str = "voyage"  # 'voyage' | 'openai'
+    embedding_provider: str = "ollama"  # 'ollama' | 'voyage' | 'openai'
     voyage_api_key: str = ""
     openai_api_key: str = ""
+    #: mxbai-embed-large is the local default because it is 1024-d, the same
+    #: width as voyage-4 — so the move from local to hosted embeddings is a
+    #: re-embed but not a migration. A 768-d model is both.
+    ollama_embedding_model: str = "mxbai-embed-large"
+    #: Only consulted for a model absent from
+    #: ``llm/embeddings/ollama.py::KNOWN_DIMENSIONS``; prefer adding it there,
+    #: so startup checks the width instead of taking your word for it.
+    ollama_embedding_dim: int = 1024
     #: Must equal the provider's dimension AND the migration's vector(N).
     embedding_dim: int = 1024
 

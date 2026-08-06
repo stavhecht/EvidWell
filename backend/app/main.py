@@ -36,9 +36,12 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     settings = get_settings()
 
     # Fail fast on an embedding-width mismatch rather than at the first
-    # pgvector write. Skipped when no key is configured, so the API can serve
-    # the public feed without embedding credentials.
-    if settings.voyage_api_key or settings.openai_api_key:
+    # pgvector write. Skipped when a hosted provider has no key configured, so
+    # the API can serve the public feed without embedding credentials. Ollama
+    # needs no key, and building its provider makes no network call — only the
+    # width is asserted here, so a stopped `ollama serve` does not block the API.
+    is_local = settings.embedding_provider.lower() == "ollama"
+    if is_local or settings.voyage_api_key or settings.openai_api_key:
         from app.llm.embeddings.factory import build_embedding_provider
 
         build_embedding_provider(settings)

@@ -21,12 +21,21 @@ def build_embedding_provider(settings: Settings) -> EmbeddingProvider:
     """
     name = settings.embedding_provider.lower()
 
-    if name == "voyage":
+    if name == "ollama":
+        from app.llm.embeddings.ollama import build_ollama_provider
+
+        provider: EmbeddingProvider = build_ollama_provider(
+            settings.ollama_base_url,
+            settings.ollama_embedding_model,
+            settings.ollama_embedding_dim,
+            settings.ollama_timeout_seconds,
+        )
+    elif name == "voyage":
         if not settings.voyage_api_key:
             raise EmbeddingError("VOYAGE_API_KEY is not set")
         from app.llm.embeddings.voyage import build_voyage_provider
 
-        provider: EmbeddingProvider = build_voyage_provider(settings.voyage_api_key)
+        provider = build_voyage_provider(settings.voyage_api_key)
     elif name == "openai":
         if not settings.openai_api_key:
             raise EmbeddingError("OPENAI_API_KEY is not set")
@@ -36,7 +45,7 @@ def build_embedding_provider(settings: Settings) -> EmbeddingProvider:
     else:
         raise EmbeddingError(
             f"unknown embedding_provider {settings.embedding_provider!r}; "
-            "expected 'voyage' or 'openai'"
+            "expected 'ollama', 'voyage' or 'openai'"
         )
 
     settings.validate_embedding_dim(provider.dimension)

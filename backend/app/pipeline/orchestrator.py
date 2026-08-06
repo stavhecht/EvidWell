@@ -22,12 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import Settings
 from app.domain.enums import RunStatus
 from app.domain.models import PipelineRun, PipelineStageRun
-from app.llm.anthropic_client import (
-    AnthropicExtractionClient,
-    AnthropicSynthesisClient,
-    build_anthropic_client,
-)
 from app.llm.embeddings.factory import build_embedding_provider
+from app.llm.factory import build_generative_clients
 from app.pipeline.stages import PipelineContext, Stage, StageError, StageName
 from app.pipeline.steps.extract import ExtractStage
 from app.pipeline.steps.persist import PersistStage, ValidateStage
@@ -212,15 +208,17 @@ class PipelineOrchestrator:
 def build_default_pipeline(session: AsyncSession, settings: Settings) -> list[Stage]:
     """Assemble the six stages with their dependencies.
 
-    The single place where concrete clients (Claude, Voyage, PubMed) are bound
-    to the Protocols the stages depend on — so tests substitute fakes by
-    calling a different builder, not by patching imports.
+    The single place where concrete clients (Ollama or Claude, an embedding
+    provider, PubMed) are bound to the Protocols the stages depend on — so
+    tests substitute fakes by calling a different builder, not by patching
+    imports. Which generative and embedding provider gets bound is config; see
+    ``llm/factory.py`` and ``llm/embeddings/factory.py``.
     """
     embedder = build_embedding_provider(settings)
     http = build_http_client(settings)
     providers = build_providers(settings, http)
 
-    anthropic_client = build_anthropic_client(settings.anthropic_api_key)
+    extraction_client, synthesis_client = build_generative_clients(settings)
     cache = SourceCache(session, embedder)
     reranker = SemanticReranker(session, embedder)
 
@@ -230,9 +228,7 @@ def build_default_pipeline(session: AsyncSession, settings: Settings) -> list[St
     )
 
     return [
-        ExtractStage(
-            AnthropicExtractionClient(anthropic_client, settings.extraction_model)
-        ),
+        ExtractStage(extraction_client),
         RetrieveStage(
             providers,
             TemplateQueryStrategy(min_year=settings.retrieval_min_year),
@@ -240,9 +236,7 @@ def build_default_pipeline(session: AsyncSession, settings: Settings) -> list[St
             settings.retrieval_max_candidates_per_claim,
         ),
         RankStage(reranker, cache, rerank_config),
-        SynthesizeStage(
-            AnthropicSynthesisClient(anthropic_client, settings.synthesis_model)
-        ),
+        SynthesizeStage(synthesis_client),
         ValidateStage(session),
         PersistStage(session),
     ]
