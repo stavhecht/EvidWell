@@ -4,6 +4,40 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>EvidWell — wellness claims, checked against the evidence</title>
+
+    <!-- Archivo is the whole type system: heading and body are the same family
+         at 400 / 600 / 800. Preconnect because the font is on the critical path
+         for first paint, and `display=swap` so text is never invisible while it
+         loads. The design system's own stylesheet carries the same @import; it
+         is stripped from our vendored copy so this link is the single fetch. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&display=swap"
+      rel="stylesheet"
+    />
+
+    <!--
+      Theme applied before first paint.
+
+      This has to be a blocking inline script rather than a React effect: an
+      effect runs after the first paint, so a reader on the dark theme gets a
+      full-screen flash of the light ground on every load. Kept in sync with
+      `src/lib/theme.ts`, which owns the same storage key.
+    -->
+    <script>
+      (function () {
+        try {
+          var stored = localStorage.getItem("evidwell.theme");
+          var dark = stored
+            ? stored === "dark"
+            : window.matchMedia("(prefers-color-scheme: dark)").matches;
+          document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+        } catch (_) {
+          document.documentElement.setAttribute("data-theme", "light");
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

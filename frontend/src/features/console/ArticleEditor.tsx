@@ -4,13 +4,28 @@
  * Loads `editedContent ?? originalContent` and saves only to edited content.
  * The `Citation` node makes citations first-class rather than prose (see
  * CitationNode.ts for why that matters).
+ *
+ * The editing surface is drawn as a recessed panel on the ground with a rule
+ * around it — the same inversion the console's text fields use. In a system
+ * with no corner radius, the border is the only thing that can say "this region
+ * is yours to change", and the reviewer needs to know that at a glance on a
+ * screen where everything else is read-only.
  */
 
 import { useEffect } from "react";
-import { EditorContent, useEditor } from "@tiptap/react";
+import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 
 import { Citation } from "./CitationNode";
+import {
+  EDITOR_NOTE,
+  EDITOR_PROSE,
+  EDITOR_STATUS_ROW,
+  EDITOR_SURFACE,
+  TOOLBAR,
+  saveIndicator,
+  toolbarButton,
+} from "./styles";
 import type { Autosave } from "./useAutosave";
 import type { TipTapDoc } from "@/types/api";
 
@@ -38,9 +53,7 @@ export function ArticleEditor({ content, autosave, onCitationClick }: Props) {
     ],
     content,
     editorProps: {
-      attributes: {
-        class: "prose prose-stone max-w-none focus:outline-none",
-      },
+      attributes: { class: EDITOR_PROSE },
       handleClick(_view, _pos, event) {
         const target = (event.target as HTMLElement).closest("[data-citation]");
         if (!target || !onCitationClick) return false;
@@ -64,12 +77,51 @@ export function ArticleEditor({ content, autosave, onCitationClick }: Props) {
   }, [editor, content]);
 
   return (
-    <div className="flex h-full flex-col overflow-hidden">
-      <div className="flex items-center justify-between border-b border-stone-200 px-4 py-2 text-xs text-stone-500">
-        <span>Edits save to the reviewed copy — the AI draft is preserved</span>
+    <div>
+      <Toolbar editor={editor} />
+      <EditorContent editor={editor} className={EDITOR_SURFACE} />
+      <div className={EDITOR_STATUS_ROW}>
+        <span className={EDITOR_NOTE}>
+          Edits save to the reviewed copy — the AI draft is preserved.
+        </span>
         <SaveIndicator state={autosave.state} />
       </div>
-      <EditorContent editor={editor} className="flex-1 overflow-y-auto p-4" />
+    </div>
+  );
+}
+
+/**
+ * Bold and italic only.
+ *
+ * The design comp draws four buttons — the two here plus Quote and Insert
+ * citation — but both of those would be controls that break something. Quote is
+ * disabled in StarterKit above because the public renderer has no blockquote
+ * case, and hand-inserting a citation is how a handle that resolves to nothing
+ * gets into a draft, which is precisely what validation exists to reject
+ * (invariant #2). A citation picker driven by the retrieved sources is the
+ * shape that would work; it is not this.
+ */
+function Toolbar({ editor }: { editor: Editor | null }) {
+  if (!editor) return null;
+
+  const marks = [
+    { name: "bold" as const, label: "Bold", run: () => editor.chain().focus().toggleBold().run() },
+    { name: "italic" as const, label: "Italic", run: () => editor.chain().focus().toggleItalic().run() },
+  ];
+
+  return (
+    <div className={TOOLBAR}>
+      {marks.map((mark) => (
+        <button
+          key={mark.name}
+          type="button"
+          onClick={mark.run}
+          aria-pressed={editor.isActive(mark.name)}
+          className={toolbarButton(editor.isActive(mark.name))}
+        >
+          {mark.label}
+        </button>
+      ))}
     </div>
   );
 }
@@ -82,7 +134,7 @@ function SaveIndicator({ state }: { state: Autosave["state"] }) {
     error: "Save failed — retrying",
   };
   return (
-    <span className={state === "error" ? "font-medium text-verdict-weak" : ""}>
+    <span className={saveIndicator(state === "error")}>
       {labels[state]}
     </span>
   );

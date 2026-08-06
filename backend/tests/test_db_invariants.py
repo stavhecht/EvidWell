@@ -7,8 +7,13 @@ application layer is wrong, and a fake session cannot demonstrate that.
 Run with a database available:
 
     docker compose up -d db
-    psql "$DATABASE_URL" -v embedding_dim=1024 -f migrations/0001_initial.sql
+    python -m scripts.migrate
     pytest tests/test_db_invariants.py
+
+The URL comes from ``TEST_DATABASE_URL`` if set, otherwise from the application
+settings — so it follows ``.env`` and cannot drift from the port compose
+actually publishes. ``psql`` is not usable here: ``DATABASE_URL`` carries the
+SQLAlchemy ``+asyncpg`` driver suffix, which psql cannot parse.
 
 Skipped automatically when no database is reachable, so the default `pytest`
 run stays fast. **A skipped run does not verify these invariants** — run them
@@ -27,14 +32,16 @@ import sqlalchemy as sa
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.config import get_settings
 from app.domain.enums import ArticleStatus, StudyType, UserRole, Verdict
 from app.security.auth import hash_password
 from app.services.review import ReviewError, ReviewService
 
-DATABASE_URL = os.environ.get(
-    "TEST_DATABASE_URL",
-    "postgresql+asyncpg://evidwell:evidwell@localhost:5432/evidwell",
-)
+#: Fall back to the application's own setting rather than a second hardcoded
+#: URL. The compose file publishes the database on **5433**, not 5432, to avoid
+#: colliding with a native Homebrew Postgres — a literal here silently drifts
+#: from that and turns the whole module into skips, which look like passes.
+DATABASE_URL = os.environ.get("TEST_DATABASE_URL") or get_settings().database_url
 
 
 @pytest.fixture

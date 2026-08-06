@@ -1,0 +1,180 @@
+/* EvidWell — the product layer over Modernist.
+ *
+ * Source: `EvidWell.dc.html` in the Claude Design project "EvidWell Visual
+ * Design Direction". The comp defines its own `--ew-*` scale rather than using
+ * Modernist's `--color-*` roles directly, for two reasons worth keeping:
+ *
+ *   1. **Modernist is light-only.** Its `--color-bg` / `--color-text` are fixed
+ *      hexes. EvidWell needs a real dark theme, so the product tokens are the
+ *      ones that flip and Modernist's roles are re-pointed at them below.
+ *   2. **EvidWell needs a four-step ink ramp, not one ink.** Headline, excerpt,
+ *      meta and rule each carry a different contrast job (see the palette table
+ *      on the design system page), and `color-mix()` on a single ink cannot hit
+ *      those ratios predictably across both grounds.
+ *
+ * Everything is wrapped in `@layer base` so it lands after Tailwind's preflight
+ * — otherwise preflight resets `body` and the theme never applies.
+ *
+ * The comp shipped as a parameterised explorer (verdict prominence, citation
+ * style, grade shape, header voice…). The knobs are not carried over; their
+ * chosen defaults are baked into the tokens below, so retuning is still a
+ * one-line change here rather than a hunt through components.
+ */
+
+@layer base {
+  :root {
+    /* ── Ground and ink ─────────────────────────────────────────────────── */
+    --ew-bg: #f3f2f2;
+    --ew-surface: #ffffff;
+    --ew-ink: #201e1d;      /* ≈15.9:1 — headlines, body, verdict marks       */
+    --ew-ink-2: #504b48;    /* ≈8.3:1  — excerpts, secondary prose            */
+    --ew-ink-3: #6e6864;    /* ≈5.2:1  — meta, qualifiers, study type         */
+    --ew-ink-4: #a09a95;    /* ≈2.8:1  — rules and 14px+ only, never body     */
+    --ew-rule: #201e1d;
+    --ew-rule-soft: #dcd9d6;
+    --ew-accent: #ec3013;     /* ≈3.9:1 — chrome, focus ring, marks           */
+    --ew-accent-ink: #ae1800; /* ≈6.6:1 — the accent at text size             */
+    --ew-accent-wash: #fff2ef;
+
+    /* ── Subject hues — the only chromatic axis ─────────────────────────────
+       Colour says what kind of thing is being assessed, never how it scored.
+       Nothing green, nothing amber, and no hue on the verdict axis, so a feed
+       of cards cannot read as a traffic light. See `subject.ts`. */
+    --ew-cat-supplement: #9b2312;
+    --ew-cat-device: #1b4c72;
+    --ew-cat-protocol: #4a2a6b;
+    --ew-cat-food: #0f5c5c;
+    --ew-cat-topical: #6d4326;
+
+    /* ── Verdict prominence — the comp's `coequal` setting ──────────────────
+       The verdict label and the headline carry equal weight: the label is small
+       and tracked-out caps, the headline is 19px/600. `dominant` (19px/800
+       verdict, quiet headline) read as a scoreboard; `quiet` buried the one
+       thing a reader is here for. */
+    --ew-mark: 14px;
+    --ew-cv-size: 12px;
+    --ew-cv-weight: 600;
+    --ew-cv-track: 0.09em;
+    --ew-cv-case: uppercase;
+    --ew-ch-size: 19px;
+    --ew-ch-weight: 600;
+
+    /* ── Citation chips — the comp's `bracket` setting ──────────────────────
+       A bracketed, boxed handle rather than a superscript: superscripts are a
+       4px tap target and disappear at body size, and this chip is the primary
+       affordance for checking a claim against its paper. */
+    --ew-chip-size: 11.5px;
+    --ew-chip-va: baseline;
+    --ew-chip-border: 1px solid var(--ew-rule-soft);
+    --ew-chip-pad: 1px 3px;
+    --ew-chip-open: "[";
+    --ew-chip-close: "]";
+
+    /* ── Feed ─────────────────────────────────────────────────────────────── */
+    --ew-column-width: 320px;
+    --ew-column-gap: 18px;
+
+    /* Popovers and the filter panel. Tinted with the ink rather than pure
+       black so the shadow reads as the same material as the rules. */
+    --ew-shadow-pop: 0 10px 26px rgb(20 18 17 / 0.16);
+    --ew-shadow-panel: 0 12px 30px rgb(20 18 17 / 0.14);
+
+    /* Re-point Modernist's roles at the EvidWell theme, so its focus ring,
+       `::selection` and any component class picked up from `styles.css` follow
+       the active theme instead of staying stuck on the light palette. */
+    --color-bg: var(--ew-bg);
+    --color-surface: var(--ew-surface);
+    --color-text: var(--ew-ink);
+    --color-accent: var(--ew-accent);
+    --color-divider: var(--ew-rule-soft);
+  }
+
+  html[data-theme="dark"] {
+    --ew-bg: #131211;
+    --ew-surface: #1c1b19;
+    --ew-ink: #f2f0ee;      /* ≈14.6:1 */
+    --ew-ink-2: #bab5b0;    /* ≈8.1:1  */
+    --ew-ink-3: #948e89;    /* ≈5.0:1  */
+    --ew-ink-4: #6b6560;    /* ≈2.7:1  */
+    --ew-rule: #f2f0ee;
+    --ew-rule-soft: #343130;
+    --ew-accent: #ff5c3d;     /* ≈6.0:1 */
+    --ew-accent-ink: #ff8368; /* ≈8.0:1 */
+    --ew-accent-wash: #2a1a16;
+
+    --ew-cat-supplement: #f2775c;
+    --ew-cat-device: #6fa8d6;
+    --ew-cat-protocol: #b18cd9;
+    --ew-cat-food: #4fb3ad;
+    --ew-cat-topical: #c08a63;
+
+    /* A cast shadow is invisible on a near-black ground; on dark the elevation
+       has to come from depth of field instead. */
+    --ew-shadow-pop: 0 10px 26px rgb(0 0 0 / 0.55);
+    --ew-shadow-panel: 0 12px 30px rgb(0 0 0 / 0.5);
+  }
+
+  html {
+    /* Prevents the sticky site header from covering an element scrolled to via
+       its anchor — citation chips jump to `#source-S1` in the source list. */
+    scroll-behavior: smooth;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+  }
+
+  body {
+    margin: 0;
+    background: var(--ew-bg);
+    color: var(--ew-ink);
+    font-family: var(--font-body);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a {
+    color: var(--ew-accent-ink);
+    text-decoration: none;
+  }
+  a:hover { color: var(--ew-accent); }
+
+  ::selection {
+    background: var(--ew-accent);
+    color: #fff;
+  }
+
+  /* Never the browser default blue — the accent ring is part of the system. */
+  *:focus-visible {
+    outline: 2px solid var(--ew-accent);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* The citation chip's brackets. A `::before`/`::after` pair rather than
+     literal "[" and "]" in the text, so the handle is what gets copied, read
+     aloud by a screen reader, and matched by find-in-page. */
+  .ew-chip {
+    font-size: var(--ew-chip-size);
+    vertical-align: var(--ew-chip-va);
+    border: var(--ew-chip-border);
+    padding: var(--ew-chip-pad);
+  }
+  .ew-chip::before { content: var(--ew-chip-open); }
+  .ew-chip::after { content: var(--ew-chip-close); }
+
+  /* The verdict label and the card headline are a matched pair — their size,
+     weight and case are set together by the prominence tokens, so they move
+     together when the balance is retuned. Splitting them into four utility
+     classes each would let them drift apart. */
+  .ew-verdict-label {
+    font-size: var(--ew-cv-size);
+    font-weight: var(--ew-cv-weight);
+    letter-spacing: var(--ew-cv-track);
+    text-transform: var(--ew-cv-case);
+  }
+  .ew-card-headline {
+    font-size: var(--ew-ch-size);
+    font-weight: var(--ew-ch-weight);
+  }
+}

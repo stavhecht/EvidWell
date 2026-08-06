@@ -6,11 +6,15 @@
  *
  * 1. **Grouped by claim, not by source.** The reviewer reads a claim in the
  *    editor and needs its backing evidence next to it. A flat source list makes
- *    them do the join in their head.
+ *    them do the join in their head. (The design comp draws this list flat;
+ *    that is the one place the review screen departs from it, because the comp
+ *    was built against sample data where every article had a single claim.)
  * 2. **Study type and year on every row.** These are what caps the verdict, so
  *    they belong at a glance, not behind a click.
  * 3. **Weak evidence flagged inline.** A confident verdict resting on two
- *    cell-culture studies has to be visible without opening anything.
+ *    cell-culture studies has to be visible without opening anything. It is
+ *    drawn in the accent ink — the one colour on the evidence axis, and it
+ *    marks the *source*, never the verdict.
  * 4. **Uncited sources shown, greyed, not hidden.** What the model chose to
  *    leave out is the failure mode human review exists to catch. If retrieval
  *    surfaced a contradicting trial and the draft ignored it, this panel is the
@@ -21,41 +25,47 @@
  */
 
 import { useEffect, useRef } from "react";
-import { AlertTriangle, ExternalLink } from "lucide-react";
 
+import { GradeBar } from "@/features/evidence/GradeBar";
+import { GRADE_NOTES, STUDY_TYPE_LABELS } from "@/features/evidence/labels";
 import type { ReviewSource, StudyType, ValidationReport } from "@/types/api";
-
-const STUDY_TYPE_LABELS: Record<StudyType, string> = {
-  meta_analysis: "Meta-analysis",
-  systematic_review: "Systematic review",
-  rct: "RCT",
-  observational: "Observational",
-  case_report: "Case report",
-  animal: "Animal",
-  in_vitro: "In-vitro",
-  unknown: "Unclear",
-};
+import { SECTION_LABEL } from "./controls";
+import {
+  CLAIM_GROUP,
+  CLAIM_HEADING,
+  PANEL_BLOCK,
+  PANEL_GRADE_BAR,
+  PANEL_GRADE_NOTE,
+  PANEL_SOURCE_HANDLE,
+  PANEL_SOURCE_HEAD,
+  PANEL_SOURCE_LIST,
+  PANEL_SOURCE_META,
+  PANEL_SOURCE_TITLE_LINK,
+  VALIDATION_FAILURE,
+  VALIDATION_FAILURES,
+  VALIDATION_HEADLINE,
+  WEAK_EVIDENCE_WARNING,
+  panelSourceRow,
+  panelSourceStudyType,
+} from "./styles";
 
 interface Props {
   sources: ReviewSource[];
-  validation: ValidationReport;
   /** Set when the reviewer clicks a citation chip in the editor. */
   focusedHandle?: string | null;
 }
 
-export function SourcesPanel({ sources, validation, focusedHandle }: Props) {
+export function SourcesPanel({ sources, focusedHandle }: Props) {
   const byClaim = groupByClaim(sources);
 
   return (
-    <aside className="flex h-full flex-col overflow-y-auto border-l border-stone-200 bg-stone-50">
-      <ValidationBadge report={validation} />
+    <div className={PANEL_BLOCK}>
+      <span className={SECTION_LABEL}>Retrieved sources</span>
 
       {Object.entries(byClaim).map(([claim, claimSources]) => (
-        <section key={claim} className="border-b border-stone-200 px-4 py-3">
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-stone-500">
-            {claim}
-          </h3>
-          <ul className="mt-2 space-y-2">
+        <section key={claim} className={CLAIM_GROUP}>
+          <h3 className={CLAIM_HEADING}>{claim}</h3>
+          <ul className={PANEL_SOURCE_LIST}>
             {claimSources.map((source) => (
               <SourceRow
                 key={source.sourceId + claim}
@@ -66,7 +76,7 @@ export function SourcesPanel({ sources, validation, focusedHandle }: Props) {
           </ul>
         </section>
       ))}
-    </aside>
+    </div>
   );
 }
 
@@ -80,67 +90,79 @@ function SourceRow({ source, focused }: { source: ReviewSource; focused: boolean
   return (
     <li
       ref={ref}
-      className={`rounded-lg border p-2.5 text-sm transition ${
-        focused ? "ring-2 ring-stone-400 " : ""
-      }${
-        source.wasCited
-          ? "border-stone-200 bg-white"
-          : // Retrieved but not cited. Visible, de-emphasised — the reviewer
-            // needs to notice a relevant paper the draft skipped.
-            "border-dashed border-stone-300 bg-transparent opacity-60"
-      }`}
+      className={panelSourceRow(focused, source.wasCited)}
     >
-      <div className="flex items-start justify-between gap-2">
-        <span className="font-mono text-xs text-stone-500">{source.citationHandle}</span>
-        {source.isWeakEvidence ? (
-          <span
-            className="flex items-center gap-1 text-xs text-verdict-weak"
-            title="Weak study type — check that the verdict does not overstate this"
-          >
-            <AlertTriangle size={12} aria-hidden />
-            weak
-          </span>
-        ) : null}
+      <div className={PANEL_SOURCE_HEAD}>
+        <span className={PANEL_SOURCE_HANDLE}>{source.citationHandle}</span>
+        <a
+          href={source.url}
+          target="_blank"
+          rel="noreferrer noopener"
+          className={PANEL_SOURCE_TITLE_LINK}
+        >
+          {source.title}
+        </a>
       </div>
 
-      <a
-        href={source.url}
-        target="_blank"
-        rel="noreferrer noopener"
-        className="mt-0.5 block font-medium text-stone-900 hover:underline"
-      >
-        {source.title}
-        <ExternalLink size={12} className="ml-1 inline align-baseline" aria-hidden />
-      </a>
-
-      <p className="mt-0.5 text-xs text-stone-500">
-        {STUDY_TYPE_LABELS[source.studyType]}
-        {source.journal ? ` · ${source.journal}` : ""}
-        {source.year ? ` · ${source.year}` : ""}
-        {source.citationCount != null ? ` · ${source.citationCount} citations` : ""}
-        {!source.wasCited ? " · retrieved, not cited" : ""}
-      </p>
+      <div className={panelSourceStudyType(source.isWeakEvidence)}>
+        {STUDY_TYPE_LABELS[source.studyType]} ·{" "}
+        {source.wasCited ? "cited" : "retrieved, not cited"}
+      </div>
+      <div className={PANEL_SOURCE_META}>
+        {[
+          source.journal,
+          source.year,
+          source.citationCount != null ? `${source.citationCount} citations` : null,
+        ]
+          .filter(Boolean)
+          .join(" · ")}
+      </div>
     </li>
   );
 }
 
-/** "4/4 citations resolve". Computed server-side at draft time. */
-function ValidationBadge({ report }: { report: ValidationReport }) {
+/**
+ * Validation and evidence grade — the two facts that decide whether this draft
+ * is publishable at all, above the sources they are computed from.
+ *
+ * A failing report is stated as a list of what broke, not as a colour: the
+ * draft is already unapprovable server-side (invariant #2), so this panel's job
+ * is to say *why* precisely enough to fix the prompt.
+ */
+export function ValidationSummary({
+  report,
+  grade,
+  restsOnWeakEvidence,
+}: {
+  report: ValidationReport;
+  grade: StudyType;
+  restsOnWeakEvidence: boolean;
+}) {
   return (
-    <div
-      className={`sticky top-0 z-10 border-b px-4 py-3 text-sm font-medium ${
-        report.passed
-          ? "border-green-200 bg-green-50 text-verdict-supported"
-          : "border-orange-200 bg-orange-50 text-verdict-weak"
-      }`}
-    >
-      {report.citationsResolved}/{report.citationsTotal} citations resolve
+    <div className={PANEL_BLOCK}>
+      <span className={SECTION_LABEL}>Validation</span>
+
+      <p className={VALIDATION_HEADLINE}>
+        {report.citationsResolved}/{report.citationsTotal} citations resolve
+      </p>
+
       {!report.passed ? (
-        <ul className="mt-1 list-disc pl-4 text-xs font-normal">
+        <ul className={VALIDATION_FAILURES}>
           {report.failures.map((failure, index) => (
-            <li key={index}>{failure.message}</li>
+            <li key={index} className={VALIDATION_FAILURE}>
+              {failure.message}
+            </li>
           ))}
         </ul>
+      ) : null}
+
+      <GradeBar grade={grade} showLabel className={PANEL_GRADE_BAR} />
+      <p className={PANEL_GRADE_NOTE}>{GRADE_NOTES[grade]}</p>
+
+      {restsOnWeakEvidence ? (
+        <p className={WEAK_EVIDENCE_WARNING}>
+          This verdict rests on weak study types. Check the sources before approving.
+        </p>
       ) : null}
     </div>
   );

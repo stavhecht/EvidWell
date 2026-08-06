@@ -22,6 +22,7 @@ import { Navigate, useLocation } from "react-router-dom";
 
 import { setAuthToken } from "@/lib/api/client";
 import { fetchMe, login as loginRequest } from "@/lib/api/console";
+import { ROUTE_MESSAGE } from "@/features/shell/styles";
 import type { Reviewer } from "@/types/api";
 
 const TOKEN_KEY = "evidwell.console.token";
@@ -95,7 +96,9 @@ export function RequireAuth({ children }: { children: ReactNode }) {
   const location = useLocation();
 
   if (status === "loading") {
-    return <p className="p-8 text-sm text-stone-500">Checking session…</p>;
+    return (
+      <p className={ROUTE_MESSAGE}>Checking session…</p>
+    );
   }
   if (status === "anonymous") {
     // Remember where they were headed so login can return them there.

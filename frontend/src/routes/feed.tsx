@@ -1,55 +1,92 @@
-import { useState } from "react";
+/**
+ * The public feed.
+ *
+ * The masthead is the comp's `masthead` voice: a display-size statement of what
+ * the product is, set flush left over a 16ch measure, with the promise
+ * underneath. The alternatives explored were a compact verbatim header and a
+ * two-column split — both read like a blog. This one reads like a masthead,
+ * which is the claim the product is making.
+ */
 
+import { useMemo, useState } from "react";
+
+import { FeedFilters } from "@/features/feed/FeedFilters";
 import { MasonryFeed } from "@/features/feed/MasonryFeed";
-import type { Verdict } from "@/types/api";
+import {
+  FEED_FOOTER,
+  FEED_PAGE,
+  MASTHEAD,
+  MASTHEAD_STANDFIRST,
+  MASTHEAD_TITLE,
+} from "@/features/feed/styles";
+import { subjectsPresent, useFeed } from "@/features/feed/useFeed";
+import type { Subject, Verdict } from "@/types/api";
 
-const FILTERS: { value: Verdict | undefined; label: string }[] = [
-  { value: undefined, label: "All" },
-  { value: "supported", label: "Supported" },
-  { value: "mixed", label: "Mixed" },
-  { value: "weak", label: "Weak" },
-  { value: "no_evidence", label: "No evidence" },
-];
-
-/** The public feed. */
 export function FeedRoute() {
-  const [verdict, setVerdict] = useState<Verdict | undefined>(undefined);
+  const [verdict, setVerdict] = useState<Verdict | null>(null);
+  const [subject, setSubject] = useState<Subject | null>(null);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+
+  const feed = useFeed(verdict);
+
+  const available = useMemo(() => subjectsPresent(feed.items), [feed.items]);
+
+  /*
+   * Subject is narrowed here rather than in the query, because the API has no
+   * `subject` parameter to send — it does not serve the field at all yet. The
+   * consequence to fix when it does: this only narrows the pages already
+   * loaded, so a subject with no match in page one looks empty until the reader
+   * scrolls. Harmless while `available` is empty and the control is hidden.
+   */
+  const items = useMemo(
+    () => (subject ? feed.items.filter((item) => item.subject === subject) : feed.items),
+    [feed.items, subject],
+  );
+
+  const filtered = verdict !== null || subject !== null;
+
+  function clearFilters() {
+    setVerdict(null);
+    setSubject(null);
+  }
 
   return (
-    <main className="mx-auto max-w-6xl px-4 py-8">
-      <header>
-        <h1 className="text-xl font-bold text-stone-900">
+    <main className={FEED_PAGE}>
+      <div className={MASTHEAD}>
+        <h1 className={MASTHEAD_TITLE}>
           Wellness claims, checked against the evidence
         </h1>
-        <p className="mt-1 text-sm text-stone-600">
-          Every article cites real studies and is reviewed by a person before it
-          is published.
+        <p className={MASTHEAD_STANDFIRST}>
+          Every article cites real studies and is reviewed by a person before it is
+          published. Nothing here is sponsored, and no product is sold.
         </p>
-      </header>
-
-      <nav className="mt-5 flex flex-wrap gap-2" aria-label="Filter by verdict">
-        {FILTERS.map((filter) => (
-          <button
-            key={filter.label}
-            onClick={() => setVerdict(filter.value)}
-            aria-pressed={verdict === filter.value}
-            className={`rounded-full px-3 py-1 text-sm ring-1 ring-inset transition ${
-              verdict === filter.value
-                ? "bg-stone-900 text-white ring-stone-900"
-                : "bg-white text-stone-600 ring-stone-300 hover:bg-stone-50"
-            }`}
-          >
-            {filter.label}
-          </button>
-        ))}
-      </nav>
-
-      <div className="mt-6">
-        <MasonryFeed verdict={verdict} />
       </div>
 
-      <footer className="mt-12 border-t border-stone-200 pt-4 text-xs text-stone-500">
-        Informational only — not medical advice.
+      <FeedFilters
+        verdict={verdict}
+        onVerdict={setVerdict}
+        subject={subject}
+        onSubject={setSubject}
+        availableSubjects={available}
+        open={filtersOpen}
+        onOpenChange={setFiltersOpen}
+        count={
+          feed.status === "success"
+            ? `${items.length} ${items.length === 1 ? "article" : "articles"} · every one editor-approved`
+            : ""
+        }
+      />
+
+      <MasonryFeed
+        {...feed}
+        items={items}
+        filtered={filtered}
+        onClearFilters={clearFilters}
+      />
+
+      <footer className={FEED_FOOTER}>
+        <span>Informational only — not medical advice.</span>
+        <span>Sources: PubMed · Europe PMC · Semantic Scholar · OpenAlex</span>
       </footer>
     </main>
   );
