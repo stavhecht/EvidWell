@@ -23,6 +23,7 @@ Document shape::
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from typing import Any
 
 from app.domain.contracts import ArticleBody
@@ -123,6 +124,24 @@ def doc_to_plain_text(doc: dict[str, Any], *, keep_citations: bool = True) -> st
         paragraphs.append(text.strip())
 
     return "\n\n".join(part for part in paragraphs if part)
+
+
+def iter_nodes(node: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    """Every node in a document, depth first, the root included.
+
+    The walks above stop two levels down because the beats are flat paragraphs
+    and that is genuinely all they contain. This one recurses because it backs
+    a security check (``services/media.py``), and a check that only looks where
+    content is *supposed* to be is not a check. Non-dict children are skipped
+    rather than raising: the caller is auditing a document that arrived over
+    HTTP, so malformed is an expected input, not an exception.
+    """
+    yield node
+    children = node.get("content")
+    if isinstance(children, list):
+        for child in children:
+            if isinstance(child, dict):
+                yield from iter_nodes(child)
 
 
 def cited_handles_in_doc(doc: dict[str, Any]) -> set[str]:

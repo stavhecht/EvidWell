@@ -3,7 +3,9 @@
  *
  * Loads `editedContent ?? originalContent` and saves only to edited content.
  * The `Citation` node makes citations first-class rather than prose (see
- * CitationNode.ts for why that matters).
+ * CitationNode.ts for why that matters), and `ArticleImage` / `YouTubeEmbed`
+ * do the same for the two things a reviewer can add that the model cannot
+ * (see MediaNodes.ts).
  *
  * The editing surface is drawn as a recessed panel on the ground with a rule
  * around it — the same inversion the console's text fields use. In a system
@@ -12,21 +14,26 @@
  * screen where everything else is read-only.
  */
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 
+import { BeatAttribute } from "./BeatAttribute";
 import { Citation } from "./CitationNode";
+import { ArticleImage, YouTubeEmbed } from "./MediaNodes";
 import {
   EDITOR_NOTE,
   EDITOR_PROSE,
   EDITOR_STATUS_ROW,
   EDITOR_SURFACE,
+  MEDIA_ERROR,
   TOOLBAR,
+  TOOLBAR_DIVIDER,
   saveIndicator,
   toolbarButton,
 } from "./styles";
 import type { Autosave } from "./useAutosave";
+import { ACCEPTED_IMAGE_TYPES, useMediaInsert, type MediaInsert } from "./useMediaInsert";
 import type { TipTapDoc } from "@/types/api";
 
 interface Props {
@@ -37,6 +44,8 @@ interface Props {
 }
 
 export function ArticleEditor({ content, autosave, onCitationClick }: Props) {
+  const media = useMediaInsert();
+
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
@@ -49,7 +58,10 @@ export function ArticleEditor({ content, autosave, onCitationClick }: Props) {
         orderedList: false,
         blockquote: false,
       }),
+      BeatAttribute,
       Citation,
+      ArticleImage,
+      YouTubeEmbed,
     ],
     content,
     editorProps: {
@@ -61,9 +73,27 @@ export function ArticleEditor({ content, autosave, onCitationClick }: Props) {
         if (handles[0]) onCitationClick(handles[0]);
         return true;
       },
+      // Dropping a photo onto the draft and pasting one out of a screenshot
+      // tool are how anyone actually adds a picture; the toolbar button is the
+      // discoverable path, not the only one. Both go through the upload, so
+      // what lands in the document is a file we hold rather than a link to
+      // wherever it came from.
+      handlePaste(_view, event) {
+        return uploadImagesFrom(event.clipboardData, media);
+      },
+      handleDrop(_view, event) {
+        return uploadImagesFrom(event.dataTransfer, media);
+      },
     },
     onUpdate: ({ editor }) => autosave.schedule(editor.getJSON() as TipTapDoc),
   });
+
+  // The paste and drop handlers above were built before this editor existed;
+  // this is what lets them insert into it.
+  const { bind } = media;
+  useEffect(() => {
+    bind(editor);
+  }, [bind, editor]);
 
   // Swapping to a different article must replace the document, or the previous
   // draft's text stays in the editor and autosaves onto the new article.
@@ -78,8 +108,13 @@ export function ArticleEditor({ content, autosave, onCitationClick }: Props) {
 
   return (
     <div>
-      <Toolbar editor={editor} />
+      <Toolbar editor={editor} media={media} />
       <EditorContent editor={editor} className={EDITOR_SURFACE} />
+      {media.error ? (
+        <p role="alert" className={MEDIA_ERROR}>
+          {media.error}
+        </p>
+      ) : null}
       <div className={EDITOR_STATUS_ROW}>
         <span className={EDITOR_NOTE}>
           Edits save to the reviewed copy — the AI draft is preserved.
@@ -91,23 +126,55 @@ export function ArticleEditor({ content, autosave, onCitationClick }: Props) {
 }
 
 /**
- * Bold and italic only.
+ * Image files out of a paste or a drop, uploaded.
  *
- * The design comp draws four buttons — the two here plus Quote and Insert
- * citation — but both of those would be controls that break something. Quote is
- * disabled in StarterKit above because the public renderer has no blockquote
- * case, and hand-inserting a citation is how a handle that resolves to nothing
- * gets into a draft, which is precisely what validation exists to reject
- * (invariant #2). A citation picker driven by the retrieved sources is the
- * shape that would work; it is not this.
+ * Returns true — which stops ProseMirror's own handling — only when there were
+ * files to take, so an ordinary text paste is untouched.
+ *
+ * Copying a picture out of a web page puts both an `<img>` and the decoded
+ * bytes on the clipboard. Taking the bytes is deliberate: the markup would be
+ * a link to someone else's server, and the image node refuses those.
  */
-function Toolbar({ editor }: { editor: Editor | null }) {
+function uploadImagesFrom(transfer: DataTransfer | null, media: MediaInsert): boolean {
+  const files = Array.from(transfer?.files ?? []).filter((file) =>
+    file.type.startsWith("image/"),
+  );
+  if (files.length === 0) return false;
+
+  void media.insertFiles(files);
+  return true;
+}
+
+/**
+ * Two marks, and the two blocks a reviewer can add.
+ *
+ * The design comp draws Quote and Insert citation here as well, and both would
+ * be controls that break something. Quote is disabled in StarterKit above
+ * because the public renderer has no blockquote case, and hand-inserting a
+ * citation is how a handle that resolves to nothing gets into a draft, which is
+ * precisely what validation exists to reject (invariant #2). A citation picker
+ * driven by the retrieved sources is the shape that would work; it is not this.
+ *
+ * Image and Video are a different case: they add nothing the model asserted and
+ * nothing that can contradict the evidence, so there is no handle to orphan and
+ * no claim to overstate.
+ */
+function Toolbar({ editor, media }: { editor: Editor | null; media: MediaInsert }) {
+  const filePicker = useRef<HTMLInputElement>(null);
   if (!editor) return null;
 
   const marks = [
     { name: "bold" as const, label: "Bold", run: () => editor.chain().focus().toggleBold().run() },
     { name: "italic" as const, label: "Italic", run: () => editor.chain().focus().toggleItalic().run() },
   ];
+
+  function onVideo() {
+    const url = window.prompt(
+      "Paste the YouTube link.\nThe video plays inline in the published article.",
+      "",
+    );
+    if (url !== null) media.insertYouTube(url);
+  }
 
   return (
     <div className={TOOLBAR}>
@@ -122,6 +189,47 @@ function Toolbar({ editor }: { editor: Editor | null }) {
           {mark.label}
         </button>
       ))}
+
+      <span aria-hidden className={TOOLBAR_DIVIDER} />
+
+      <button
+        type="button"
+        onClick={() => filePicker.current?.click()}
+        disabled={media.uploading}
+        title="Add a picture from this computer (PNG, JPEG, GIF or WebP)"
+        className={toolbarButton(false)}
+      >
+        {media.uploading ? "Uploading…" : "Image"}
+      </button>
+
+      <button
+        type="button"
+        onClick={onVideo}
+        disabled={media.uploading}
+        title="Embed a YouTube video by its link"
+        className={toolbarButton(false)}
+      >
+        Video
+      </button>
+
+      {/*
+        The button is the control; this input only opens the file dialog. It is
+        reset after every pick so choosing the same file twice still fires a
+        change event — otherwise re-adding an image a reviewer just deleted
+        silently does nothing.
+      */}
+      <input
+        ref={filePicker}
+        type="file"
+        accept={ACCEPTED_IMAGE_TYPES}
+        multiple
+        hidden
+        onChange={(event) => {
+          const files = Array.from(event.target.files ?? []);
+          event.target.value = "";
+          void media.insertFiles(files);
+        }}
+      />
     </div>
   );
 }

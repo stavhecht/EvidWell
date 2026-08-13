@@ -177,4 +177,48 @@
     font-size: var(--ew-ch-size);
     font-weight: var(--ew-ch-weight);
   }
+
+  /* ── Reviewer-placed media ──────────────────────────────────────────────
+     A picture or a video the reviewer sized and wrapped in the console. The
+     same three classes render it in the editor and in the published article,
+     which is the only way "what you approve is what publishes" is true of
+     layout and not just of words.
+
+     Why this is CSS and not Tailwind: the width is a number chosen at runtime,
+     so it cannot be a class the JIT compiler has ever seen — and it has to
+     stop applying below 640px, which an inline style cannot express. A custom
+     property set inline, read inside a media query, is what does both.
+
+     The breakpoint is the whole collapse rule. Under 640px every picture is a
+     full-width block: a 40% float in a 320px column leaves about fifteen
+     characters a line beside it, which is not reading. */
+  .ew-media {
+    display: block;
+    margin-block: 1.4rem;
+  }
+
+  @media (min-width: 640px) {
+    .ew-media {
+      width: var(--ew-media-width, 100%);
+      /* Centres a block narrower than the column. A narrow block hugging the
+         left margin reads as a mistake rather than as a decision. */
+      margin-inline: auto;
+    }
+
+    /* The float's top margin is small so its top edge lines up with the first
+       line of the prose it sits beside, rather than starting a line or two
+       down from it. */
+    .ew-media--left,
+    .ew-media--right {
+      margin-block: 0.4rem 1rem;
+    }
+    .ew-media--left {
+      float: left;
+      margin-inline: 0 1.75rem;
+    }
+    .ew-media--right {
+      float: right;
+      margin-inline: 1.75rem 0;
+    }
+  }
 }

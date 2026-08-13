@@ -142,6 +142,23 @@ class SaveContentRequest(CamelModel):
     content: dict = Field(description="TipTap document")
 
 
+class MediaUploadOut(CamelModel):
+    """Where a just-uploaded image now lives.
+
+    Only a path comes back. There is no id and no record: the store is
+    content-addressed, so the path *is* the identity, and an image is
+    referenced only from the document that embeds it.
+    """
+
+    #: Origin-relative, e.g. ``/api/media/1f/2a….png``. Goes verbatim into the
+    #: editor's image node, and is the only ``src`` shape the server will
+    #: accept back.
+    src: str
+    #: Sniffed from the bytes, not taken from the upload's Content-Type.
+    content_type: str
+    bytes: int
+
+
 class RejectRequest(CamelModel):
     #: Required. Rejection reasons are the best available signal for improving
     #: the synthesis prompt, so the API refuses to discard one.

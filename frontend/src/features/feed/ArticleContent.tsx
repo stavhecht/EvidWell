@@ -12,12 +12,28 @@
  * dotted underline on the sentence makes the *claim* look uncertain rather than
  * making its source available. The chip is the primary affordance for the thing
  * this product exists to let you do, so it is sized to be pressed.
+ *
+ * Two block nodes sit alongside the beat paragraphs — a picture and a YouTube
+ * embed, both added by the reviewer in the console. They are re-checked here
+ * before they render: the server refuses to store either one pointing anywhere
+ * it did not put it, so anything that fails these checks means that guarantee
+ * has broken, and a reader is the wrong person to find that out from.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 
 import { STUDY_TYPE_LABELS } from "@/features/evidence/labels";
 import {
+  clampMediaWidth,
+  isStoredMedia,
+  isYouTubeId,
+  mediaAlign,
+  youtubeEmbedUrl,
+  youtubeThumbnailUrl,
+} from "@/lib/media";
+import {
+  ARTICLE_IMAGE,
+  articleFigure,
   CHIP_ANCHOR,
   CITATION_CHIP,
   POPOVER_KICKER,
@@ -28,8 +44,15 @@ import {
   PROSE_MEASURE,
   PROSE_PARAGRAPH,
   SOURCE_POPOVER,
+  VIDEO_CAPTION,
+  VIDEO_COVER,
+  VIDEO_FRAME,
+  VIDEO_IFRAME,
+  VIDEO_PLAY_BUTTON,
+  VIDEO_PLAY_MARK,
+  VIDEO_PLAY_TRIANGLE,
 } from "./styles";
-import type { Source, TipTapDoc } from "@/types/api";
+import type { Source, TipTapDoc, TipTapNode } from "@/types/api";
 
 /** Citation nodes carry `attrs.sourceIds`; everything else is text. */
 function sourceIds(attrs: Record<string, unknown> | undefined): string[] {
@@ -55,26 +78,128 @@ export function ArticleContent({ doc, sources, onCite }: Props) {
 
   return (
     <div className={PROSE_MEASURE}>
-      {(doc.content ?? []).map((paragraph, index) => (
-        <p key={index} className={PROSE_PARAGRAPH}>
-          {(paragraph.content ?? []).map((node, childIndex) =>
-            node.type === "citation" ? (
-              <CitationChips
-                key={childIndex}
-                handles={sourceIds(node.attrs)}
-                sources={sources}
-                keyPrefix={`${index}-${childIndex}`}
-                openKey={openKey}
-                onOpenChange={setOpenKey}
-                onCite={onCite}
-              />
-            ) : (
-              <span key={childIndex}>{node.text}</span>
-            ),
-          )}
-        </p>
-      ))}
+      {(doc.content ?? []).map((block, index) => {
+        if (block.type === "image") return <ArticleFigure key={index} node={block} />;
+        if (block.type === "youtube") return <ArticleVideo key={index} node={block} />;
+
+        return (
+          <p key={index} className={PROSE_PARAGRAPH}>
+            {(block.content ?? []).map((node, childIndex) =>
+              node.type === "citation" ? (
+                <CitationChips
+                  key={childIndex}
+                  handles={sourceIds(node.attrs)}
+                  sources={sources}
+                  keyPrefix={`${index}-${childIndex}`}
+                  openKey={openKey}
+                  onOpenChange={setOpenKey}
+                  onCite={onCite}
+                />
+              ) : (
+                <span key={childIndex}>{node.text}</span>
+              ),
+            )}
+          </p>
+        );
+      })}
     </div>
+  );
+}
+
+/**
+ * The width and wrap a reviewer set, as a class and a custom property.
+ *
+ * Both values go through the shared validators, so an attribute the server
+ * would have refused falls back to a full-width block rather than reaching the
+ * page. The server is the enforcement; this is the renderer refusing to be the
+ * hole in it.
+ */
+function layoutOf(node: TipTapNode): { className: string; style: CSSProperties } {
+  const align = mediaAlign(node.attrs?.align);
+  return {
+    className: articleFigure(align),
+    style: { "--ew-media-width": `${clampMediaWidth(node.attrs?.width)}%` } as CSSProperties,
+  };
+}
+
+/**
+ * A picture the reviewer uploaded.
+ *
+ * `alt` is whatever they typed when they inserted it, including nothing — an
+ * empty `alt` is the correct markup for a decorative image and the console
+ * says so when it asks. `loading="lazy"` because an article's pictures are
+ * below the lede by construction.
+ */
+function ArticleFigure({ node }: { node: TipTapNode }) {
+  const src = node.attrs?.src;
+  const alt = node.attrs?.alt;
+  if (!isStoredMedia(src)) return null;
+
+  return (
+    <figure {...layoutOf(node)}>
+      <img
+        src={src}
+        alt={typeof alt === "string" ? alt : ""}
+        loading="lazy"
+        decoding="async"
+        className={ARTICLE_IMAGE}
+      />
+    </figure>
+  );
+}
+
+/**
+ * A YouTube embed, as a still until the reader presses it.
+ *
+ * The iframe is mounted by the click, not by the page — see `VIDEO_FRAME` for
+ * the reasoning. `autoplay` on that first mount is what makes the press feel
+ * like a play button rather than a loading step.
+ */
+function ArticleVideo({ node }: { node: TipTapNode }) {
+  const [playing, setPlaying] = useState(false);
+  const videoId = node.attrs?.videoId;
+  if (!isYouTubeId(videoId)) return null;
+
+  return (
+    <figure {...layoutOf(node)}>
+      <div className={VIDEO_FRAME}>
+        {playing ? (
+          <iframe
+            src={youtubeEmbedUrl(videoId, { autoplay: true })}
+            title="YouTube video"
+            allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture"
+            allowFullScreen
+            referrerPolicy="strict-origin-when-cross-origin"
+            className={VIDEO_IFRAME}
+          />
+        ) : (
+          <>
+            <img
+              src={youtubeThumbnailUrl(videoId)}
+              alt=""
+              loading="lazy"
+              decoding="async"
+              className={VIDEO_COVER}
+            />
+            <button
+              type="button"
+              onClick={() => setPlaying(true)}
+              aria-label="Play the video on YouTube"
+              className={VIDEO_PLAY_BUTTON}
+            >
+              <span className={VIDEO_PLAY_MARK}>
+                <span aria-hidden className={VIDEO_PLAY_TRIANGLE} />
+              </span>
+            </button>
+          </>
+        )}
+      </div>
+      {playing ? null : (
+        <figcaption className={VIDEO_CAPTION}>
+          Plays on YouTube. Pressing play loads their player.
+        </figcaption>
+      )}
+    </figure>
   );
 }
 

@@ -201,9 +201,19 @@ export const FIELD_LABEL =
 /**
  * Passed to TipTap as a raw attribute rather than rendered by React, so the
  * arbitrary-variant selectors are how paragraph spacing gets set at all.
+ *
+ * The `.ProseMirror-selectednode` rule is what makes an image or a video block
+ * feel like an object. They are atoms: a click selects the whole thing and
+ * Backspace removes it — but only if the reviewer can see that it is selected,
+ * and a block with no visible selection state reads as an un-deletable
+ * fixture.
+ *
+ * `flow-root` makes the surface contain its floats. Without it a picture
+ * floated beside the last beat hangs out of the bottom of the editing panel
+ * and over whatever follows it.
  */
 export const EDITOR_PROSE =
-  "font-body text-[15px] leading-[1.72] text-ink focus:outline-none [&_p]:mb-4 [&_p:last-child]:mb-0";
+  "flow-root font-body text-[15px] leading-[1.72] text-ink focus:outline-none [&_p]:mb-4 [&_p:last-child]:mb-0 [&_.ProseMirror-selectednode]:outline [&_.ProseMirror-selectednode]:outline-2 [&_.ProseMirror-selectednode]:outline-offset-2 [&_.ProseMirror-selectednode]:outline-accent";
 
 /** `-mt-px` collapses the toolbar's bottom rule into the surface's top one. */
 export const EDITOR_SURFACE = "-mt-px border border-rule-soft bg-surface p-[18px]";
@@ -211,13 +221,108 @@ export const EDITOR_STATUS_ROW =
   "mt-3 flex flex-wrap items-baseline justify-between gap-3";
 export const EDITOR_NOTE = "font-body text-micro text-ink-3";
 
-export const TOOLBAR = "flex flex-wrap gap-0.5 border border-rule-soft bg-surface p-1.5";
+export const TOOLBAR =
+  "flex flex-wrap items-center gap-0.5 border border-rule-soft bg-surface p-1.5";
 
 export function toolbarButton(active: boolean): string {
-  return `px-2.5 py-[7px] font-body text-[12px] font-semibold leading-none transition-colors ${
+  return `px-2.5 py-[7px] font-body text-[12px] font-semibold leading-none transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
     active ? "bg-ink text-ground" : "text-ink-2 hover:bg-ground hover:text-ink"
   }`;
 }
+
+/** Separates the two marks from the two things that insert a block. */
+export const TOOLBAR_DIVIDER = "mx-1.5 h-4 w-px bg-rule-soft";
+
+/* ── media in the editor ────────────────────────────────────────────────── */
+
+/**
+ * The frame inside a media node view.
+ *
+ * The *layout* — the float and the width — is not here. TipTap's React
+ * renderer wraps a node view in an element of its own, and that element is the
+ * one sitting in the editor's flow, so it is the one that has to float. It
+ * gets `mediaWrapClass()` from `lib/media.ts` through the node's `attrs`
+ * option (see `MediaNodes.ts`), which is the same class the published article
+ * uses.
+ *
+ * What is left for the figure is the part that only exists while editing:
+ * `relative` to anchor the control bar and the resize grip, and a named group
+ * so the grip can appear on hover.
+ */
+export const MEDIA_FRAME = "group/media relative block";
+
+/**
+ * Unstyled beyond a hairline. The reviewer is checking that the right picture
+ * is in the right place, and a treatment the published page does not share
+ * would be a lie about what they are approving.
+ */
+export const EDITOR_IMAGE = "block h-auto w-full border border-rule-soft";
+
+/**
+ * The video is a 16:9 still, not a player.
+ *
+ * The frame matches the shape that publishes — a reviewer sizing a video needs
+ * to see the rectangle a reader will get, and the old thumbnail-and-label card
+ * was a different shape at a fixed size. A live iframe is still out: inside a
+ * contenteditable it swallows every click, so the node could never be selected
+ * or deleted, and it would load YouTube's player to tell a reviewer something
+ * a still already tells them.
+ */
+export const EDITOR_VIDEO_FRAME =
+  "relative block aspect-video w-full border border-rule-soft bg-ground";
+export const EDITOR_VIDEO_STILL = "absolute inset-0 h-full w-full object-cover";
+
+/** Sits over the still so the id stays checkable at any size. */
+export const EDITOR_VIDEO_OVERLAY =
+  "absolute inset-x-0 bottom-0 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 bg-ink px-2.5 py-1.5";
+export const EDITOR_VIDEO_KICKER =
+  "font-body text-kicker font-semibold uppercase leading-none tracking-[0.13em] text-ground";
+export const EDITOR_VIDEO_ID =
+  "truncate font-body text-micro font-semibold leading-none text-ground";
+
+/* ── the controls on a selected picture or video ────────────────────────── */
+
+/**
+ * A bar over the selected block, not more buttons in the main toolbar.
+ *
+ * The controls are where the reviewer's attention already is, and the toolbar
+ * stays as short as it was — six permanently-inert buttons would be worse than
+ * no buttons. `-top-*` lifts it clear of the frame; it is `absolute` so it
+ * never changes the size the reviewer is trying to judge.
+ */
+export const MEDIA_CONTROLS =
+  "absolute -top-[38px] left-0 z-20 flex items-center gap-0.5 whitespace-nowrap border border-rule-soft bg-surface px-1 py-1 shadow-panel";
+export const MEDIA_CONTROL_DIVIDER = "mx-1 h-3.5 w-px bg-rule-soft";
+
+export function mediaControlButton(active: boolean): string {
+  return `px-2 py-1.5 font-body text-[11px] font-semibold leading-none transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+    active ? "bg-ink text-ground" : "text-ink-2 hover:bg-ground hover:text-ink"
+  }`;
+}
+
+/** The live percentage. Tabular so the bar does not twitch as it is dragged. */
+export const MEDIA_WIDTH_READOUT =
+  "min-w-[38px] text-center font-body text-[11px] font-semibold tabular-nums leading-none text-ink-3";
+
+/** Destructive, so it is the accent — the same red as everything that acts. */
+export const MEDIA_REMOVE_BUTTON =
+  "px-2 py-1.5 font-body text-[11px] font-semibold leading-none text-accent-ink transition-colors hover:bg-accent-wash";
+
+/**
+ * The corner grip.
+ *
+ * Only on hover or selection: a permanent handle on every picture turns the
+ * draft into a page of controls. `cursor-nwse-resize` is what tells a reviewer
+ * this is a resize rather than a second drag target — dragging the picture
+ * itself moves it between paragraphs.
+ */
+export const MEDIA_RESIZE_HANDLE =
+  "absolute -bottom-1.5 -right-1.5 z-20 h-4 w-4 cursor-nwse-resize border border-ground bg-accent opacity-0 transition-opacity group-hover/media:opacity-100 focus-visible:opacity-100";
+export const MEDIA_RESIZE_HANDLE_VISIBLE = "opacity-100";
+
+/** A failed upload, next to the toolbar that started it. */
+export const MEDIA_ERROR =
+  "mt-2 font-body text-micro font-semibold text-accent-ink";
 
 /** A failed save is the one editor state that blocks Approve, so it is bolder. */
 export function saveIndicator(failed: boolean): string {

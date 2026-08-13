@@ -13,7 +13,7 @@ article instead of padding to reach a floor.
 from __future__ import annotations
 
 import re
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import BaseModel, Field, StringConstraints, field_validator
 
@@ -21,6 +21,30 @@ from app.domain.enums import SourceApi, StudyType, Verdict
 
 # Matches a citation handle as the model emits it inline: [S1], [S2]…
 CITATION_MARKER_RE = re.compile(r"\[(S\d+)\]")
+
+#: A citation handle in canonical form. Expressed as a schema-level pattern
+#: rather than a validator on purpose: ``model_json_schema()`` carries
+#: ``pattern`` into the structured-output grammar, so Ollama's sampler cannot
+#: emit a malformed handle in the first place. A ``@field_validator`` is
+#: invisible to the schema and only ever catches the mistake after generation.
+#:
+#: Written ``[0-9]`` and NOT ``\d`` deliberately. Ollama compiles this pattern
+#: into a GBNF grammar and its converter does not understand the ``\d`` escape:
+#: with ``\d`` the whole request fails at 400 "failed to parse grammar", which
+#: breaks every synthesis call rather than just a malformed one. Verified
+#: against llama3.1:8b — see tests/test_content.py.
+CitationHandle = Annotated[str, StringConstraints(pattern=r"^S[0-9]+$")]
+
+#: The shorthand a model reaches for when every source backs the same claim:
+#: "S1-S8" as one string instead of eight handles. Covers the dash variants
+#: models actually emit (hyphen, en dash, em dash) and the "S1-8" short form.
+_HANDLE_RANGE_RE = re.compile(r"S(\d+)\s*[-\u2013\u2014]\s*S?(\d+)")
+
+#: Ceiling on range expansion. Retrieval keeps single digits of sources per
+#: claim, so a wider span is a confused model rather than a real citation list.
+#: Leaving it unexpanded lets the pattern reject it instead of inventing
+#: hundreds of handles we never retrieved.
+_MAX_RANGE_SPAN = 50
 
 # A rough sentence splitter. Deliberately simple: it is used to enforce a
 # *ceiling*, so over-counting on an edge case (an abbreviation like "e.g.")
@@ -182,15 +206,49 @@ class CitationGroup(BaseModel):
     """One factual claim and the sources the model says support it."""
 
     claim: NonEmptyStr
-    source_ids: list[str] = Field(min_length=1)
+    source_ids: list[CitationHandle] = Field(min_length=1)
 
-    @field_validator("source_ids")
+    @field_validator("source_ids", mode="before")
     @classmethod
-    def _handles_well_formed(cls, value: list[str]) -> list[str]:
-        for handle in value:
-            if not re.fullmatch(r"S\d+", handle):
-                raise ValueError(f"citation handle {handle!r} is malformed")
-        return value
+    def _normalise_handles(cls, value: Any) -> Any:
+        """Expand range and comma shorthand into individual handles.
+
+        Runs *before* the pattern check, so a model that collapses "S1", "S2",
+        … "S8" into the single string "S1-S8" gets eight handles rather than a
+        validation failure that fails the whole run.
+
+        This only reshapes what the model already said; it cannot make a handle
+        legitimate. Grounding is still established in ``evidence/validation.py``
+        against the prompt's handle set and the database, so an expansion that
+        yields a handle we never retrieved is caught there and the draft is
+        discarded — the guarantee in this module's docstring is unchanged.
+        """
+        if not isinstance(value, list):
+            return value
+
+        expanded: list[Any] = []
+        for entry in value:
+            if not isinstance(entry, str):
+                expanded.append(entry)
+                continue
+            for part in (piece.strip() for piece in entry.split(",")):
+                if not part:
+                    continue
+                match = _HANDLE_RANGE_RE.fullmatch(part)
+                if match is not None:
+                    start, end = int(match.group(1)), int(match.group(2))
+                    if 0 <= end - start < _MAX_RANGE_SPAN:
+                        expanded.extend(f"S{n}" for n in range(start, end + 1))
+                        continue
+                expanded.append(part)
+
+        # Order-preserving dedupe: "S1-S3" alongside a stray "S2" is one source
+        # list, not a repeated citation. These lists are single digits long.
+        deduped: list[Any] = []
+        for handle in expanded:
+            if handle not in deduped:
+                deduped.append(handle)
+        return deduped
 
 
 class SynthesisOutput(BaseModel):

@@ -16,6 +16,8 @@
  *   one.
  */
 
+import { mediaWrapClass, type MediaAlign } from "@/lib/media";
+
 /* ── the feed page ──────────────────────────────────────────────────────── */
 
 export const FEED_PAGE = "mx-auto max-w-page px-gutter pb-20";
@@ -207,7 +209,12 @@ export const SKELETON_SOURCE_LIST = "h-52 bg-surface";
 
 /* ── article prose and citation chips ───────────────────────────────────── */
 
-export const PROSE_MEASURE = "max-w-[64ch]";
+/**
+ * `flow-root` contains the floats a reviewer may have placed. Without it a
+ * picture floated beside the last paragraph hangs below the prose and over the
+ * disclaimer.
+ */
+export const PROSE_MEASURE = "flow-root max-w-[64ch]";
 export const PROSE_PARAGRAPH = "mb-5 text-pretty font-body text-prose text-ink last:mb-0";
 
 /** `whitespace-nowrap` so a chip never wraps away from the word it follows. */
@@ -233,6 +240,59 @@ export const POPOVER_META = "mt-[5px] block font-body text-meta text-ink-3";
 export const POPOVER_LINK =
   "mt-2.5 inline-block border-b border-accent pb-0.5 font-body text-micro font-semibold uppercase leading-none tracking-[0.06em] text-accent-ink";
 export const POPOVER_UNRESOLVED = "mt-2 block font-body text-meta text-ink-3";
+
+/* ── pictures and video a reviewer added ────────────────────────────────── */
+
+/**
+ * Media sits inside the prose measure rather than breaking out of it.
+ *
+ * A full-bleed image is the magazine move, and this is not a magazine: the
+ * column is 64 characters because that is where the evidence reads well, and a
+ * picture that escapes it announces itself as the more important thing on the
+ * page.
+ *
+ * The width and the wrap come from `.ew-media` in `styles/evidwell.css` — the
+ * same classes the console's editor uses, which is what makes the reviewer's
+ * layout something they can actually see before approving it. Everything
+ * inside those classes stops applying below 640px, so a floated picture
+ * becomes a full-width block on a phone without anyone deciding that per
+ * article.
+ */
+export function articleFigure(align: MediaAlign): string {
+  return `${mediaWrapClass(align)} last:mb-0`;
+}
+
+export const ARTICLE_IMAGE = "block h-auto w-full border border-rule-soft";
+
+/**
+ * Video is a facade until it is pressed.
+ *
+ * An embedded player is roughly a megabyte of Google's JavaScript, executed on
+ * every reader of every article that has one, to render a rectangle most of
+ * them will not press. The still frame is one image request, and the iframe
+ * arrives on the click that asks for it — which is also the click that makes
+ * being tracked by YouTube something the reader chose.
+ */
+export const VIDEO_FRAME = "relative block aspect-video w-full border border-rule-soft";
+export const VIDEO_COVER = "absolute inset-0 h-full w-full object-cover";
+export const VIDEO_IFRAME = "absolute inset-0 h-full w-full";
+
+/**
+ * The play affordance.
+ *
+ * A solid accent block rather than a translucent overlay: the thumbnail's
+ * colours are decided by whoever uploaded the video, and the ink ramp does not
+ * carry opacity (see the note in `tailwind.config.ts`), so the only mark that
+ * stays legible over an unknown image is an opaque one. It is the same red
+ * that marks every other "this does something" surface in the product.
+ */
+export const VIDEO_PLAY_BUTTON =
+  "group absolute inset-0 flex items-center justify-center";
+export const VIDEO_PLAY_MARK =
+  "flex h-[54px] w-[78px] items-center justify-center bg-accent transition-transform group-hover:scale-105";
+export const VIDEO_PLAY_TRIANGLE =
+  "ml-1 border-y-[11px] border-l-[18px] border-y-transparent border-l-white";
+export const VIDEO_CAPTION = "mt-2 font-body text-micro text-ink-3";
 
 /* ── the source list ────────────────────────────────────────────────────── */
 

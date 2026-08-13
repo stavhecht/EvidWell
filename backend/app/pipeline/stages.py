@@ -49,9 +49,6 @@ class StageName(StrEnum):
     PERSIST = "persist"
 
 
-STAGE_ORDER: list[StageName] = list(StageName)
-
-
 class PipelineContext(BaseModel):
     """State threaded through the pipeline. Accumulates; never mutated in place.
 
