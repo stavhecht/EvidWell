@@ -127,17 +127,38 @@ class RetrieveStage:
         Keeps the longest abstract, the highest citation count, and the
         strongest study-type classification across the group. Strongest-wins on
         study type is intentional: one provider knowing a paper is an RCT is
-        more informative than another not knowing.
+        more informative than another not knowing — which is most of the value
+        of running OpenAlex next to PubMed, since OpenAlex carries only a single
+        coarse ``type`` string.
+
+        Matching is on *any* shared identifier, not on ``dedup_key`` alone. Two
+        providers routinely return the same paper with different identifier
+        subsets, and keying on the strongest one each happens to have would file
+        them as two studies. Merging also teaches the group the identifiers it
+        was missing, so a later record matches on either.
         """
         merged: dict[str, CandidatePaper] = {}
+        #: every known identifier -> the group key it belongs to
+        aliases: dict[str, str] = {}
+
         for paper in papers:
-            key = paper.dedup_key
-            existing = merged.get(key)
-            if existing is None:
+            key = next(
+                (
+                    aliases[candidate]
+                    for candidate in paper.identity_keys
+                    if candidate in aliases
+                ),
+                None,
+            )
+            if key is None:
+                key = paper.dedup_key
                 merged[key] = paper
+                for candidate in paper.identity_keys:
+                    aliases[candidate] = key
                 continue
 
-            merged[key] = existing.model_copy(
+            existing = merged[key]
+            combined = existing.model_copy(
                 update={
                     "pmid": existing.pmid or paper.pmid,
                     "doi": existing.doi or paper.doi,
@@ -159,4 +180,12 @@ class RetrieveStage:
                     "raw_study_type": existing.raw_study_type or paper.raw_study_type,
                 }
             )
+            merged[key] = combined
+
+            # The merge may have supplied an identifier the group did not have.
+            # Registering it is what lets a third provider's record — carrying
+            # yet another subset — still land in this group.
+            for candidate in (*paper.identity_keys, *combined.identity_keys):
+                aliases.setdefault(candidate, key)
+
         return list(merged.values())
