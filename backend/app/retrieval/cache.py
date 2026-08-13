@@ -16,7 +16,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -194,22 +194,3 @@ class SourceCache:
             )
 
         logger.info("embedded %d new abstracts (%s)", len(pending), self._embedder.model_id)
-
-    async def touch(self, source_ids: list[str]) -> None:
-        """Bump ``last_seen_at``. Supports a later staleness sweep."""
-        if not source_ids:
-            return
-        await self._session.execute(
-            update(Source)
-            .where(Source.id.in_(source_ids))
-            .values(last_seen_at=datetime.now(UTC))
-        )
-
-    async def load(self, source_ids: list[str]) -> dict[str, Source]:
-        """Fetch cached rows by id, keyed for lookup."""
-        if not source_ids:
-            return {}
-        result = await self._session.execute(
-            select(Source).where(Source.id.in_(source_ids))
-        )
-        return {row.id: row for row in result.scalars()}

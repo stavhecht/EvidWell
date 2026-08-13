@@ -30,8 +30,6 @@ from app.llm.embeddings.base import EmbeddingError
 
 logger = logging.getLogger(__name__)
 
-OLLAMA_MODEL = "mxbai-embed-large"
-
 #: Output widths for the embedding models Ollama ships, keyed by name without
 #: its tag. A model outside this table falls back to the declared
 #: ``settings.ollama_embedding_dim`` — which reduces the startup check to

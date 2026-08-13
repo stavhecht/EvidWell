@@ -136,6 +136,67 @@ burn tokens and invite malformed output. `services/tiptap.py::body_text_to_doc()
 marker syntax into the document tree at the assembly step. Parsing failure is a validation
 failure.
 
+### 3.4b Reviewer media: uploaded, never linked
+
+A reviewer can add a picture from their own machine and a YouTube video to a draft. Both are
+block-level TipTap nodes beside the beat paragraphs, so neither disturbs the three beats —
+those are addressed by `attrs.beat`, and a picture above beat 1 does not change which
+paragraph the feed card is derived from.
+
+Two rules, enforced in `services/media.py` and re-checked at approve:
+
+**Images are uploaded, never linked.** `POST /api/console/media` stores the bytes and returns
+the only `src` shape the server will accept back. A linked image breaks when the other site
+reorganises and tracks the reader until it does, so the image node's `parseHTML` declines any
+other `src` — a picture copied out of a web page is dropped, while the same picture *dropped
+as a file* is uploaded and kept. What a file is is decided by its first bytes; the upload's
+filename and `Content-Type` are read and discarded. **SVG is not on the allowlist**: it is a
+script-bearing document, and one served from our own origin inside a published article is
+stored XSS against every reader of it. PNG, JPEG, GIF and WebP cannot carry script.
+
+**A video is an id, not a URL.** The document stores the eleven-character YouTube id and the
+renderer builds the embed src from it, so no string anyone typed reaches an iframe intact. The
+public page renders a still until it is pressed — an embedded player is about a megabyte of
+Google's JavaScript executed on every reader of every article that has one, and mounting the
+iframe on the click makes being tracked by YouTube something the reader chose.
+
+Storage is content-addressed local disk — filename is the SHA-256 of the bytes, so uploads
+dedupe, cannot collide, and nothing client-supplied reaches the filesystem. Served at
+`/api/media/…` rather than a prefix of its own because the dev proxy and any deployment
+already route `/api`. The S3 swap is that one module; orphan collection (an image dropped from
+a draft leaves its file) is deferred with the rest of §11.
+
+**Layout is two attributes, never CSS.** A reviewer can resize a picture or a video and wrap
+prose around it — Word's "Square" — and the whole model is `width` (20–100, a percentage) and
+`align` (`none` / `left` / `right`). Both are validated server-side beside the `src` check, on
+autosave and again at approve.
+
+The three things that follow from storing data rather than a stylesheet:
+
+- **The same classes render both sides.** `mediaWrapClass()` in `lib/media.ts` produces the
+  `.ew-media` classes that `styles/evidwell.css` defines, and the console editor and the
+  published article both use them. That identity is the only way "the reviewer approves what
+  publishes" is true of layout and not just of words.
+- **It collapses on a phone.** The float and the width live inside one `@media (min-width:
+  640px)` block, so under that every picture is a full-width block — a 40% float in a 320px
+  column leaves about fifteen characters a line. An inline `style` could not express this,
+  which is the concrete reason the document does not store one.
+- **Nothing reviewer-authored reaches a reader as style.** The renderer turns one of three
+  words into a class it already ships. There is no string a reviewer can supply that becomes
+  CSS on a published page.
+
+A percentage rather than pixels because the editor's column (~850px) and the article's measure
+(64ch) differ, and a percentage is the only unit that means the same in both. No x/y
+coordinates: media stay siblings of the beat paragraphs and are placed by being dragged
+between them, which is what keeps `attrs.beat` — and therefore the derived card — meaningful.
+
+In the editor the two nodes are React node views (`console/MediaNodeView.tsx`). Worth knowing
+before editing it: TipTap's React renderer wraps a node view in an element of *its own*, and
+that element is the one in the editor's flow, so it is the one that has to float — hence the
+`attrs` option on `addNodeView()` rather than styling the component's own root. Dragging the
+corner writes the width straight to that element's custom property and commits a single
+attribute on release, so one gesture costs one undo step and one autosave rather than sixty.
+
 ### 3.5 Embeddings: Voyage, behind an interface
 
 `voyage-3` tier: strong on scientific text, cheap enough to embed thousands of cached

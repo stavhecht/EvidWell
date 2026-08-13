@@ -176,6 +176,19 @@ export interface ArticleDetail {
   createdAt: string;
 }
 
+/**
+ * A just-uploaded image. No id and no record: the store is content-addressed,
+ * so the path is the identity, and an image is referenced only by the document
+ * that embeds it.
+ */
+export interface MediaUpload {
+  /** Origin-relative, e.g. `/api/media/1f/2a….png`. Goes into the image node. */
+  src: string;
+  /** Sniffed from the bytes — not the Content-Type the upload claimed. */
+  contentType: string;
+  bytes: number;
+}
+
 export interface Reviewer {
   id: string;
   email: string;

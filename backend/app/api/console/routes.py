@@ -20,13 +20,14 @@ import logging
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy import select, tuple_
 
 from app.api.console.schemas import (
     ArticleDetailOut,
     CreateRunRequest,
     LoginRequest,
+    MediaUploadOut,
     QueuePageOut,
     RejectRequest,
     ReviewerOut,
@@ -45,6 +46,7 @@ from app.security.auth import (
     equalise_timing,
     verify_password,
 )
+from app.services.media import UnsupportedMediaError, store_image
 from app.services.review import ReviewError, ReviewService
 
 logger = logging.getLogger(__name__)
@@ -202,6 +204,67 @@ async def reject(
         await ReviewService(session).reject(article_id, reviewer.id, payload.reason)
     except ReviewError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+# --- media -----------------------------------------------------------------
+
+
+@router.post("/media", response_model=MediaUploadOut, status_code=status.HTTP_201_CREATED)
+async def upload_media(
+    file: Annotated[UploadFile, File(description="A PNG, JPEG, GIF or WebP image")],
+    settings: SettingsDep,
+    reviewer: ReviewerDep,
+) -> MediaUploadOut:
+    """Store an image the reviewer picked on their own machine.
+
+    Not scoped to an article. The store is content-addressed and an image is
+    referenced only by the document that embeds it, so an article id here would
+    be a claim about ownership that nothing could keep true once the reviewer
+    moves the image between drafts.
+
+    The upload's filename and Content-Type are never trusted: the response
+    reports the type sniffed from the bytes, and the stored filename is their
+    digest. See ``services/media.py`` for why that matters when the same
+    directory is served back over HTTP.
+
+    413 when the file is over the ceiling, 415 when the bytes are not one of
+    the four formats a browser can render without executing anything.
+    """
+    ceiling = settings.media_max_bytes
+    # Read one byte past the ceiling: enough to know it was exceeded, never
+    # enough for an oversized upload to be buffered whole.
+    data = await file.read(ceiling + 1)
+    if len(data) > ceiling:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Images must be under {ceiling // (1024 * 1024)} MB.",
+        )
+    if not data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="The file was empty."
+        )
+
+    try:
+        # Synchronous write: bounded by the ceiling above, to local disk, from
+        # a console action a reviewer takes a handful of times per article. The
+        # S3 version of this call is async and belongs in the module that owns
+        # the store, not in a thread pool here.
+        stored = store_image(data, root=settings.media_root)
+    except UnsupportedMediaError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc)
+        ) from exc
+
+    logger.info(
+        "reviewer %s uploaded %s (%d bytes) as %s",
+        reviewer.email,
+        stored.content_type,
+        stored.size,
+        stored.src,
+    )
+    return MediaUploadOut(
+        src=stored.src, content_type=stored.content_type, bytes=stored.size
+    )
 
 
 # --- pipeline --------------------------------------------------------------

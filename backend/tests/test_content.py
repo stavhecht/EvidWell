@@ -10,7 +10,14 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from app.domain.contracts import ArticleBody, SynthesisOutput, count_sentences, extract_handles
+from app.domain.contracts import (
+    ArticleBody,
+    CitationGroup,
+    ExtractionOutput,
+    SynthesisOutput,
+    count_sentences,
+    extract_handles,
+)
 from app.domain.enums import Verdict
 from app.services.card import CARD_EXCERPT_MAX_CHARS, derive_card
 from app.services.tiptap import (
@@ -105,6 +112,85 @@ def test_sentence_counting_tolerates_trailing_whitespace() -> None:
 
 def test_handle_extraction_finds_multi_digit_handles() -> None:
     assert extract_handles("a [S1] b [S12] c") == {"S1", "S12"}
+
+
+# ---------------------------------------------------------------------------
+# Citation handle shape.
+#
+# A run was lost to `source_ids: ["S1-S8"]` — the shorthand a model reaches for
+# when every source backs the same claim. Two independent defences: the schema
+# pattern stops it being generated, the before-validator repairs it if some
+# other provider emits it anyway.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("shorthand", "expected"),
+    [
+        ("S1-S8", [f"S{n}" for n in range(1, 9)]),
+        ("S1-3", ["S1", "S2", "S3"]),
+        ("S1\u2013S3", ["S1", "S2", "S3"]),  # en dash
+        ("S2 - S4", ["S2", "S3", "S4"]),
+        ("S5-S5", ["S5"]),
+    ],
+)
+def test_handle_ranges_expand(shorthand: str, expected: list[str]) -> None:
+    assert CitationGroup(claim="c", source_ids=[shorthand]).source_ids == expected
+
+
+def test_comma_packed_handles_split() -> None:
+    group = CitationGroup(claim="c", source_ids=["S1, S2", "S4"])
+    assert group.source_ids == ["S1", "S2", "S4"]
+
+
+def test_overlapping_shorthand_dedupes_in_order() -> None:
+    group = CitationGroup(claim="c", source_ids=["S1-S3", "S2"])
+    assert group.source_ids == ["S1", "S2", "S3"]
+
+
+def test_absurd_range_is_rejected_not_expanded() -> None:
+    # Inventing 900 handles we never retrieved is worse than failing loudly.
+    with pytest.raises(ValidationError):
+        CitationGroup(claim="c", source_ids=["S1-S900"])
+
+
+@pytest.mark.parametrize("handle", ["SX", "1", "S", "S1x", "", "source 1"])
+def test_genuinely_malformed_handles_still_rejected(handle: str) -> None:
+    with pytest.raises(ValidationError):
+        CitationGroup(claim="c", source_ids=[handle])
+
+
+def test_handle_pattern_reaches_the_structured_output_schema() -> None:
+    """The constraint is only worth anything if the grammar can see it."""
+    schema = SynthesisOutput.model_json_schema()
+    items = schema["$defs"]["CitationGroup"]["properties"]["source_ids"]["items"]
+    assert items["pattern"] == "^S[0-9]+$"
+
+
+def test_schema_patterns_avoid_escapes_ollama_cannot_compile() -> None:
+    """Guard the `[0-9]`-not-`\\d` decision in contracts.py.
+
+    Ollama compiles `pattern` into GBNF and its converter rejects the `\\d`
+    class escapes outright — the request fails at 400 "failed to parse grammar",
+    which takes down *every* call using the schema, not just a malformed one.
+    Tidying `[0-9]` back to `\\d` therefore looks harmless and is not.
+    """
+    unsupported = ("\\d", "\\w", "\\s", "\\D", "\\W", "\\S")
+
+    def patterns(node: object) -> list[str]:
+        if isinstance(node, dict):
+            found = [node["pattern"]] if isinstance(node.get("pattern"), str) else []
+            return found + [p for v in node.values() for p in patterns(v)]
+        if isinstance(node, list):
+            return [p for item in node for p in patterns(item)]
+        return []
+
+    for model in (SynthesisOutput, ExtractionOutput):
+        for pattern in patterns(model.model_json_schema()):
+            assert not any(esc in pattern for esc in unsupported), (
+                f"{model.__name__}: pattern {pattern!r} uses an escape Ollama "
+                f"cannot compile; use an explicit class like [0-9]"
+            )
 
 
 # ---------------------------------------------------------------------------

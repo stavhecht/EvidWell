@@ -6,6 +6,7 @@ import { apiFetch, qs, setAuthToken } from "./client";
 import type {
   ArticleDetail,
   ArticleStatus,
+  MediaUpload,
   QueueItem,
   Reviewer,
   TipTapDoc,
@@ -98,6 +99,25 @@ export async function rejectArticle(id: string, reason: string): Promise<void> {
     method: "POST",
     body: JSON.stringify({ reason }),
   });
+}
+
+/**
+ * Store an image the reviewer picked on their own machine.
+ *
+ * Returns the path to put in the document's image node, and that is the only
+ * `src` the server will accept back — images are uploaded, never linked.
+ *
+ * Not scoped to an article: the store is content-addressed, so the path is the
+ * identity and an article id here would be an ownership claim nothing could
+ * keep true. 413 over the size ceiling, 415 when the bytes are not a PNG,
+ * JPEG, GIF or WebP — checked from the file's own contents, not its name.
+ *
+ * STUB.
+ */
+export async function uploadMedia(file: File): Promise<MediaUpload> {
+  const form = new FormData();
+  form.append("file", file);
+  return apiFetch<MediaUpload>("/console/media", { method: "POST", body: form });
 }
 
 /** Enqueue a topic. Returns 202 — generation takes minutes. STUB. */

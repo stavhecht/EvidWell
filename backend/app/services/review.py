@@ -22,6 +22,7 @@ from app.domain.enums import ArticleStatus, StudyType
 from app.domain.models import Article, ArticleSource, Source
 from app.evidence.grading import is_weak_evidence
 from app.services.card import derive_card
+from app.services.media import UnsafeMediaError, assert_media_is_ours
 from app.services.tiptap import cited_handles_in_doc
 
 logger = logging.getLogger(__name__)
@@ -44,13 +45,21 @@ class ReviewService:
         application error.
 
         Called on a debounce from the editor, so it must be cheap and
-        idempotent. **No validation runs here** — failing a reviewer's autosave
-        mid-sentence, while a citation is momentarily orphaned, would be
-        hostile. Validation happens at approve time, where it can block
-        publication rather than typing.
+        idempotent. **Citation validation does not run here** — failing a
+        reviewer's autosave mid-sentence, while a citation is momentarily
+        orphaned, would be hostile. That check happens at approve time, where
+        it can block publication rather than typing.
+
+        Media is the exception, and the difference is that there is no
+        half-typed state to be caught in: an image or video block is inserted
+        whole or not at all, so a bad one can only come from a paste of foreign
+        HTML or from a bug. Refusing it here costs a reviewer nothing and is
+        the difference between a broken `src` being noticed now and it being
+        noticed by a reader.
 
         Raises:
-            ReviewError: the article is not in ``pending_review``.
+            ReviewError: the article is not in ``pending_review``, or the
+                document references media this system did not store.
         """
         article = await self._get(article_id)
         if article.status != ArticleStatus.PENDING_REVIEW:
@@ -58,6 +67,11 @@ class ReviewService:
                 f"cannot edit an article in state '{article.status}'; "
                 "only drafts pending review are editable"
             )
+
+        try:
+            assert_media_is_ours(content)
+        except UnsafeMediaError as exc:
+            raise ReviewError(str(exc)) from exc
 
         article.edited_content = content
         await self._session.flush()
@@ -70,6 +84,11 @@ class ReviewService:
         reviewer can orphan a citation by deleting a sentence, or paste a handle
         that was never provided — invariant #2 has to survive human editing, not
         just generation.
+
+        Media is re-checked here too. ``save_edits`` already refuses a foreign
+        image or video, so this is the second lock on the same door: publishing
+        is the moment content stops being ours and starts being every reader's,
+        and it is the wrong moment to be relying on an earlier check having run.
 
         Raises:
             ReviewError: wrong status, or edited content that no longer
@@ -89,6 +108,10 @@ class ReviewService:
 
         content = article.edited_content or article.original_content
         await self._assert_citations_still_resolve(article_id, content)
+        try:
+            assert_media_is_ours(content)
+        except UnsafeMediaError as exc:
+            raise ReviewError(str(exc)) from exc
 
         card = derive_card(article.headline, content, article.verdict)
         now = datetime.now(UTC)

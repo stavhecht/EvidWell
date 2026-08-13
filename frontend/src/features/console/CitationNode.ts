@@ -16,10 +16,6 @@
 
 import { Node, mergeAttributes } from "@tiptap/core";
 
-export interface CitationAttrs {
-  sourceIds: string[];
-}
-
 export const Citation = Node.create({
   name: "citation",
   group: "inline",

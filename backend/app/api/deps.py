@@ -81,12 +81,3 @@ async def require_reviewer(
 
 
 ReviewerDep = Annotated[AuthenticatedReviewer, Depends(require_reviewer)]
-
-
-async def require_admin(reviewer: ReviewerDep) -> AuthenticatedReviewer:
-    """Admin-only gate. Unused in the MVP; the seam exists for user management."""
-    if reviewer.role is not UserRole.ADMIN:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required"
-        )
-    return reviewer

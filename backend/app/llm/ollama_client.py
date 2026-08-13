@@ -228,8 +228,11 @@ async def _chat(
                         "That response broke these constraints:\n"
                         f"{_validation_feedback(exc)}\n\n"
                         "Return the same content corrected to satisfy every one "
-                        "of them. Shorten rather than rewrite, and keep every "
-                        "citation handle exactly as it was."
+                        "of them. Shorten rather than rewrite, and do not swap "
+                        "in different sources or renumber the ones you used. "
+                        "If a constraint above names a citation handle, that "
+                        "handle is the thing to fix: write one handle per entry "
+                        '("S1", "S2"), never a range like "S1-S8".'
                     ),
                 },
             ]

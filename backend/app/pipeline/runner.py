@@ -83,9 +83,9 @@ class PipelineWorker:
     async def _claim_next_run(self) -> tuple[str, str, str | None] | None:
         """Atomically claim one queued run.
 
-        ``FOR UPDATE SKIP LOCKED`` is correct from the start even at
-        concurrency 1: it costs nothing, and it means raising concurrency later
-        is a config change rather than a correctness change.
+        ``FOR UPDATE SKIP LOCKED`` is correct from the start even though one
+        worker runs one run at a time: it costs nothing, and it means a second
+        worker process is a deployment change rather than a correctness change.
         """
         factory = get_session_factory()
         async with factory() as session:

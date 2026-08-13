@@ -10,6 +10,7 @@ write — or worse, as silently degraded retrieval.
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -20,7 +21,6 @@ class Settings(BaseSettings):
         env_file=(".env", "../.env"), extra="ignore", case_sensitive=False
     )
 
-    environment: str = "local"
     debug: bool = False
 
     # --- database ---
@@ -101,7 +101,18 @@ class Settings(BaseSettings):
 
     # --- pipeline ---
     worker_poll_interval_seconds: float = 5.0
-    worker_concurrency: int = 1
+
+    # --- reviewer-uploaded media ---
+    #: Where uploaded images are written, relative to the backend working
+    #: directory unless absolute. Local disk is the store while deployment is
+    #: deferred; the S3 swap is `services/media.py` alone. Files are
+    #: content-addressed, so this directory is a cache in every sense except
+    #: that published articles point into it — back it up with the database.
+    media_root: Path = Path("var/media")
+    #: Per-file ceiling. Generous for a photo, small enough that a stray
+    #: upload cannot fill the disk or the request buffer. The reviewer sees the
+    #: limit in the error, so raising it is a config change, not a code one.
+    media_max_bytes: int = 8 * 1024 * 1024
 
     @field_validator("cors_origins", "enabled_providers", mode="before")
     @classmethod

@@ -116,7 +116,10 @@ thing.
 Alongside the body, return a `citations` list mapping each factual claim you \
 made to the handles supporting it. This drives source verification in review, \
 so it must match what you actually wrote — every handle in your body should \
-appear here, attached to the claim it supports."""
+appear here, attached to the claim it supports.
+- List every handle separately, one per entry: ["S1", "S2", "S3"]. Never \
+collapse them into a range like ["S1-S3"], even when every source supports the \
+same claim."""
 
 
 def render_source_block(payload: SynthesisInput) -> str:

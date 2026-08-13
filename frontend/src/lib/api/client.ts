@@ -32,7 +32,11 @@ export function setAuthToken(token: string | null): void {
 export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
-  if (init.body) headers.set("Content-Type", "application/json");
+  // Only a string body is JSON. A `FormData` body — the media upload — has to
+  // reach `fetch` without a Content-Type, because the multipart boundary is
+  // generated per request and only the browser knows it; setting the header
+  // here strips the boundary and the server sees a body it cannot parse.
+  if (typeof init.body === "string") headers.set("Content-Type", "application/json");
   if (authToken) headers.set("Authorization", `Bearer ${authToken}`);
 
   const response = await fetch(`${API_BASE}${path}`, { ...init, headers });

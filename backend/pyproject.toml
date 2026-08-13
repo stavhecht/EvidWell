@@ -18,6 +18,9 @@ dependencies = [
     "voyageai>=0.3",
     "pyjwt>=2.10",
     "argon2-cffi>=23.1",
+    # Starlette parses multipart bodies through this; without it the console's
+    # image upload endpoint raises at import time rather than at request time.
+    "python-multipart>=0.0.20",
 ]
 
 [project.optional-dependencies]
