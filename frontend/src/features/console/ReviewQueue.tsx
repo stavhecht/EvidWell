@@ -15,17 +15,23 @@
  * and that is a question about the *pair*, answerable here without opening one.
  */
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { Trash2 } from "lucide-react";
+import { LoaderCircle, Trash2 } from "lucide-react";
 
-import { consoleKeys, createRun, fetchQueue, rejectArticle } from "@/lib/api/console";
+import {
+  consoleKeys,
+  createRun,
+  fetchQueue,
+  fetchRuns,
+  rejectArticle,
+} from "@/lib/api/console";
 import { GradeBar } from "@/features/evidence/GradeBar";
 import { VerdictMark } from "@/features/evidence/VerdictMark";
 import { GRADE_LABELS, VERDICT_LABELS } from "@/features/evidence/labels";
 import { subjectBorderLeft } from "@/features/evidence/subject";
-import type { ArticleStatus, QueueItem } from "@/types/api";
+import type { ArticleStatus, PipelineRun, QueueItem } from "@/types/api";
 import { useAuth } from "./auth";
 import { PRIMARY } from "./controls";
 import {
@@ -37,6 +43,11 @@ import {
   NEW_RUN_FORM,
   NEW_RUN_ROW,
   NEW_RUN_TOPIC_FIELD,
+  PENDING_RUN_KICKER,
+  PENDING_RUN_NOTE,
+  PENDING_RUN_ROW,
+  PENDING_RUN_SPINNER,
+  PENDING_RUN_TOPIC,
   QUEUE_FOOTNOTE,
   QUEUE_HEADER,
   QUEUE_LIST,
@@ -77,6 +88,17 @@ export function ReviewQueue() {
     queryKey: consoleKeys.queue(status),
     queryFn: () => fetchQueue({ status }),
   });
+
+  // Runs still generating. Only pending review shows them — they are drafts
+  // that have not happened yet, so they belong to no other tab. The hook runs
+  // on every tab regardless, so a run finishing while the reviewer is reading
+  // Published still refreshes the queue underneath them.
+  const inFlight = useInFlightRuns();
+  const generating = status === "pending_review" ? inFlight : [];
+
+  // Without this the note under a stalled run never updates: see the comment on
+  // `useTick`.
+  useTick(generating.length > 0, 30_000);
 
   return (
     <main className={CONSOLE_PAGE}>
@@ -119,12 +141,19 @@ export function ReviewQueue() {
 
       {queryStatus === "pending" ? (
         <p className={QUEUE_MESSAGE}>Loading…</p>
-      ) : (data?.items.length ?? 0) === 0 ? (
+      ) : (data?.items.length ?? 0) === 0 && generating.length === 0 ? (
         <p className={QUEUE_MESSAGE}>
           {status === "pending_review" ? "Nothing waiting for review." : "Nothing here."}
         </p>
       ) : (
         <ul className={QUEUE_LIST}>
+          {/* Above the queue, against its oldest-first order: these are the
+              newest thing here, and the reviewer who just submitted a topic is
+              looking for exactly this row. They are also the only rows whose
+              state changes while being looked at. */}
+          {generating.map((run) => (
+            <PendingRunRow key={run.id} run={run} />
+          ))}
           {data?.items.map((item) => (
             <QueueRow key={item.id} item={item} tab={status} />
           ))}
@@ -137,6 +166,137 @@ export function ReviewQueue() {
       </p>
     </main>
   );
+}
+
+/* ── runs in flight ─────────────────────────────────────────────────────── */
+
+/** How often to ask whether a generating run has landed. */
+const RUN_POLL_MS = 5_000;
+
+/**
+ * When "a couple of minutes" stops being true.
+ *
+ * Generous on purpose — synthesis alone is a model call, and four scholarly
+ * APIs sit in front of it behind a throttle. This is the point at which a
+ * reassuring message would start misinforming, not the point at which the run
+ * is late.
+ */
+const SLOW_RUN_AFTER_MS = 10 * 60_000;
+
+function isInFlight(run: PipelineRun): boolean {
+  return run.status === "queued" || run.status === "running";
+}
+
+/**
+ * The runs still generating, plus a refresh of the queue when one lands.
+ *
+ * Polling stops the moment nothing is in flight, so an idle console makes one
+ * request per load rather than one every five seconds. `refetchIntervalIn
+ * Background` is left at its default, so a backgrounded tab does not poll at
+ * all.
+ */
+function useInFlightRuns(): PipelineRun[] {
+  const queryClient = useQueryClient();
+
+  const { data } = useQuery({
+    queryKey: consoleKeys.runs,
+    queryFn: () => fetchRuns(),
+    // Live state, unlike the rest of the console — the global 60s staleTime
+    // would otherwise serve a cached snapshot of a run that has since finished.
+    staleTime: 0,
+    refetchInterval: (query) =>
+      query.state.data?.items.some(isInFlight) ? RUN_POLL_MS : false,
+  });
+
+  // A run leaving the in-flight set is the moment its draft becomes reviewable.
+  // The queue has a 60s staleTime and no polling of its own, so without this
+  // the spinner would vanish and the row it stood in for would not appear until
+  // the reviewer reloaded the page — the exact gap this feature exists to close.
+  const watching = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!data) return;
+    const current = new Set(data.items.filter(isInFlight).map((run) => run.id));
+    const landed = [...watching.current].some((id) => !current.has(id));
+    watching.current = current;
+    if (landed) void queryClient.invalidateQueries({ queryKey: consoleKeys.queues });
+  }, [data, queryClient]);
+
+  return data?.items.filter(isInFlight) ?? [];
+}
+
+/**
+ * A re-render on a timer, for as long as something is generating.
+ *
+ * The poll alone is not enough. A queued run that no worker ever claims returns
+ * byte-identical JSON every time; react-query's structural sharing keeps the
+ * same object and nothing re-renders, so an elapsed-time message computed in
+ * render would freeze at whatever it said on first paint — and that stalled run
+ * is precisely the case the message exists to report.
+ */
+function useTick(active: boolean, everyMs: number): void {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!active) return;
+    const id = setInterval(() => setTick((n) => n + 1), everyMs);
+    return () => clearInterval(id);
+  }, [active, everyMs]);
+}
+
+/**
+ * A draft being generated: the row that stands where the finished one will be.
+ *
+ * It carries the topic rather than a placeholder headline, because the topic is
+ * what the reviewer typed and is the only thing that identifies which of
+ * several runs this is. There is no verdict, grade or discard action — none of
+ * them exist yet, and stubbing them greyed-out would imply the row is a draft
+ * in a worse state rather than one that has not been written.
+ *
+ * `aria-live` without `role="status"`, which would replace the row's own
+ * `listitem` role and drop it out of the list for anyone navigating by one.
+ * `polite` because the thing it announces is the note changing under a run that
+ * has stopped behaving — worth hearing at a pause, not worth an interruption.
+ */
+function PendingRunRow({ run }: { run: PipelineRun }) {
+  return (
+    <li className={PENDING_RUN_ROW} aria-live="polite">
+      <div className={QUEUE_ROW_SIGNALS}>
+        <LoaderCircle size={13} className={PENDING_RUN_SPINNER} aria-hidden />
+        <span className={PENDING_RUN_KICKER}>Generating</span>
+      </div>
+
+      <p className={PENDING_RUN_TOPIC}>{run.topic}</p>
+      <p className={PENDING_RUN_NOTE}>{runNote(run)}</p>
+    </li>
+  );
+}
+
+/**
+ * What to say under the spinner.
+ *
+ * "A couple of minutes" is true of a healthy run and a lie about a stalled one,
+ * and the distinction is not hypothetical here: compose starts the API without
+ * the worker (CLAUDE.md), so "queued and nothing is consuming the queue" is a
+ * state reached routinely — and a spinner promising minutes would be the only
+ * thing on screen getting it wrong. Past the threshold the message says which
+ * of the two it is, because "queued" and "running" have different causes and
+ * different fixes.
+ */
+function runNote(run: PipelineRun): string {
+  const elapsed = Date.now() - new Date(run.createdAt).getTime();
+
+  if (elapsed > SLOW_RUN_AFTER_MS) {
+    return run.status === "queued"
+      ? "Still queued — no worker has picked this up yet."
+      : "Still working. This one is taking longer than usual.";
+  }
+
+  // >1 means a retryable failure requeued it. Worth saying: the reviewer is
+  // otherwise watching a spinner whose elapsed time no longer means anything.
+  if (run.attempts > 1) {
+    return `Retrying, attempt ${run.attempts} - usually takes a couple of minutes.`;
+  }
+
+  return "Article in the making - usually takes a couple of minutes.";
 }
 
 /**
@@ -267,9 +427,11 @@ function NewRunForm() {
       />
 
       {submit.isSuccess ? (
+        // The queue below now shows the run generating, so this no longer has
+        // to promise that something will happen — only the part the row cannot
+        // say, which is what happens when it finishes.
         <p className={NEW_RUN_CONFIRMATION}>
-          Queued. The draft will appear here for review once generated — nothing
-          publishes without your approval.
+          Queued. Nothing it produces publishes without your approval.
         </p>
       ) : null}
       {submit.isError ? (

@@ -20,6 +20,7 @@ from app.domain.contracts import CandidatePaper
 from app.domain.enums import SourceApi
 from app.evidence.grading import classify_study_type
 from app.retrieval.base import ProviderError, RateLimited, SearchQuery
+from app.retrieval.throttle import HttpClient, retry_after_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +33,24 @@ EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 REVIEW_FILTER = '(systematic[sb] OR "meta-analysis"[pt] OR "systematic review"[pt])'
 
 
+def detect_throttle(response: httpx.Response) -> float | None:
+    """E-utilities signals throttling in a 200 body, not only with a 429.
+
+    Handed to the ``ThrottledClient`` so those responses are retried like any
+    other throttle instead of being parsed. Left unhandled, the JSON body has
+    no ``idlist``, the search returns zero candidates, and the pipeline reads
+    that as "no literature exists for this claim" — the single most misleading
+    conclusion this provider can produce.
+
+    Returns the seconds to wait, or None when the response is not a throttle.
+    """
+    if "API rate limit exceeded" in response.text[:500]:
+        return 1.0
+    return None
+
+
 class PubMedProvider:
-    def __init__(self, http: httpx.AsyncClient, api_key: str | None = None) -> None:
+    def __init__(self, http: HttpClient, api_key: str | None = None) -> None:
         self._http = http
         self._api_key = api_key
 
@@ -123,19 +140,19 @@ class PubMedProvider:
 
     @staticmethod
     def _raise_for_rate_limit(response: httpx.Response) -> None:
-        """E-utilities signals throttling without always using a status code.
+        """Backstop for a provider constructed against a bare httpx client.
 
-        A status-only check silently treats a throttle as an empty result,
-        which looks like "no literature exists for this claim" — the single
-        most misleading failure this provider can produce.
+        Wired the normal way (``retrieval/factory.py``) the ``ThrottledClient``
+        has already retried and raised before we reach here, so this fires only
+        when something skipped it. Kept because the failure it catches is
+        silent — see ``detect_throttle``.
         """
         if response.status_code == 429:
-            retry_after = response.headers.get("retry-after")
             raise RateLimited(
                 "pubmed rate limit (429)",
-                retry_after=float(retry_after) if retry_after else None,
+                retry_after=retry_after_seconds(response) or None,
             )
-        if "API rate limit exceeded" in response.text[:500]:
+        if detect_throttle(response) is not None:
             raise RateLimited("pubmed rate limit (200 body)", retry_after=1.0)
 
     def _parse_article(self, element: ElementTree.Element) -> CandidatePaper | None:

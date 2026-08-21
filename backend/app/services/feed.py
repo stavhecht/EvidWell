@@ -138,6 +138,10 @@ class FeedService:
                         "url": source.resolved_url,
                         "pmid": source.pmid,
                         "doi": source.doi,
+                        # Marked on the source, not only in the article banner:
+                        # a reader who scrolls to the citations should not have
+                        # to guess which one the notice is about.
+                        "retracted": source.retracted_at is not None,
                     }
                 )
             claims.setdefault(link.claim, []).append(link.citation_handle)
@@ -161,6 +165,12 @@ class FeedService:
             "citations": citations,
             "evidence_grade": article.evidence_grade,
             "published_at": article.published_at,
+            # Derived from the flag rather than recomputed from the sources
+            # above, so the banner and the console agree on when it was raised.
+            # The article stays readable — a retracted source does not
+            # automatically invalidate a conclusion — but the reader is told
+            # before they read it rather than after.
+            "retraction_notice": article.retraction_flagged_at is not None,
         }
 
 

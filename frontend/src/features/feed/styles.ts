@@ -180,6 +180,25 @@ export const META_CELL_LABEL =
 export const META_CELL_VALUE = "font-body text-field text-ink-2";
 
 /** Server-provided, unconditional, and deliberately not model output. */
+/**
+ * The retraction notice, above the headline rather than beside the sources.
+ *
+ * Placed first because it changes how the rest of the page should be read, and
+ * a reader who stops after the verdict must still have seen it. It uses the
+ * accent ink and a heavy left rule — the same restraint as the rest of the
+ * design, one step louder — because this is the only element on a public page
+ * that says our own article may be wrong.
+ */
+export const RETRACTION_BANNER =
+  "mb-6 border-l-2 border-accent bg-surface px-4 py-3 font-body text-meta text-ink";
+export const RETRACTION_BANNER_LABEL =
+  "block font-body text-kicker font-semibold uppercase tracking-[0.06em] text-accent-ink";
+export const RETRACTION_BANNER_TEXT = "mt-1.5 block max-w-[64ch] text-ink-2";
+
+/** Marks the withdrawn paper in the source list, so the banner is actionable. */
+export const SOURCE_RETRACTED =
+  "ml-[26px] mt-1 font-body text-micro font-semibold uppercase tracking-[0.04em] text-accent-ink";
+
 export const ARTICLE_DISCLAIMER =
   "mt-[34px] max-w-[64ch] border-t border-rule-soft pt-[13px] font-body text-meta text-ink-3";
 

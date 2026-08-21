@@ -19,8 +19,29 @@ from pydantic import BaseModel, Field, StringConstraints, field_validator
 
 from app.domain.enums import SourceApi, StudyType, Verdict
 
-# Matches a citation handle as the model emits it inline: [S1], [S2]…
-CITATION_MARKER_RE = re.compile(r"\[(S\d+)\]")
+#: One inline citation marker as the model emits it: ``[S1]``, or ``[S1, S5]``
+#: when several sources back one statement.
+#:
+#: **The comma form is accepted deliberately.** The canonical multi-source
+#: syntax is adjacent brackets (``[S1][S5]``), which is what ``doc_to_plain_text``
+#: regenerates — but it is not a form a model produces unprompted, and the
+#: synthesis prompt only ever showed a single handle. A model asked to cite
+#: three sources writes ``[S1, S5, S8]``, and rejecting that cost a whole draft:
+#: the body failed to parse, the article was written ``validation_failed``, and
+#: it never reached the review queue.
+#:
+#: **This is the only definition of a marker, and tiptap.py builds on it.** The
+#: parser and the handle extractor disagreeing is worse than either being
+#: strict: handles inside a marker the extractor cannot read are absent from
+#: ``all_cited_handles()``, so ``was_cited`` is false for sources the article
+#: visibly cites, and ``check_beats_are_cited`` reports an uncited beat that is
+#: cited on the page.
+CITATION_MARKER_PATTERN = r"\[S\d+(?:\s*,\s*S\d+)*\]"
+CITATION_MARKER_RE = re.compile(CITATION_MARKER_PATTERN)
+
+#: A handle within a marker. Only ever applied to ``CITATION_MARKER_RE``
+#: matches, so it does not need to guard against prose ("the S1 group").
+_HANDLE_IN_MARKER_RE = re.compile(r"S\d+")
 
 #: A citation handle in canonical form. Expressed as a schema-level pattern
 #: rather than a validator on purpose: ``model_json_schema()`` carries
@@ -57,8 +78,16 @@ def count_sentences(text: str) -> int:
 
 
 def extract_handles(text: str) -> set[str]:
-    """Every citation handle appearing inline in a body of text."""
-    return set(CITATION_MARKER_RE.findall(text))
+    """Every citation handle appearing inline in a body of text.
+
+    Two steps rather than one capturing regex, because a marker may hold
+    several handles (``[S1, S5]``) and ``findall`` returns one group per match.
+    """
+    return {
+        handle
+        for marker in CITATION_MARKER_RE.findall(text)
+        for handle in _HANDLE_IN_MARKER_RE.findall(marker)
+    }
 
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -133,6 +162,25 @@ class CandidatePaper(BaseModel):
         return "title:" + re.sub(r"[^a-z0-9]+", "", self.title.lower())
 
 
+class CachedCandidate(BaseModel):
+    """A candidate paired with the ``sources`` row it was written to.
+
+    RetrieveStage produces these; RankStage consumes them. The pairing exists
+    on the context because RankStage used to rebuild it by re-upserting every
+    candidate a second time — 100 extra statements to recover ids the previous
+    stage already held in memory, most of them single-row UPDATEs.
+
+    A model rather than a parallel ``dedup_key -> source_id`` map, so the two
+    halves cannot drift: a candidate is either carried with its id or not
+    carried at all. The map version silently drops any candidate missing from
+    it, and a source dropped between retrieval and ranking is invisible in the
+    output — it just looks like thinner evidence.
+    """
+
+    source_id: str
+    paper: CandidatePaper
+
+
 class RankedSource(BaseModel):
     """A cached source with its score against one specific claim."""
 
@@ -165,12 +213,42 @@ class PromptSource(BaseModel):
     year: int | None
     study_type: StudyType
     source_id: str
+    #: Which target claims this source was retrieved for — a list, because one
+    #: paper answering two claims appears **once** in the prompt under one
+    #: handle (see ``assign_handles``), and losing that would show the model
+    #: the same study twice as though it were two findings.
+    #:
+    #: Carried purely so validation can apply the evidence quorum *per claim*.
+    #: Counted article-wide, one well-supported claim lets a thin one ride
+    #: along on its sources, and nothing downstream can see that happened.
+    #:
+    #: **Required, and non-empty.** Defaulting it to ``[]`` was tried: a source
+    #: attributed to no claim supports no claim, so every draft failed the
+    #: quorum check for reasons that pointed at the verdict rather than at the
+    #: missing field. Fail-closed is the right direction, but a required field
+    #: fails at construction instead, where the actual mistake is.
+    claims: list[str] = Field(min_length=1)
 
 
 class SynthesisInput(BaseModel):
+    """What the synthesis stage was given, carried forward for validation.
+
+    ``sources`` may be **empty**, and that is a meaningful state rather than a
+    missing guard: a topic with no usable literature gets the deterministic
+    no-evidence article (``services/no_evidence.py``), and validation still
+    needs a payload on the context to check against — an empty handle set is
+    the correct thing for it to find, because an empty one is what the article
+    was written from.
+
+    The guarantee that a *generative* call never runs on zero sources lives in
+    ``SynthesizeStage``, which branches to the template before reaching the
+    client. Enforcing it here instead would make the honest "no evidence"
+    article unrepresentable, which is how it came to crash the pipeline.
+    """
+
     product: str
     target_claims: list[str]
-    sources: list[PromptSource] = Field(min_length=1)
+    sources: list[PromptSource] = Field(default_factory=list)
 
     @property
     def handle_set(self) -> set[str]:

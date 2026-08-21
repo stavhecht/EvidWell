@@ -7,6 +7,7 @@ validation report, retrieved-but-uncited sources, pipeline run history.
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 
 from pydantic import BaseModel, Field
 
@@ -85,6 +86,15 @@ class ReviewSourceOut(CamelModel):
     relevance_score: float | None
     #: Drives the inline warning marker in the sources panel.
     is_weak_evidence: bool
+    #: The literature has withdrawn this paper. Distinct from weak evidence:
+    #: weak means the study is a poor basis for confidence, retracted means it
+    #: is not a basis at all.
+    retracted: bool = False
+    #: Under investigation, not withdrawn. Recorded rather than refused,
+    #: because the paper may yet be exonerated.
+    concern: bool = False
+    #: Which provider said so, e.g. "pubmed: retracted publication".
+    retraction_note: str | None = None
 
 
 class ValidationFailureOut(CamelModel):
@@ -133,6 +143,11 @@ class ArticleDetailOut(CamelModel):
     #: client-side joining.
     sources: list[ReviewSourceOut]
     pipeline_run_id: str | None
+    #: Set when a cited source has been retracted since this article was
+    #: written. The article keeps its status — this raises it for a human,
+    #: it does not withdraw it.
+    retraction_flagged_at: datetime | None = None
+    retraction_detail: dict | None = None
     created_at: datetime
 
 
@@ -179,6 +194,18 @@ class StageRunOut(CamelModel):
     status: RunStatus
     error: dict | None
     metrics: dict | None
+    #: Provider-namespaced model this stage called; null for the four that call
+    #: none. Recorded from the call itself, so it is what actually ran rather
+    #: than what the settings say now.
+    model: str | None
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    #: Computed at read time from app/llm/pricing.py, never stored. Null means
+    #: the model is not in the price table — which is *not* zero, and reads in
+    #: the console as "unknown" so a newly-pointed-at model cannot look free.
+    estimated_cost_usd: Decimal | None
     started_at: datetime | None
     finished_at: datetime | None
 
@@ -189,8 +216,28 @@ class RunOut(CamelModel):
     status: RunStatus
     article_id: str | None
     error: dict | None
+    #: Lifetime totals across every attempt, so a run that retried reports what
+    #: it really spent. Not priceable as a unit — the stages may have run on
+    #: different models — which is why the cost below is summed per stage.
     input_tokens: int
     output_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    #: Sum of the per-stage costs, or null if *any* stage that consumed tokens
+    #: ran on an unpriced model. All-or-nothing: a partial sum is a plausible
+    #: number that is wrong by an order of magnitude, and the per-stage figures
+    #: stay visible either way.
+    estimated_cost_usd: Decimal | None
+    #: Attempts started. >1 means a retryable failure requeued this run; the
+    #: stages below are the latest attempt.
+    attempts: int
+    #: When the run is queued and waiting out a retry backoff. Null otherwise —
+    #: distinguishes "waiting deliberately" from "the worker is not running".
+    next_attempt_at: datetime | None
+    #: Last sign of life while `running`. A timestamp minutes old means the
+    #: worker died and the sweep has not reached the run yet — without it a
+    #: dead run and a slow one look identical in the console.
+    heartbeat_at: datetime | None
     stages: list[StageRunOut]
     created_at: datetime
     finished_at: datetime | None

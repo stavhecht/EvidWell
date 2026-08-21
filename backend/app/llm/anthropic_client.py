@@ -16,11 +16,17 @@ Model choices and constraints, for reviewers unfamiliar with this API surface:
   Sonnet 5 — a request carrying them returns a 400. Behaviour is steered by
   prompt only. (Older/smaller models still accept them; this code sends none
   either way, so it is safe across the range.)
-* ``max_tokens`` caps thinking **plus** visible output on models where thinking
-  is on by default (Opus 5, Sonnet 5). Synthesis is therefore given 8K even
-  though the article is ~300 words; sizing ``max_tokens`` to the article would
-  truncate mid-response. Both calls always pass an explicit cap — never rely on
-  a default.
+* ``max_tokens`` caps thinking **plus** visible output. Synthesis is therefore
+  given 8K even though the article is ~300 words; sizing ``max_tokens`` to the
+  article would truncate mid-response, and a truncated structured response has
+  no parsed output at all — which is why ``_check_truncation`` names the cause
+  rather than letting it surface as a schema failure. Both calls always pass an
+  explicit cap — never rely on a default.
+* **Both calls pass ``thinking`` explicitly.** Whether an omitted ``thinking``
+  means "think" or "don't think" varies across the model range (Sonnet 5 and
+  Opus 5 think; Opus 4.8 and 4.7 do not), and the model here is config. Passing
+  it explicitly is what keeps the token budgets above meaningful regardless of
+  ``settings.extraction_model`` / ``settings.synthesis_model``.
 * The system prompt is byte-stable across every call and carries the
   ``cache_control`` breakpoint. Anything per-article goes in the user turn,
   after it — a single volatile byte in the prefix would invalidate the cache
@@ -34,6 +40,7 @@ from typing import Any
 
 import anthropic
 from anthropic import AsyncAnthropic
+from anthropic.types import TextBlockParam, ThinkingConfigAdaptiveParam
 
 from app.domain.contracts import (
     ExtractionInput,
@@ -56,14 +63,40 @@ logger = logging.getLogger(__name__)
 # Defaults only — the orchestrator passes settings.extraction_model /
 # settings.synthesis_model. Split by job: extraction is mechanical, synthesis
 # carries the grounding and verdict-ceiling guarantees.
-EXTRACTION_MODEL = "claude-haiku-4-5"
+#
+# Extraction is NOT on a small model, despite being the mechanical call. Both
+# default to claude-sonnet-5 because claude-haiku-4-5 left `ingredients` empty
+# in 9 of 10 samples (measured; see config.py), and an empty ingredient list
+# silently unanchors the PubMed query. Haiku is also pre-adaptive-thinking, so
+# the `thinking` argument below would 400 on it.
+EXTRACTION_MODEL = "claude-sonnet-5"
 SYNTHESIS_MODEL = "claude-sonnet-5"
 
 # Every call passes an explicit cap; there is no unbounded request in this file.
-# Extraction is a short structured response; synthesis needs headroom for
-# thinking on top of a ~300-word article.
-EXTRACTION_MAX_TOKENS = 2_000
+# Both caps size thinking *plus* the visible response — see ADAPTIVE_THINKING.
+# Extraction's output is tiny (a product, <=6 claims, <=12 ingredients); the
+# budget is what it is to leave room for thinking, not for the JSON.
+EXTRACTION_MAX_TOKENS = 4_000
 SYNTHESIS_MAX_TOKENS = 8_000
+
+#: Passed explicitly on both calls rather than relying on the model default,
+#: because that default is not stable across the model range: Sonnet 5 and
+#: Opus 5 think when `thinking` is omitted, Opus 4.8 and 4.7 do not. Leaving it
+#: implicit means `settings.extraction_model` silently decides whether the
+#: token budget above is spent on thinking — which is exactly the kind of
+#: config-dependent behaviour this file exists to keep out of the stages.
+ADAPTIVE_THINKING: ThinkingConfigAdaptiveParam = {"type": "adaptive"}
+
+#: Prefixed onto every model id this client reports, so the price table can tell
+#: `claude-sonnet-5` run here from the same name served anywhere else — and, more
+#: to the point, from a local model, which is free. Matches the namespacing
+#: `sources.embedding_model` already uses for vectors.
+PROVIDER = "anthropic"
+
+
+def qualified(model: str) -> str:
+    """Namespace a bare setting value for the price table."""
+    return f"{PROVIDER}/{model}"
 
 
 def _usage_from_response(response: Any) -> TokenUsage:
@@ -79,8 +112,19 @@ def _usage_from_response(response: Any) -> TokenUsage:
     )
 
 
-def _system_blocks(prompt: str) -> list[dict[str, Any]]:
-    """The stable system prefix, marked as the cache breakpoint."""
+def _system_blocks(prompt: str) -> list[TextBlockParam]:
+    """The stable system prefix, marked as the cache breakpoint.
+
+    **The breakpoint is a no-op below the model's minimum cacheable prefix**
+    (1024 tokens on Sonnet 5 / Opus 4.8, 512 on Opus 5). There are no tools on
+    these calls, so the cacheable prefix is this prompt alone — and the
+    extraction prompt is ~350 tokens, well under. It caches nothing, silently:
+    no error, just ``cache_creation_input_tokens: 0``. Left in place because it
+    costs nothing and starts working if the prompt grows, but do not count the
+    saving on extraction. Synthesis (~1.1K tokens) sits just over the line and
+    should be confirmed against ``usage.cache_read_input_tokens`` on a real
+    call rather than assumed.
+    """
     return [
         {
             "type": "text",
@@ -90,7 +134,26 @@ def _system_blocks(prompt: str) -> list[dict[str, Any]]:
     ]
 
 
-def _check_refusal(response: Any, call: str) -> None:
+def _check_truncation(response: Any, call: str, model: str) -> None:
+    """Raise a diagnosable error when the token budget ran out.
+
+    Worth its own branch because the symptom is indistinguishable from a
+    schema failure: a truncated response has no parsed output, so it would
+    otherwise surface as "returned no parsed output" and send you looking at
+    the contract instead of at ``max_tokens``. Thinking and the visible
+    response share one budget, so this is what a thinking-heavy turn on a
+    tight cap looks like.
+    """
+    if getattr(response, "stop_reason", None) == "max_tokens":
+        raise LLMError(
+            f"{call}: hit max_tokens before completing the structured response "
+            f"— thinking and output share this budget, so raise the cap",
+            usage=_usage_from_response(response),
+            model=qualified(model),
+        )
+
+
+def _check_refusal(response: Any, call: str, model: str) -> None:
     """Raise before any attempt to read parsed output.
 
     On a refusal there is no parsed output to read, so this has to run first —
@@ -102,7 +165,9 @@ def _check_refusal(response: Any, call: str) -> None:
         category = getattr(details, "category", None) if details else None
         raise RefusalError(
             f"{call}: model declined the request"
-            + (f" (category={category})" if category else "")
+            + (f" (category={category})" if category else ""),
+            usage=_usage_from_response(response),
+            model=qualified(model),
         )
 
 
@@ -120,29 +185,42 @@ class AnthropicExtractionClient:
             RefusalError: the model declined; retrying identical input won't help.
             LLMError: transport, rate limit, or schema failure.
         """
+        user_prompt = build_extraction_user_prompt(payload)
+        logger.info(
+            "extraction prompt -> %s:\n--- system ---\n%s\n--- user ---\n%s",
+            self._model, EXTRACTION_SYSTEM_PROMPT, user_prompt,
+        )
         try:
             response = await self._client.messages.parse(
                 model=self._model,
                 max_tokens=EXTRACTION_MAX_TOKENS,
+                thinking=ADAPTIVE_THINKING,
                 system=_system_blocks(EXTRACTION_SYSTEM_PROMPT),
-                messages=[
-                    {"role": "user", "content": build_extraction_user_prompt(payload)}
-                ],
+                messages=[{"role": "user", "content": user_prompt}],
                 output_format=ExtractionOutput,
             )
         except anthropic.APIError as exc:
             raise LLMError(f"extraction call failed: {exc}") from exc
 
-        _check_refusal(response, "extraction")
+        _check_refusal(response, "extraction", self._model)
+        _check_truncation(response, "extraction", self._model)
 
         parsed = response.parsed_output
         if parsed is None:
-            raise LLMError("extraction returned no parsed output")
+            raise LLMError(
+                "extraction returned no parsed output",
+                usage=_usage_from_response(response),
+                model=qualified(self._model),
+            )
 
         logger.info(
             "extracted %d claims for topic=%r", len(parsed.target_claims), payload.topic
         )
-        return LLMResult(output=parsed, usage=_usage_from_response(response))
+        return LLMResult(
+            output=parsed,
+            usage=_usage_from_response(response),
+            model=qualified(self._model),
+        )
 
 
 class AnthropicSynthesisClient:
@@ -165,24 +243,33 @@ class AnthropicSynthesisClient:
             RefusalError: the model declined.
             LLMError: transport, rate limit, or schema failure.
         """
+        user_prompt = build_synthesis_user_prompt(payload)
+        logger.info(
+            "synthesis prompt -> %s:\n--- system ---\n%s\n--- user ---\n%s",
+            self._model, SYNTHESIS_SYSTEM_PROMPT, user_prompt,
+        )
         try:
             response = await self._client.messages.parse(
                 model=self._model,
                 max_tokens=SYNTHESIS_MAX_TOKENS,
+                thinking=ADAPTIVE_THINKING,
                 system=_system_blocks(SYNTHESIS_SYSTEM_PROMPT),
-                messages=[
-                    {"role": "user", "content": build_synthesis_user_prompt(payload)}
-                ],
+                messages=[{"role": "user", "content": user_prompt}],
                 output_format=SynthesisOutput,
             )
         except anthropic.APIError as exc:
             raise LLMError(f"synthesis call failed: {exc}") from exc
 
-        _check_refusal(response, "synthesis")
+        _check_refusal(response, "synthesis", self._model)
+        _check_truncation(response, "synthesis", self._model)
 
         parsed = response.parsed_output
         if parsed is None:
-            raise LLMError("synthesis returned no parsed output")
+            raise LLMError(
+                "synthesis returned no parsed output",
+                usage=_usage_from_response(response),
+                model=qualified(self._model),
+            )
 
         logger.info(
             "synthesised article verdict=%s citing %d/%d sources",
@@ -190,7 +277,11 @@ class AnthropicSynthesisClient:
             len(parsed.all_cited_handles()),
             len(payload.sources),
         )
-        return LLMResult(output=parsed, usage=_usage_from_response(response))
+        return LLMResult(
+            output=parsed,
+            usage=_usage_from_response(response),
+            model=qualified(self._model),
+        )
 
 
 def build_anthropic_client(api_key: str) -> AsyncAnthropic:

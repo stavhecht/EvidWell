@@ -29,6 +29,7 @@ import {
   SOURCE_HANDLE,
   SOURCE_LIST,
   SOURCE_META,
+  SOURCE_RETRACTED,
   SOURCE_ROW_HEAD,
   SOURCE_TITLE_LINK,
   sourceRow,
@@ -86,6 +87,13 @@ export function SourceList({ sources, citations, activeHandle }: Props) {
                 </a>
               </div>
 
+              {source.retracted ? (
+                // Above the study type, not beside it: a retraction is not a
+                // grade. "Randomised controlled trial" is still true of a
+                // withdrawn paper, and is exactly the wrong thing for a reader
+                // to weigh it by.
+                <div className={SOURCE_RETRACTED}>Retracted by the journal</div>
+              ) : null}
               <div className={sourceStudyType(isWeakStudyType(source.studyType))}>
                 {STUDY_TYPE_LABELS[source.studyType]}
               </div>

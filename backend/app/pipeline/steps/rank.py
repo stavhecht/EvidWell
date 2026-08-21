@@ -12,23 +12,27 @@ from collections import Counter
 
 from app.domain.contracts import RankedSource
 from app.pipeline.stages import PipelineContext, StageError, StageName
-from app.retrieval.cache import CachedSource, SourceCache
 from app.retrieval.rerank import RerankConfig, SemanticReranker, assign_handles
 
 logger = logging.getLogger(__name__)
 
 
 class RankStage:
+    """Ranks what retrieval already cached. Reads only; writes nothing.
+
+    It takes no ``SourceCache``, and that is the point of the shape rather than
+    an omission. It used to re-upsert the entire candidate set purely to
+    recover the row ids RetrieveStage had already learned — around a hundred
+    extra statements per run, most of them single-row UPDATEs against rows that
+    had been written seconds earlier. The ids ride along on
+    ``ctx.candidates`` now (``CachedCandidate``), so the whole round trip is
+    gone and this stage no longer has a reason to touch the cache at all.
+    """
+
     name = StageName.RANK
 
-    def __init__(
-        self,
-        reranker: SemanticReranker,
-        cache: SourceCache,
-        config: RerankConfig,
-    ) -> None:
+    def __init__(self, reranker: SemanticReranker, config: RerankConfig) -> None:
         self._reranker = reranker
-        self._cache = cache
         self._config = config
 
     async def run(self, ctx: PipelineContext) -> PipelineContext:
@@ -36,20 +40,8 @@ class RankStage:
         if ctx.extraction is None:
             raise StageError(self.name, "extraction stage did not run")
 
-        # Re-resolve candidates to their cached rows so ranking has source ids.
-        cached_by_key: dict[str, CachedSource] = {}
-        all_papers = [paper for papers in ctx.candidates.values() for paper in papers]
-        if all_papers:
-            for entry in await self._cache.upsert_many(all_papers):
-                cached_by_key[entry.paper.dedup_key] = entry
-
         ranked_by_claim: dict[str, list[RankedSource]] = {}
-        for claim, papers in ctx.candidates.items():
-            candidates = [
-                cached_by_key[paper.dedup_key]
-                for paper in papers
-                if paper.dedup_key in cached_by_key
-            ]
+        for claim, candidates in ctx.candidates.items():
             ranked_by_claim[claim] = await self._reranker.rank_for_claim(
                 claim, candidates, self._config
             )

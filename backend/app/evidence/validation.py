@@ -32,7 +32,13 @@ from app.domain.contracts import (
 )
 from app.domain.enums import StudyType, Verdict
 from app.domain.models import Source
-from app.evidence.grading import best_grade, max_verdict_for_grade, verdict_exceeds_grade
+from app.evidence.grading import (
+    QUORUM_FOR_SUPPORTED,
+    VERDICT_STRENGTH,
+    best_grade,
+    max_verdict_for_claims,
+    max_verdict_for_sources,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -169,14 +175,27 @@ def check_beats_are_cited(output: SynthesisOutput) -> list[ValidationFailure]:
 
 
 def check_verdict_within_grade(
-    output: SynthesisOutput, resolved: list[ResolvedSource]
+    output: SynthesisOutput, resolved: list[ResolvedSource], payload: SynthesisInput
 ) -> tuple[StudyType, list[ValidationFailure]]:
     """Check 4 — invariant #3: the verdict does not exceed its evidence.
 
-    ``best_grade`` is computed over the **cited** sources only. Sources the
-    model retrieved but ignored cannot raise its ceiling — otherwise a strong
-    review sitting unused in the prompt would license a confident verdict the
-    article never actually supported.
+    Computed over the **cited** sources only. Sources the model retrieved but
+    ignored cannot raise its ceiling — otherwise a strong review sitting unused
+    in the prompt would license a confident verdict the article never actually
+    supported.
+
+    Two questions, not one. *How good* is the evidence, which is the study-type
+    ceiling; and *how much of it is there*, which is the quorum. A lone trial
+    answers the first perfectly well and the second not at all, and the first
+    version of this check only asked the first — so one cited study could carry
+    ``supported``, the strongest thing this system can say. Both are evaluated
+    **per claim**, and the article inherits its weakest claim's ceiling.
+
+    The returned ``StudyType`` is still the best grade cited anywhere in the
+    article: it is stored on the row as a description of the evidence and shown
+    in the console, and it stays a fact about the sources rather than becoming
+    a verdict-shaped judgement. The quorum shows up in the *ceiling*, which is
+    why the failure message reports both.
 
     This is what makes "honest about evidence strength" structural. A
     ``supported`` verdict resting on two cell-culture studies fails here and the
@@ -186,19 +205,49 @@ def check_verdict_within_grade(
     """
     grade = best_grade([source.study_type for source in resolved])
 
-    if verdict_exceeds_grade(output.verdict, grade):
+    cited = {source.source_id for source in resolved}
+    types_by_claim: dict[str, list[StudyType]] = {
+        claim: [] for claim in payload.target_claims
+    }
+    for prompt_source in payload.sources:
+        if prompt_source.source_id not in cited:
+            continue
+        for claim in prompt_source.claims:
+            # A claim absent from target_claims cannot happen via the pipeline
+            # (both come from the same extraction), and if it ever did, adding
+            # it here would let an unasked-for claim carry the article.
+            if claim in types_by_claim:
+                types_by_claim[claim].append(prompt_source.study_type)
+
+    ceiling = max_verdict_for_claims(types_by_claim)
+
+    if VERDICT_STRENGTH[output.verdict] > VERDICT_STRENGTH[ceiling]:
+        claimed = VERDICT_STRENGTH[output.verdict]
+        thin = sorted(
+            claim
+            for claim, types in types_by_claim.items()
+            if VERDICT_STRENGTH[max_verdict_for_sources(types)] < claimed
+        )
         return grade, [
             ValidationFailure(
                 code="verdict_exceeds_grade",
                 message=(
                     f"verdict '{output.verdict}' exceeds what the cited evidence "
-                    f"supports (best study type: {grade}, ceiling: "
-                    f"{max_verdict_for_grade(grade)})"
+                    f"supports (ceiling: {ceiling}; best study type: {grade}; "
+                    f"{QUORUM_FOR_SUPPORTED} sources at a supported-tier grade are "
+                    f"required per claim). Underpowered: "
+                    f"{', '.join(repr(claim) for claim in thin)}"
                 ),
                 detail={
                     "verdict": str(output.verdict),
                     "best_grade": str(grade),
-                    "ceiling": str(max_verdict_for_grade(grade)),
+                    "ceiling": str(ceiling),
+                    "quorum": QUORUM_FOR_SUPPORTED,
+                    "underpowered_claims": thin,
+                    "cited_per_claim": {
+                        claim: [str(t) for t in types]
+                        for claim, types in types_by_claim.items()
+                    },
                 },
             )
         ]
@@ -230,7 +279,7 @@ async def validate_draft(
 
     failures.extend(check_beats_are_cited(output))
 
-    grade, verdict_failures = check_verdict_within_grade(output, resolved)
+    grade, verdict_failures = check_verdict_within_grade(output, resolved, payload)
     failures.extend(verdict_failures)
 
     report = ValidationReport(

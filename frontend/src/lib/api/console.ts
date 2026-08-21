@@ -9,11 +9,14 @@ import type {
   MediaUpload,
   QueueItem,
   Reviewer,
+  RunPage,
   TipTapDoc,
 } from "@/types/api";
 
 export const consoleKeys = {
   queue: (status: ArticleStatus) => ["console", "queue", status] as const,
+  /** Prefix of every tab's queue — invalidate this when a run lands a draft. */
+  queues: ["console", "queue"] as const,
   article: (id: string) => ["console", "article", id] as const,
   runs: ["console", "runs"] as const,
   me: ["console", "me"] as const,
@@ -126,4 +129,17 @@ export async function createRun(topic: string, blurb?: string): Promise<{ id: st
     method: "POST",
     body: JSON.stringify({ topic, blurb }),
   });
+}
+
+/**
+ * Run history, newest first.
+ *
+ * This is the other half of `createRun` returning 202: the queue is polled for
+ * the runs still in flight, so a reviewer who just submitted a topic sees the
+ * draft being made rather than an unchanged queue. STUB.
+ */
+export async function fetchRuns(
+  params: { cursor?: string; limit?: number } = {},
+): Promise<RunPage> {
+  return apiFetch(`/console/pipeline/runs${qs(params)}`);
 }

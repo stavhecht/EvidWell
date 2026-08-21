@@ -37,9 +37,18 @@ from app.api.console.schemas import (
     StageRunOut,
     TokenResponse,
 )
-from app.api.deps import ReviewerDep, SessionDep, SettingsDep, require_reviewer
+from app.api.deps import (
+    ClientIpDep,
+    LoginThrottleDep,
+    ReviewerDep,
+    SessionDep,
+    SettingsDep,
+    require_reviewer,
+)
 from app.domain.enums import ArticleStatus, RunStatus, UserRole
 from app.domain.models import PipelineRun, PipelineStageRun, User
+from app.llm.base import TokenUsage
+from app.llm.pricing import cost_usd, total_cost_usd
 from app.security.auth import (
     AuthenticatedReviewer,
     create_access_token,
@@ -69,28 +78,54 @@ _INVALID_CREDENTIALS = HTTPException(
 
 @auth_router.post("/login", response_model=TokenResponse)
 async def login(
-    payload: LoginRequest, session: SessionDep, settings: SettingsDep
+    payload: LoginRequest,
+    session: SessionDep,
+    settings: SettingsDep,
+    throttle: LoginThrottleDep,
+    ip: ClientIpDep,
 ) -> TokenResponse:
     """Exchange email + password for a bearer token.
 
     Identical 401 for unknown email and wrong password, and a dummy hash
     verification on the not-found branch so both cost the same — otherwise
     response timing enumerates valid reviewer accounts.
+
+    **The throttle check comes first, before the query and before any
+    hashing.** Argon2id is memory-hard by design, so an unthrottled login
+    endpoint is a CPU amplifier as much as a password oracle — and
+    ``equalise_timing`` means junk input costs the same as a real attempt.
+    Checking after the lookup would protect the password and not the process.
+
+    Failures are counted for an unknown email exactly as for a wrong password.
+    Counting only real accounts would make the 429 an existence oracle and
+    give back the enumeration resistance the equal timing buys.
     """
-    result = await session.execute(
-        select(User).where(
-            User.email == payload.email.strip().lower(), User.is_active.is_(True)
+    email = payload.email.strip().lower()
+
+    retry_after = throttle.retry_after(ip=ip, email=email)
+    if retry_after is not None:
+        logger.warning("login refused for %r from %s: throttled", email, ip)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts. Try again later.",
+            headers={"Retry-After": str(max(1, int(retry_after)))},
         )
+
+    result = await session.execute(
+        select(User).where(User.email == email, User.is_active.is_(True))
     )
     user = result.scalar_one_or_none()
 
     if user is None:
         equalise_timing()
+        throttle.record_failure(ip=ip, email=email)
         raise _INVALID_CREDENTIALS
 
     if not verify_password(payload.password, user.password_hash):
+        throttle.record_failure(ip=ip, email=email)
         raise _INVALID_CREDENTIALS
 
+    throttle.record_success(ip=ip, email=email)
     reviewer = AuthenticatedReviewer(
         id=user.id,
         email=user.email,
@@ -290,6 +325,10 @@ async def create_run(
         source_blurb=payload.blurb,
         status=RunStatus.QUEUED,
         requested_by=reviewer.id,
+        # Attempts are counted when a worker claims the run, so a queued one
+        # has had none. Set explicitly rather than left to the server default,
+        # which is not populated on the instance until it is re-read.
+        attempts=0,
         created_at=datetime.now(UTC),
     )
     session.add(run)
@@ -352,20 +391,52 @@ async def get_run(run_id: str, session: SessionDep) -> RunOut:
 async def _load_stages(
     session: SessionDep, run_ids: list[str]
 ) -> dict[str, list[PipelineStageRun]]:
+    """Stage rows for each run — the latest attempt only.
+
+    A retried run holds one set of rows per attempt (they are kept, not
+    overwritten, so a run that succeeded on its third try still shows what the
+    first two did). Returning all of them would render the pipeline as six
+    stages repeated N times, which reads as a bug. The console's question is
+    "where is this run now", and the latest attempt answers it; ``attempts`` on
+    the run says how many there were, and the earlier rows stay in the table
+    for anyone debugging.
+    """
     if not run_ids:
         return {}
     result = await session.execute(
         select(PipelineStageRun)
         .where(PipelineStageRun.run_id.in_(run_ids))
-        .order_by(PipelineStageRun.ordinal)
+        .order_by(PipelineStageRun.attempt, PipelineStageRun.ordinal)
     )
     grouped: dict[str, list[PipelineStageRun]] = {}
+    latest: dict[str, int] = {}
     for stage in result.scalars():
+        # Ordered by attempt, so a higher one supersedes what we have so far.
+        if stage.attempt > latest.get(stage.run_id, 0):
+            latest[stage.run_id] = stage.attempt
+            grouped[stage.run_id] = []
         grouped.setdefault(stage.run_id, []).append(stage)
     return grouped
 
 
+def _stage_usage(stage: PipelineStageRun) -> TokenUsage:
+    return TokenUsage(
+        input_tokens=stage.input_tokens,
+        output_tokens=stage.output_tokens,
+        cache_read_tokens=stage.cache_read_tokens,
+        cache_write_tokens=stage.cache_write_tokens,
+    )
+
+
 def _run_out(run: PipelineRun, stages: list[PipelineStageRun]) -> RunOut:
+    # Cost is derived here rather than stored, so a price correction fixes
+    # history instead of leaving it wrong — see app/llm/pricing.py. Summed from
+    # the stage rows because the run's own totals span models and cannot be
+    # priced; note the stage list is the *latest attempt only*, so a retried
+    # run's cost is deliberately lower than its token totals imply.
+    stage_costs = total_cost_usd(
+        [(stage.model or "", _stage_usage(stage)) for stage in stages]
+    )
     return RunOut(
         id=run.id,
         topic=run.topic,
@@ -374,6 +445,12 @@ def _run_out(run: PipelineRun, stages: list[PipelineStageRun]) -> RunOut:
         error=run.error,
         input_tokens=run.input_tokens,
         output_tokens=run.output_tokens,
+        cache_read_tokens=run.cache_read_tokens,
+        cache_write_tokens=run.cache_write_tokens,
+        estimated_cost_usd=stage_costs,
+        attempts=run.attempts,
+        next_attempt_at=run.next_attempt_at,
+        heartbeat_at=run.heartbeat_at,
         stages=[
             StageRunOut(
                 stage=stage.stage,
@@ -381,6 +458,12 @@ def _run_out(run: PipelineRun, stages: list[PipelineStageRun]) -> RunOut:
                 status=stage.status,
                 error=stage.error,
                 metrics=stage.metrics,
+                model=stage.model,
+                input_tokens=stage.input_tokens,
+                output_tokens=stage.output_tokens,
+                cache_read_tokens=stage.cache_read_tokens,
+                cache_write_tokens=stage.cache_write_tokens,
+                estimated_cost_usd=cost_usd(stage.model or "", _stage_usage(stage)),
                 started_at=stage.started_at,
                 finished_at=stage.finished_at,
             )

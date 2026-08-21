@@ -124,6 +124,18 @@ def _flat_schema(model: type[BaseModel]) -> dict[str, Any]:
     return flat
 
 
+#: Namespace for the price table. Local models are priced at zero, and that zero
+#: has to be attributable to a specific provider — a bare `llama3.1:8b` in the
+#: run record cannot be told from a hosted model nobody has priced yet, and the
+#: two report the same cost for opposite reasons.
+PROVIDER = "ollama"
+
+
+def qualified(model: str) -> str:
+    """Namespace a bare setting value for the price table."""
+    return f"{PROVIDER}/{model}"
+
+
 def _usage_from_response(response: Any) -> TokenUsage:
     """Map the SDK's counters onto our own record.
 
@@ -175,6 +187,11 @@ async def _chat(
     last_error: ValidationError | None = None
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
+        logger.info(
+            "%s prompt -> %s (attempt %d/%d):\n%s",
+            call, model, attempt, MAX_ATTEMPTS,
+            "\n".join(f"--- {m['role']} ---\n{m['content']}" for m in messages),
+        )
         try:
             response = await client.chat(
                 model=model,
@@ -238,11 +255,16 @@ async def _chat(
             ]
             continue
 
-        return LLMResult(output=parsed, usage=usage)
+        return LLMResult(output=parsed, usage=usage, model=qualified(model))
 
+    # Carries the accumulated usage for the same reason the loop accumulates it:
+    # both attempts ran, and a repair attempt that also fails is the most
+    # expensive way this call can end.
     raise LLMError(
         f"{call}: output still failed validation after {MAX_ATTEMPTS} attempts "
-        f"({last_error})"
+        f"({last_error})",
+        usage=usage,
+        model=qualified(model),
     )
 
 
@@ -289,7 +311,7 @@ class OllamaExtractionClient:
         logger.info(
             "extracted %d claims for topic=%r", len(parsed.target_claims), payload.topic
         )
-        return LLMResult(output=parsed, usage=result.usage)
+        return LLMResult(output=parsed, usage=result.usage, model=result.model)
 
 
 class OllamaSynthesisClient:
@@ -331,7 +353,7 @@ class OllamaSynthesisClient:
             len(parsed.all_cited_handles()),
             len(payload.sources),
         )
-        return LLMResult(output=parsed, usage=result.usage)
+        return LLMResult(output=parsed, usage=result.usage, model=result.model)
 
 
 def build_ollama_client(base_url: str, timeout_seconds: float) -> AsyncClient:

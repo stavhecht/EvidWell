@@ -274,6 +274,11 @@ class ReviewService:
                 "was_cited": link.was_cited,
                 "relevance_score": link.relevance_score,
                 "is_weak_evidence": is_weak_evidence(StudyType(source.study_type)),
+                # Distinct from weak evidence, and shown separately. Weak means
+                # a poor basis for confidence; retracted means not a basis.
+                "retracted": source.retracted_at is not None,
+                "concern": source.concern_at is not None,
+                "retraction_note": source.retraction_note,
             }
             for link, source in result.all()
         ]
@@ -295,6 +300,8 @@ class ReviewService:
             "validation_report": article.validation_report,
             "sources": sources,
             "pipeline_run_id": article.pipeline_run_id,
+            "retraction_flagged_at": article.retraction_flagged_at,
+            "retraction_detail": article.retraction_detail,
             "created_at": article.created_at,
         }
 

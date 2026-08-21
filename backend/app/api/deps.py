@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +15,7 @@ from app.db import get_session_factory
 from app.domain.enums import UserRole
 from app.domain.models import User
 from app.security.auth import AuthenticatedReviewer, AuthError, decode_token_subject
+from app.security.login_throttle import InMemoryLoginThrottle, LoginThrottle
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -42,6 +43,39 @@ async def get_session() -> AsyncGenerator[AsyncSession]:
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
+
+#: Process-wide, because the counters *are* the state — a per-request instance
+#: would forget every failure the moment it answered. Injected as a dependency
+#: rather than imported at the call site so a test can override it and a Redis
+#: implementation can replace it without touching the route.
+_login_throttle: LoginThrottle = InMemoryLoginThrottle()
+
+
+def get_login_throttle() -> LoginThrottle:
+    return _login_throttle
+
+
+LoginThrottleDep = Annotated[LoginThrottle, Depends(get_login_throttle)]
+
+
+def client_ip(request: Request) -> str:
+    """The socket peer, and deliberately nothing else.
+
+    ``X-Forwarded-For`` is attacker-controlled until a trusted proxy overwrites
+    it. Reading it here would let anyone mint a fresh identity per request and
+    bypass the IP budget entirely — worse than no limit, because the endpoint
+    would look protected. Nothing sits in front of uvicorn today, so the socket
+    peer is the truth.
+
+    Behind a load balancer this must become the forwarded address, via
+    ``uvicorn --proxy-headers --forwarded-allow-ips=<balancer>`` so Starlette
+    trusts the header only from the balancer (DESIGN.md §10). Until then, one
+    bucket for anything with no peer address, which no real request has.
+    """
+    return request.client.host if request.client else "unknown"
+
+
+ClientIpDep = Annotated[str, Depends(client_ip)]
 
 
 async def require_reviewer(

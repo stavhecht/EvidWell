@@ -12,7 +12,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -93,6 +93,14 @@ class Settings(BaseSettings):
     #: one API learned properly beats four half-integrated.
     enabled_providers: list[str] = ["pubmed"]
     http_timeout_seconds: float = 30.0
+    #: How many times a throttled provider call is retried before it is
+    #: recorded as a failure. Two rides out a burst; more would let one
+    #: throttled provider hold a run open indefinitely, and the worst case is
+    #: already this many waits of up to the cap below. Per-provider request
+    #: rates are constants in ``retrieval/factory.py``, not settings — they are
+    #: facts about each API rather than things to tune.
+    provider_max_retries: int = 2
+    provider_max_retry_wait_seconds: float = 10.0
 
     # --- retrieval tuning ---
     retrieval_top_k: int = 8
@@ -101,6 +109,21 @@ class Settings(BaseSettings):
 
     # --- pipeline ---
     worker_poll_interval_seconds: float = 5.0
+    #: How many times a run may be *started* before a retryable failure is
+    #: treated as permanent. Only failures that set ``StageError.retryable``
+    #: consume it — a malformed draft is not retried at any budget. Backoff
+    #: between attempts is ``orchestrator.RETRY_DELAYS``. A run whose worker was
+    #: killed spends the same budget: the attempt is counted when it is claimed.
+    pipeline_max_attempts: int = 3
+    #: How often the worker reports that its in-flight run is still alive.
+    worker_heartbeat_seconds: float = 15.0
+    #: Silence after which a `running` run is treated as abandoned. Must stay
+    #: comfortably above the heartbeat interval — see the validator below.
+    worker_stale_after_seconds: float = 120.0
+    #: How often the worker looks for abandoned runs. Checked between polls, so
+    #: a worker busy with its own run does not sweep; with one worker that is
+    #: harmless, since the only run it could recover is the one it is running.
+    worker_sweep_interval_seconds: float = 60.0
 
     # --- reviewer-uploaded media ---
     #: Where uploaded images are written, relative to the backend working
@@ -121,6 +144,24 @@ class Settings(BaseSettings):
         if isinstance(value, str) and not value.strip().startswith("["):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
+
+    @model_validator(mode="after")
+    def _heartbeat_leaves_room_to_miss_one(self) -> Settings:
+        """The staleness window must survive a missed beat or two.
+
+        Set too close together, one slow UPDATE — a checkpoint, a brief lock
+        wait — declares a live run abandoned, and the sweep requeues work that
+        is still executing. Three intervals means it takes three consecutive
+        misses, which is a dead process rather than a hiccup.
+        """
+        floor = self.worker_heartbeat_seconds * 3
+        if self.worker_stale_after_seconds < floor:
+            raise ValueError(
+                f"worker_stale_after_seconds ({self.worker_stale_after_seconds}) must be "
+                f"at least 3x worker_heartbeat_seconds ({self.worker_heartbeat_seconds}) "
+                f"= {floor}s, or a single missed heartbeat requeues a live run."
+            )
+        return self
 
     def validate_embedding_dim(self, provider_dimension: int) -> None:
         """Fail fast when the configured width disagrees with the provider.

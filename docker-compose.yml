@@ -19,5 +19,24 @@ services:
       interval: 5s
       retries: 10
 
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      # Inside Docker the hostname is the service name, not localhost.
+      DATABASE_URL: postgresql+asyncpg://evidwell:evidwell@db:5432/evidwell
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # Persist reviewer-uploaded media across container restarts.
+      - evidwell_media:/app/var/media
+
 volumes:
   evidwell_pgdata:
+  evidwell_media:

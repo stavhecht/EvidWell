@@ -16,6 +16,7 @@ export type StudyType =
   | "in_vitro"
   | "animal"
   | "case_report"
+  | "narrative_review"
   | "observational"
   | "rct"
   | "systematic_review"
@@ -87,6 +88,12 @@ export interface Source {
   url: string;
   pmid: string | null;
   doi: string | null;
+  /**
+   * The literature has withdrawn this paper since the article cited it. Shown
+   * on the source itself, not only in the article banner — a reader who
+   * scrolls to the citations should not have to infer which one it was.
+   */
+  retracted: boolean;
 }
 
 export interface Citation {
@@ -108,6 +115,12 @@ export interface Article {
   citations: Citation[];
   evidenceGrade: StudyType;
   publishedAt: string;
+  /**
+   * A cited source has been retracted since publication. The article stays up
+   * and stays readable — one withdrawn source does not necessarily invalidate
+   * a conclusion, and a human decides — but the reader is told first.
+   */
+  retractionNotice: boolean;
   disclaimer: string;
   /** Proposed; see {@link Subject}. Absent today. */
   subject?: Subject | null;
@@ -138,6 +151,15 @@ export interface ReviewSource extends Source {
   wasCited: boolean;
   relevanceScore: number | null;
   isWeakEvidence: boolean;
+  /**
+   * Distinct from {@link isWeakEvidence}: weak means a poor basis for
+   * confidence, retracted means not a basis at all.
+   */
+  retracted: boolean;
+  /** Under investigation, not withdrawn. Recorded, not refused. */
+  concern: boolean;
+  /** Which provider said so, e.g. "pubmed: retracted publication". */
+  retractionNote: string | null;
 }
 
 export interface ValidationFailure {
@@ -173,6 +195,13 @@ export interface ArticleDetail {
   validationReport: ValidationReport;
   sources: ReviewSource[];
   pipelineRunId: string | null;
+  /**
+   * Set when a cited source has been retracted since this article was written.
+   * The article keeps its status — this raises it for a human, it does not
+   * withdraw it.
+   */
+  retractionFlaggedAt: string | null;
+  retractionDetail: Record<string, unknown> | null;
   createdAt: string;
 }
 
@@ -194,4 +223,80 @@ export interface Reviewer {
   email: string;
   displayName: string;
   role: "admin" | "reviewer";
+}
+
+// --- pipeline --------------------------------------------------------------
+
+export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+
+export interface StageRun {
+  stage: string;
+  ordinal: number;
+  status: RunStatus;
+  error: Record<string, unknown> | null;
+  metrics: Record<string, unknown> | null;
+  /**
+   * Provider-namespaced model this stage called (`anthropic/claude-sonnet-5`),
+   * or null for the four stages that call no model. Recorded from the call, so
+   * it is what actually ran rather than what the settings say now.
+   */
+  model: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /**
+   * Decimal USD, serialised as a string so it survives the trip without
+   * binary-float drift. **Null means unknown, not free** — the model is not in
+   * the backend price table. Render it as "unknown"; a `?? 0` here would make
+   * a newly-configured model look like a local one.
+   */
+  estimatedCostUsd: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+/**
+ * A generation run. Newest first from the API.
+ *
+ * `queued` and `running` are the only states the console renders — they are
+ * what stands between "Generate draft" and a row in the review queue, and
+ * without them the reviewer stares at an unchanged queue for several minutes.
+ */
+export interface PipelineRun {
+  id: string;
+  topic: string;
+  status: RunStatus;
+  articleId: string | null;
+  error: Record<string, unknown> | null;
+  /**
+   * Lifetime totals across every attempt, so a retried run reports what it
+   * really spent. `stages` below is the latest attempt only, so these will
+   * exceed the stage figures whenever `attempts > 1`.
+   */
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /**
+   * Decimal USD as a string, summed over the latest attempt's stages. Null if
+   * any stage that consumed tokens ran on an unpriced model — all-or-nothing,
+   * because a partial sum is a plausible number that is wrong by an order of
+   * magnitude. Same rule as above: null is unknown, not zero.
+   */
+  estimatedCostUsd: string | null;
+  /** Attempts started. >1 means a retryable failure requeued this run. */
+  attempts: number;
+  /** Set while a run is queued waiting out a retry backoff; null otherwise. */
+  nextAttemptAt: string | null;
+  /** Last sign of life while `running`. Minutes old means the worker died. */
+  heartbeatAt: string | null;
+  stages: StageRun[];
+  createdAt: string;
+  finishedAt: string | null;
+}
+
+export interface RunPage {
+  items: PipelineRun[];
+  nextCursor: string | null;
 }

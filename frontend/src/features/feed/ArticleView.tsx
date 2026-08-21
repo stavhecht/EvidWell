@@ -30,6 +30,9 @@ import {
   ARTICLE_BODY_COLUMN,
   ARTICLE_COLUMNS,
   ARTICLE_DISCLAIMER,
+  RETRACTION_BANNER,
+  RETRACTION_BANNER_LABEL,
+  RETRACTION_BANNER_TEXT,
   ARTICLE_ERROR_PAGE,
   ARTICLE_ERROR_TITLE,
   ARTICLE_LEDE,
@@ -110,6 +113,18 @@ export function ArticleView() {
 
       <div className={ARTICLE_COLUMNS}>
         <article className={ARTICLE_BODY_COLUMN}>
+          {article.retractionNotice ? (
+            <aside className={RETRACTION_BANNER} role="note">
+              <span className={RETRACTION_BANNER_LABEL}>Source retracted</span>
+              <span className={RETRACTION_BANNER_TEXT}>
+                A paper cited below has been withdrawn by the journal that
+                published it since this article was written. The article is
+                under review and has not been updated yet — weigh the verdict
+                accordingly. The affected source is marked in the list.
+              </span>
+            </aside>
+          ) : null}
+
           <div className={articleVerdictBlock(subjectBorderTop(subject))}>
             {kicker ? (
               <div className={articleKicker(subjectText(subject))}>{kicker}</div>

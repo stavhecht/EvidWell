@@ -50,6 +50,21 @@ EMBEDDING_DIM = get_settings().embedding_dim
 UUID_PK = UUID(as_uuid=False)
 GEN_UUID = text("gen_random_uuid()")
 
+#: Every nullable JSONB column. **Use this, not bare ``JSONB``.**
+#:
+#: SQLAlchemy's JSON types default to ``none_as_null=False``, which persists a
+#: Python ``None`` as the JSON literal ``null`` rather than as SQL ``NULL``.
+#: The two are not interchangeable: ``COALESCE(edited_content, original_content)``
+#: returns JSON ``null`` for a row that has never been edited, and ``WHERE error
+#: IS NULL`` matches no succeeded stage. Both read as "a value is present".
+#:
+#: Python-side readers hide this — ``json.loads('null')`` is ``None``, so
+#: ``edited_content or original_content`` behaves correctly and every current
+#: caller happens to take that path. The bug only appears when someone writes
+#: the SQL that ``migrations/0001_initial.sql`` and ``services/card.py`` both
+#: document as the mechanism, which is exactly when it is least expected.
+NullableJSONB = JSONB(none_as_null=True)
+
 
 def pg_enum(enum_class: type, name: str) -> Enum:
     """Bind a Python enum to a Postgres enum type by **value**, not name.
@@ -108,8 +123,11 @@ class Source(Base):
     citation_count: Mapped[int | None] = mapped_column(Integer)
     url: Mapped[str | None] = mapped_column(Text)
     source_api: Mapped[str] = mapped_column(Text, nullable=False)
-    #: Cosine-indexed by sources_embedding_hnsw. Null until the abstract has
-    #: been embedded, or after a provider change invalidates the old vector.
+    #: Null until the abstract has been embedded, or after a provider change
+    #: invalidates the old vector. Deliberately **not** indexed: the only
+    #: vector query re-ranks one run's candidates by id and sorts exactly, so
+    #: an ANN index cannot be chosen. The measurements are in
+    #: ``migrations/0001_initial.sql``, beside the index it declines to create.
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM))
     embedding_model: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
@@ -118,6 +136,20 @@ class Source(Base):
     last_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    #: Detection time, not the journal's retraction date — neither PubMed nor
+    #: Crossref reliably exposes the latter. Set by scripts/check_retractions.py.
+    retracted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: An expression of concern: under investigation, not withdrawn. Recorded
+    #: rather than refused, because the paper may yet be exonerated.
+    concern_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: NULL means nobody has *successfully* asked — which is not "asked and it
+    #: is fine". Written only when a provider actually answered, so a sweep
+    #: that reached nothing cannot be mistaken for one that verified everything.
+    #: See retrieval/retractions.py.
+    retraction_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    retraction_note: Mapped[str | None] = mapped_column(Text)
 
     @property
     def resolved_url(self) -> str:
@@ -155,19 +187,30 @@ class Article(Base):
     #: Immutable. A DB trigger rejects any UPDATE that changes it — do not
     #: attempt to write it after PersistStage.
     original_content: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    edited_content: Mapped[dict | None] = mapped_column(JSONB)
+    edited_content: Mapped[dict | None] = mapped_column(NullableJSONB)
 
     card_headline: Mapped[str | None] = mapped_column(Text)
     card_excerpt: Mapped[str | None] = mapped_column(Text)
     card_verdict: Mapped[Verdict | None] = mapped_column(pg_enum(Verdict, "verdict"))
 
     evidence_grade: Mapped[StudyType] = mapped_column(pg_enum(StudyType, "study_type"))
-    validation_report: Mapped[dict | None] = mapped_column(JSONB)
+    validation_report: Mapped[dict | None] = mapped_column(NullableJSONB)
 
     reviewed_by: Mapped[str | None] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id"))
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     rejection_reason: Mapped[str | None] = mapped_column(Text)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    #: A cited source has been retracted. The article stays `published` — this
+    #: raises a banner and puts the row in front of a reviewer, who decides.
+    #: Automatic withdrawal would be the machine deciding what the public sees,
+    #: which is the thing invariant #1 exists to prevent, pointed the other way.
+    retraction_flagged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    #: Which handles and sources triggered the flag, so the console can point
+    #: at the paragraph rather than at the article.
+    retraction_detail: Mapped[dict | None] = mapped_column(NullableJSONB)
 
     pipeline_run_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False))
     created_at: Mapped[datetime] = mapped_column(
@@ -215,10 +258,24 @@ class PipelineRun(Base):
     source_blurb: Mapped[str | None] = mapped_column(Text)
     status: Mapped[RunStatus] = mapped_column(pg_enum(RunStatus, "run_status"))
     article_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False))
-    error: Mapped[dict | None] = mapped_column(JSONB)
+    error: Mapped[dict | None] = mapped_column(NullableJSONB)
+    #: Rollup of the per-stage ledger below, so "what did this run consume" is
+    #: one row read. Cannot be priced on its own: the stages may have run on
+    #: different models. See PipelineStageRun and app/llm/pricing.py.
     input_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     output_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    cache_read_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    cache_write_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     requested_by: Mapped[str | None] = mapped_column(UUID(as_uuid=False))
+    #: Attempts started, incremented when a worker claims the run.
+    attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    #: Earliest time this run may be claimed; NULL means now. Set when a
+    #: retryable failure requeues the run — see orchestrator._requeue_run.
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: Last sign of life from the worker holding this run, pinged on a timer
+    #: for as long as it is `running`. A frozen heartbeat is how a killed
+    #: worker is told apart from a slow one — see runner._recover_stale_runs.
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -233,8 +290,27 @@ class PipelineStageRun(Base):
     run_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("pipeline_runs.id"))
     stage: Mapped[str] = mapped_column(Text, nullable=False)
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: Which attempt of the run this row belongs to. Rows are kept per attempt
+    #: rather than overwritten — diagnosing a run that succeeded on its third
+    #: try means seeing what the first two did.
+    attempt: Mapped[int] = mapped_column(Integer, server_default=text("1"))
     status: Mapped[RunStatus] = mapped_column(pg_enum(RunStatus, "run_status"))
-    error: Mapped[dict | None] = mapped_column(JSONB)
-    metrics: Mapped[dict | None] = mapped_column(JSONB)
+    error: Mapped[dict | None] = mapped_column(NullableJSONB)
+    metrics: Mapped[dict | None] = mapped_column(NullableJSONB)
+    #: Provider-namespaced id of the model this stage called, e.g.
+    #: `anthropic/claude-sonnet-5`. NULL for the four stages that call no model.
+    #: The join key into app/llm/pricing.py — a bare name would not distinguish
+    #: a local model (free) from a hosted one nobody has priced yet.
+    model: Mapped[str | None] = mapped_column(Text)
+    #: What that call consumed. Kept as four columns rather than one total
+    #: because they are priced at four different rates, an order of magnitude
+    #: apart in both directions: a cache read is a tenth of a fresh input token,
+    #: a cache write a quarter more than one. Written even when the stage
+    #: failed — a truncated response burns the whole output budget and produces
+    #: nothing, which is the most expensive way a run can end.
+    input_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    output_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    cache_read_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    cache_write_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

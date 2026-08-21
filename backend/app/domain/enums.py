@@ -50,6 +50,14 @@ class StudyType(StrEnum):
     IN_VITRO = "in_vitro"
     ANIMAL = "animal"
     CASE_REPORT = "case_report"
+    #: A literature review with no stated search or inclusion method — what
+    #: PubMed tags plainly as "Review". Distinct from UNKNOWN on purpose: we
+    #: *did* identify it, and it is weak secondary evidence rather than an
+    #: unreadable record. Sits below OBSERVATIONAL because it contributes no
+    #: primary data and has no protection against selection bias, and above
+    #: CASE_REPORT because it surveys a literature rather than one patient.
+    #: Measured need: 16 of 92 cached sources landed here (see README).
+    NARRATIVE_REVIEW = "narrative_review"
     OBSERVATIONAL = "observational"
     RCT = "rct"
     SYSTEMATIC_REVIEW = "systematic_review"

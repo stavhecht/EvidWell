@@ -12,6 +12,19 @@ enters the candidate pool cannot be promoted by any re-ranker, and against
 fifty topically-tighter primary studies it frequently loses the raw relevance
 race. Running the filtered query separately guarantees reviews are present to
 be ranked.
+
+**Every query must name a substance, and the subject comes from the product
+when the ingredient list is empty.** A query built from claim keywords alone
+searches the *outcome* and nothing else: "improves workout performance"
+retrieves pre-workout blends, CrossFit programming and probiotics, and the
+draft that comes out is fluent, cites real papers, and passes every validator —
+it is simply about a different question. Extraction returns ``product`` as a
+required field and ``ingredients`` as an optional one, so the product name is
+the anchor that is always present; small local models routinely leave
+``ingredients`` empty. If neither yields a substance, ``build`` raises
+``UnanchoredQuery`` rather than falling back to claim keywords: this used to be
+a warning, and a warning on a worker's stdout is not a control — the run
+completed and shipped an off-topic article to the review queue.
 """
 
 from __future__ import annotations
@@ -93,9 +106,62 @@ REVIEW_PASS_MAX_RESULTS = 15
 GENERAL_PASS_MAX_RESULTS = 35
 
 
+def _mesh_within(phrase: str) -> str | None:
+    """Find a known substance inside a longer name.
+
+    Needed because the product name is now a subject source, and product names
+    carry packaging: "Creatine Monohydrate Powder", "Ashwagandha KSM-66
+    Capsules". An exact-key lookup misses all of them, and the quoted-phrase
+    fallback searches for the whole string — which returns nothing, reads as
+    "no literature on this", and is therefore a *worse* failure than being
+    off-topic, because ``no_evidence`` is a publishable verdict.
+
+    Longest key wins so "withania somnifera" is preferred over "withania", and
+    matching is whole-word so "zinc" does not fire on "zincate".
+    """
+    matches = [
+        (key, term)
+        for key, term in MESH_HINTS.items()
+        if re.search(rf"\b{re.escape(key)}\b", phrase)
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda pair: len(pair[0]))[1]
+
+
+class UnanchoredQuery(RuntimeError):
+    """No substance to search for — the query would be outcome-only.
+
+    Raised instead of returning a degraded query, because the degradation is
+    invisible downstream: retrieval succeeds, ranking succeeds, synthesis
+    writes a grounded article about the wrong subject, and citation validation
+    confirms every handle resolves. Nothing after this point can tell that the
+    papers are not about the product.
+    """
+
+    def __init__(self, claim: str, product: str, ingredients: list[str]) -> None:
+        super().__init__(
+            f"no searchable substance for claim {claim!r}: product {product!r} and "
+            f"ingredients {ingredients!r} yielded no subject terms. Retrieval would "
+            f"search the outcome only and return off-topic literature."
+        )
+        self.claim = claim
+        self.product = product
+        self.ingredients = ingredients
+
+
 class QueryStrategy(Protocol):
-    def build(self, claim: str, ingredients: list[str]) -> list[SearchQuery]:
-        """Produce the queries for one claim. Returns reviews-first, then general."""
+    def build(self, claim: str, product: str, ingredients: list[str]) -> list[SearchQuery]:
+        """Produce the queries for one claim. Returns reviews-first, then general.
+
+        ``product`` is separate from ``ingredients`` because it is the required
+        half of the pair: a strategy may prefer the ingredient list when it has
+        one, but it always has a product name to fall back on.
+
+        Raises:
+            UnanchoredQuery: neither names a substance the query can be
+                anchored to.
+        """
         ...
 
 
@@ -105,8 +171,8 @@ class TemplateQueryStrategy:
     def __init__(self, min_year: int | None = None) -> None:
         self._min_year = min_year
 
-    def build(self, claim: str, ingredients: list[str]) -> list[SearchQuery]:
-        terms = self._compose(claim, ingredients)
+    def build(self, claim: str, product: str, ingredients: list[str]) -> list[SearchQuery]:
+        terms = self._compose(claim, product, ingredients)
         return [
             SearchQuery(
                 claim=claim,
@@ -124,34 +190,28 @@ class TemplateQueryStrategy:
             ),
         ]
 
-    def _compose(self, claim: str, ingredients: list[str]) -> str:
-        subject = self._subject_group(ingredients)
+    def _compose(self, claim: str, product: str, ingredients: list[str]) -> str:
+        # Ingredients first when the model supplied them — they name the actual
+        # actives, and a multi-ingredient product's own name is a brand with no
+        # literature behind it. The product is the fallback, not a supplement to
+        # the list, for the same reason: ORing "SuperBlend X" into a query that
+        # already names its actives only widens it with a term nothing matches.
+        subject = self._subject_group(ingredients or [product])
         if not subject:
-            # No ingredients means nothing anchors the query to the *substance*,
-            # and the keyword fallback is drawn from the claim — so "reduces
-            # stress" degrades to a search for stress in general, which happily
-            # returns mindfulness and music-therapy trials. The draft that comes
-            # out is grounded and passes validation; it is just answering a
-            # question nobody asked. Loud on purpose: this used to fail silently.
-            subject = self._keyword_group(claim)
-            logger.warning(
-                "no ingredients supplied for claim %r — falling back to claim "
-                "keywords %r. Retrieval is NOT anchored to a substance and "
-                "results will be off-topic; check the extraction model.",
-                claim,
-                subject,
-            )
+            raise UnanchoredQuery(claim, product, ingredients)
         outcome = self._outcome_group(claim)
-        if subject and outcome:
+        if outcome:
             return f"{subject} AND {outcome}"
-        return subject or outcome or claim
+        return subject
 
     @staticmethod
-    def _subject_group(ingredients: list[str]) -> str:
-        """OR the ingredients, mapping known ones through MeSH."""
+    def _subject_group(substances: list[str]) -> str:
+        """OR the substances, mapping known ones through MeSH."""
         terms: list[str] = []
-        for ingredient in ingredients:
-            normalised = ingredient.strip().lower()
+        for substance in substances:
+            normalised = substance.strip().lower()
+            if not normalised:
+                continue
             # Extract the botanical name if the model supplied one in parens:
             # "ashwagandha (Withania somnifera)" -> also try "withania somnifera".
             candidates = [normalised]
@@ -162,7 +222,7 @@ class TemplateQueryStrategy:
             mapped = next(
                 (MESH_HINTS[candidate] for candidate in candidates if candidate in MESH_HINTS),
                 None,
-            )
+            ) or _mesh_within(normalised)
             terms.append(mapped or f'"{candidates[-1]}"')
 
         unique = list(dict.fromkeys(term for term in terms if term))
@@ -201,5 +261,5 @@ class LLMQueryStrategy:
     call. Recorded here to fix the seam, not to endorse the approach.
     """
 
-    def build(self, claim: str, ingredients: list[str]) -> list[SearchQuery]:
+    def build(self, claim: str, product: str, ingredients: list[str]) -> list[SearchQuery]:
         raise NotImplementedError("LLM query generation is deferred; see DESIGN.md §5")

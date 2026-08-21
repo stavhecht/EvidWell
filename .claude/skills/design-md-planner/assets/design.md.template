@@ -1,0 +1,82 @@
+# Design Brief — [Project Name]
+
+> Fill every section with concrete, buildable values. Delete these quote hints as you go.
+> If a section can't be answered concretely yet, note the open question rather than defaulting to a cliché.
+
+## 1. What this is
+- **Product:** [what it is in one line]
+- **Primary job of the interface:** [the one thing it must do well]
+- **Audience & context of use:** [who, on what device, in what setting]
+- **Density:** [content/data-dense | expressive/marketing | mixed]
+
+## 2. Point of view
+The single impression, in one or two sentences, anchored to a **concrete referent** (an object, place, era,
+publication, film, or piece of software) — not adjectives.
+
+- **Feels like:** [referent + the gut reaction in the first 2 seconds]
+- **Deliberately not:** [the impression we're avoiding]
+
+## 3. References
+- **Loved (and why):** [2–3 specific designs + what specifically works about each]
+- **Anti-references:** [what to actively avoid]
+
+## 4. Color story
+Derived from: **[named source]**
+
+| Role | Hex | Notes |
+|---|---|---|
+| Surface (base) | `#______` | |
+| Surface (raised) | `#______` | |
+| Primary text | `#______` | contrast vs base: ___ |
+| Muted text | `#______` | |
+| Accent | `#______` | the one unexpected note |
+| Success / Warning / Error | `#______` / `#______` / `#______` | |
+
+- **Mode:** [light | dark | both]
+- **Rationale:** [why these, from the source — not a generator]
+
+## 5. Typography
+- **Display / headings:** [Face] — fallbacks: `[stack]`
+- **Body / text:** [Face] — fallbacks: `[stack]`
+- **Mono (if any):** [Face]
+- **Scale:** [e.g. 48 / 32 / 24 / 18 / 16 / 14 — or a ratio]
+- **Where contrast lives:** [weight jumps, tracking, italics, measure/leading choices]
+- **Rationale:** [why this pairing expresses the point of view]
+
+## 6. Layout & grid
+- **Underlying structure:** [grid / columns / editorial system]
+- **Symmetry & focal point:** [where and how we break from centered-everything]
+- **Spacing rhythm:** [scale, e.g. 4/8/12/16/24/40/64] — **density stance:** [tight | spare + why]
+- **Surface treatment:** [radius, borders, elevation — varied by role, not uniform]
+- **Primary screen breakdown:** [the real sections/data on the main view]
+
+## 7. Components
+- **Icons:** [set/approach, or none]
+- **Buttons & actions:** [how primary vs secondary read — weight/placement, not stacked gradients]
+- **Cards / lists / tables:** [treatment tied to the system]
+- **Key custom components:** [anything bespoke]
+
+## 8. Motion
+- **Intentional moments:** [the 1–3 that matter, with duration/easing intent]
+- **Reduced-motion behavior:** [what changes]
+
+## 9. Voice & copy
+- **Tone:** [matched to the visual POV]
+- **Do say / don't say:** [specific vs the hype-adjective slop]
+
+## 10. The signature move
+The one memorable, specific thing this design does that no template would produce:
+- [name it, describe it, and where it appears]
+
+## 11. Slop we're explicitly avoiding
+Enforceable list — the specific defaults this project rejects, and what it does instead.
+
+| Default (rejected) | What we do instead |
+|---|---|
+| [e.g. indigo/violet primary] | [our source-derived accent] |
+| [e.g. Inter everywhere] | [our type pairing] |
+| [e.g. centered hero + gradient blob] | [our layout] |
+| [add the ones relevant to this project] | |
+
+## 12. Open questions
+- [anything still undecided — noted, not defaulted]

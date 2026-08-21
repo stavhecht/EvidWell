@@ -21,14 +21,13 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import Float, func, select, text
+from sqlalchemy import Float, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.contracts import CandidatePaper, RankedSource
+from app.domain.contracts import CachedCandidate, CandidatePaper, RankedSource
 from app.domain.enums import EVIDENCE_RANK, StudyType
 from app.domain.models import Source
 from app.llm.embeddings.base import EmbeddingProvider
-from app.retrieval.cache import CachedSource
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +39,11 @@ GRADE_BONUS: dict[StudyType, float] = {
     StudyType.SYSTEMATIC_REVIEW: 0.15,
     StudyType.RCT: 0.08,
     StudyType.OBSERVATIONAL: 0.0,
+    # Below observational and above a case report, matching the hierarchy. A
+    # narrative review reads like a systematic one to an embedding model — it
+    # surveys trials in clinical language — so it competes strongly on cosine
+    # and has to be pushed back on grade or it crowds out primary evidence.
+    StudyType.NARRATIVE_REVIEW: -0.03,
     StudyType.CASE_REPORT: -0.05,
     StudyType.ANIMAL: -0.10,
     StudyType.IN_VITRO: -0.10,
@@ -55,11 +59,6 @@ RECENCY_ZERO_CREDIT_YEARS = 15
 
 DEFAULT_TOP_K = 8
 MIN_ABSTRACT_CHARS = 200
-
-#: pgvector HNSW search breadth. Higher = better recall, slower query. Set
-#: per-session because the index-time default is too low for a top-k of 8 over
-#: a filtered subset.
-HNSW_EF_SEARCH = 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,7 +105,7 @@ class SemanticReranker:
     async def rank_for_claim(
         self,
         claim: str,
-        candidates: list[CachedSource],
+        candidates: list[CachedCandidate],
         config: RerankConfig | None = None,
     ) -> list[RankedSource]:
         """Rank this run's candidates against one claim; return the top k.
@@ -122,6 +121,20 @@ class SemanticReranker:
         Handles are NOT assigned here. They are assigned once globally across
         the article by ``assign_handles`` below, because two claims sharing a
         source must give it the same handle.
+
+        **This ranking is exact, not approximate, and that follows from the
+        scoring rather than from a choice made here.** The final score is
+        cosine + grade + recency, so top-k cannot be pushed into SQL — a SQL
+        ``LIMIT`` on cosine alone would discard exactly the systematic reviews
+        the grade bonus exists to promote. With no ``LIMIT`` and a restrictive
+        id filter, Postgres plans a bitmap scan over the candidate ids and a
+        quicksort; the HNSW index is never eligible.
+
+        Worth stating because this module used to raise ``hnsw.ef_search``
+        before the query, which reads as tuning an approximate index scan. The
+        statement worked and the plan never consulted it. At this scale the
+        exact sort is also the faster of the two (0.53ms against 1.44ms over
+        3000 rows), so there is nothing to trade away.
         """
         config = config or RerankConfig()
         if not candidates:
@@ -129,9 +142,6 @@ class SemanticReranker:
 
         claim_vector = await self._embedder.embed_query(claim)
         candidate_ids = [entry.source_id for entry in candidates]
-
-        # Raise search breadth for this transaction only.
-        await self._session.execute(text(f"SET LOCAL hnsw.ef_search = {HNSW_EF_SEARCH}"))
 
         distance = Source.embedding.cosine_distance(claim_vector)
         statement = (

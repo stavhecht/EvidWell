@@ -1,5 +1,5 @@
 /**
- * The evidence grade — eight rungs, weakest first, filled to the strongest
+ * The evidence grade — nine rungs, weakest first, filled to the strongest
  * study type actually retrieved.
  *
  * This is the *warrant* for the verdict, and it is a separate signal on purpose:

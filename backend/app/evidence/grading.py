@@ -38,6 +38,9 @@ VERDICT_CEILING: dict[StudyType, Verdict] = {
     StudyType.SYSTEMATIC_REVIEW: Verdict.SUPPORTED,
     StudyType.RCT: Verdict.SUPPORTED,
     StudyType.OBSERVATIONAL: Verdict.MIXED,
+    #: A narrative review restates other people's findings without a stated
+    #: method. It can be a useful pointer and is never sufficient support.
+    StudyType.NARRATIVE_REVIEW: Verdict.WEAK,
     StudyType.CASE_REPORT: Verdict.WEAK,
     StudyType.ANIMAL: Verdict.WEAK,
     StudyType.IN_VITRO: Verdict.WEAK,
@@ -62,12 +65,67 @@ PUBLICATION_TYPE_MAP: dict[str, StudyType] = {
     "controlled clinical trial": StudyType.RCT,
     "clinical trial, phase iii": StudyType.RCT,
     "clinical trial, phase ii": StudyType.RCT,
+    # PubMed tags a randomised trial with BOTH "Randomized Controlled Trial"
+    # and "Clinical Trial", and the map takes the strongest match — so a paper
+    # carrying *only* this one is an interventional study that was not
+    # randomised. Stronger than observational in design, far weaker than an
+    # RCT in what it can establish; graded down per the module's stated bias
+    # toward under-claiming. Measured: one such paper was scoring UNKNOWN.
+    "clinical trial": StudyType.OBSERVATIONAL,
     "observational study": StudyType.OBSERVATIONAL,
     "cohort studies": StudyType.OBSERVATIONAL,
     "case-control studies": StudyType.OBSERVATIONAL,
     "cross-sectional studies": StudyType.OBSERVATIONAL,
     "case reports": StudyType.CASE_REPORT,
 }
+
+#: "Review" is a supertype, not a verdict — it says a paper reviews a
+#: literature without saying by what method. Treating it as a definite match
+#: for ``NARRATIVE_REVIEW`` was tried and reverted: PubMed's indexing lags, and
+#: several genuine systematic reviews in the cache carry only this tag while
+#: their *titles* say "A Systematic Review". Mapping it suppressed the text
+#: fallback and demoted them — the same failure as the protocol bug, mirrored.
+#:
+#: So it is a **floor**: narrative review unless the text says otherwise, and
+#: the text may only raise it within the review family below. Never to RCT — a
+#: narrative review's abstract discusses randomised trials at length, which is
+#: precisely how this went wrong the first time.
+PROVISIONAL_REVIEW_TYPES: frozenset[str] = frozenset({"review"})
+
+#: The only upgrades a provisional review may receive from title/abstract text.
+REVIEW_FAMILY: frozenset[StudyType] = frozenset(
+    {StudyType.SYSTEMATIC_REVIEW, StudyType.META_ANALYSIS}
+)
+
+#: Publication types that say something real about a paper without naming a
+#: study design — and that must therefore **suppress the text fallback** rather
+#: than fall through to it.
+#:
+#: This is the fix for the worst classification bug the first live runs
+#: exposed. ``classify_study_type`` used to treat "informative but unmapped"
+#: exactly like "no metadata at all", so a paper tagged ``Clinical Trial
+#: Protocol`` reached the abstract heuristics — and a protocol *describes the
+#: randomised trial it intends to run*, in those words. Three of them scored
+#: RCT, whose ceiling is ``supported``, on the strength of a study that has not
+#: reported a single result.
+#:
+#: The same mechanism promoted a plainly-tagged ``Review`` to
+#: ``systematic_review``, because a review discusses the randomised trials it
+#: surveys. One such paper was cited in a real draft and set its evidence
+#: grade. The docstring on ``classify_study_type`` promises to prefer the
+#: weaker classification when torn; without this set it did the reverse.
+NEGATIVE_PUBLICATION_TYPES: frozenset[str] = frozenset(
+    {
+        "clinical trial protocol",
+        "editorial",
+        "comment",
+        "letter",
+        "news",
+        "published erratum",
+        "retraction of publication",
+        "retracted publication",
+    }
+)
 
 #: Title/abstract fallbacks, checked only when publication type is unusable.
 #: Ordered strongest-first; first match wins.
@@ -82,6 +140,149 @@ TEXT_PATTERNS: list[tuple[re.Pattern[str], StudyType]] = [
     (re.compile(r"\b(in vitro|cell culture|cell line)\b", re.I), StudyType.IN_VITRO),
     (re.compile(r"\b(mice|mouse|rats?|murine|rodent|zebrafish)\b", re.I), StudyType.ANIMAL),
 ]
+
+
+#: A title that announces the paper is a plan rather than a result. Providers
+#: other than PubMed supply no publication types at all, so the tag check alone
+#: would let protocols in through OpenAlex — and "study protocol for a
+#: randomised controlled trial" is close to a house style in trial reporting.
+_PROTOCOL_TITLE_RE = re.compile(r"\b(study|trial)\s+protocol\b|\bprotocol\s+for\s+a\b", re.I)
+
+
+def is_protocol(raw_study_type: str | None, title: str = "") -> bool:
+    """True for a trial protocol — a design document with no findings.
+
+    Excluded from retrieval entirely rather than graded down. A protocol
+    reports nothing, so it can never legitimately support or refute a claim;
+    admitting it can only occupy a top-k slot a real study would have taken,
+    and put a "randomised, double-blind, placebo-controlled" abstract in front
+    of a model that is being asked what the evidence says.
+
+    Three were cached and scored RCT before this existed.
+    """
+    if _PROTOCOL_TITLE_RE.search(title):
+        return True
+    if not raw_study_type:
+        return False
+    return any(
+        part.strip().lower() == "clinical trial protocol"
+        for part in raw_study_type.split(";")
+    )
+
+
+#: Publication types that mark a paper as withdrawn by the literature itself.
+#:
+#: ``retracted publication`` is the paper; ``retraction of publication`` is the
+#: notice announcing it. Both are refused, for different reasons — the first is
+#: a finding that no longer stands, the second is an announcement with no
+#: findings at all, and a model handed either would cite it as evidence.
+#:
+#: Note these are *already* in ``NEGATIVE_PUBLICATION_TYPES`` above, which caps
+#: such a paper at ``UNKNOWN``. That was never enough: a capped grade limits how
+#: confident the article may sound, and does nothing about the citation itself.
+#: The article still says "one trial found X [S3]" with S3 pointing at a study
+#: the journal has withdrawn. Grade caps govern confidence; this governs
+#: admission, and they are different questions.
+RETRACTION_PUBLICATION_TYPES: frozenset[str] = frozenset(
+    {"retracted publication", "retraction of publication"}
+)
+
+#: An unresolved question, not a withdrawal. Deliberately **not** refused: an
+#: expression of concern says the journal is investigating, and the paper may
+#: well be exonerated. It stays admissible and is recorded, so a reviewer can
+#: see it — which is more than the grade cap does for a retraction today.
+CONCERN_PUBLICATION_TYPES: frozenset[str] = frozenset({"expression of concern"})
+
+
+def is_retracted(raw_study_type: str | None) -> bool:
+    """True for a paper the literature has withdrawn.
+
+    Refused in ``RetrieveStage`` before dedup and before the cache, the same
+    way ``is_protocol`` is, and by the stronger version of the same argument. A
+    protocol is merely uninformative — it reports nothing, so it cannot support
+    a claim. A retracted paper *does* report something, and the report is one
+    the record has repudiated; leaving it admissible means the strongest
+    possible wrong answer stays reachable.
+
+    Takes no title, unlike ``is_protocol``. There is no reliable prose tell for
+    a retraction — journals mark them in metadata, not in the abstract, and
+    guessing from a title containing the word "retracted" would catch the
+    notices while missing every retracted paper, which is backwards. Providers
+    with no publication types therefore contribute nothing here; that gap is
+    what ``scripts/check_retractions.py`` exists to close.
+    """
+    if not raw_study_type:
+        return False
+    return any(
+        part.strip().lower() in RETRACTION_PUBLICATION_TYPES
+        for part in raw_study_type.split(";")
+    )
+
+
+#: Distinct sources required at a `supported`-ceiling grade before a claim may
+#: actually reach `supported`.
+#:
+#: Two, not one, and the reason is specific to this system rather than to
+#: evidence convention. Classification here is heuristic — publication types
+#: where they exist, abstract prose where they do not — and it has already been
+#: measurably wrong in both directions on real data (DESIGN.md §4). Requiring a
+#: second independent source means one misclassified paper cannot license a
+#: confident verdict by itself. The clinical convention that a single good
+#: meta-analysis suffices assumes a grade you can trust; ours is a guess.
+#:
+#: Sources are counted by ``source_id`` after cross-provider dedup, so one
+#: paper arriving from three APIs is one source. What this cannot see: a
+#: meta-analysis and a trial it already includes are not independent, and
+#: detecting that needs reference lists the abstract-only MVP does not fetch.
+QUORUM_FOR_SUPPORTED = 2
+
+
+def max_verdict_for_sources(study_types: list[StudyType]) -> Verdict:
+    """The strongest verdict one claim's cited evidence permits.
+
+    ``max_verdict_for_grade`` asks only how good the *best* source is, which
+    lets a lone study carry the strongest verdict the system can express. This
+    additionally asks how *many* there are, and only at the top: below
+    ``supported`` the ceilings already say "provisional", so a quorum there
+    would demote thin evidence that is being reported as thin.
+
+    Falling short drops the ceiling exactly one step, to ``mixed`` — "there is
+    real evidence and it is not settled", which is the honest description of a
+    single trial. Dropping to ``weak`` would understate a good RCT as badly as
+    ``supported`` overstates it.
+    """
+    ceiling = VERDICT_CEILING[best_grade(study_types)]
+    if ceiling is not Verdict.SUPPORTED:
+        return ceiling
+
+    strong = sum(
+        1 for study_type in study_types if VERDICT_CEILING[study_type] is Verdict.SUPPORTED
+    )
+    return ceiling if strong >= QUORUM_FOR_SUPPORTED else Verdict.MIXED
+
+
+def max_verdict_for_claims(by_claim: dict[str, list[StudyType]]) -> Verdict:
+    """The article's ceiling: the weakest of its claims'.
+
+    A verdict is one field covering every claim the product makes, so it can
+    only be as strong as its thinnest support. Counted article-wide instead,
+    one well-evidenced claim lends its sources to the others — two claims each
+    backed by a single trial would satisfy a quorum of two between them, while
+    neither is corroborated, and the finished article shows no sign of it.
+
+    A claim with **no cited source at all** is the weakest case there is, and
+    caps the article at ``weak``. This is the aggressive reading and it is
+    deliberate: asserting `supported` about a product while one of its claims
+    turned up nothing is the overstatement this system exists to prevent.
+    ``no_evidence`` stays permissible everywhere — an article may always report
+    finding nothing.
+    """
+    if not by_claim:
+        return VERDICT_CEILING[StudyType.UNKNOWN]
+    return min(
+        (max_verdict_for_sources(types) for types in by_claim.values()),
+        key=lambda verdict: VERDICT_STRENGTH[verdict],
+    )
 
 
 def max_verdict_for_grade(best_grade: StudyType) -> Verdict:
@@ -129,19 +330,65 @@ def classify_study_type(
     is the real signal), but the *text* fallback takes the first match in a
     strongest-first list and stops. Abstract prose is far less reliable than a
     curated tag, so it gets one shot rather than a survey.
+
+    **The text fallback runs only when the tags are genuinely uninformative.**
+    A type in ``NEGATIVE_PUBLICATION_TYPES`` stops it dead, because prose
+    heuristics are actively misleading for exactly those papers: a trial
+    protocol and a narrative review both discuss randomised trials at length
+    without being one. Treating "informative but unmapped" as "no metadata"
+    was how three protocols scored RCT against real PubMed data.
     """
+    normalised_types = {
+        normalised
+        for publication_type in publication_types
+        if (normalised := publication_type.strip().lower())
+    }
+
+    # Checked BEFORE the map, unlike every other negative type below, and the
+    # exception is the point. The rule down there — a positive identification
+    # outranks a negative one — holds because "Comment" alongside "Randomized
+    # Controlled Trial" describes a *different aspect* of a paper that really is
+    # a trial. A retraction is not another aspect. It says the paper does not
+    # stand, and it says so about the trial tag itself.
+    #
+    # Leaving this below the map meant `Randomized Controlled Trial; Retracted
+    # Publication` graded as `rct`, ceiling `supported` — and a retracted trial
+    # nearly always carries its own design tag, so that was the common case, not
+    # the edge. The grade cap this set was supposed to provide did not exist for
+    # any paper it actually mattered for. Caught by a test asserting the cap,
+    # which found the opposite.
+    if normalised_types & RETRACTION_PUBLICATION_TYPES:
+        return StudyType.UNKNOWN
+
     matches = [
         PUBLICATION_TYPE_MAP[normalised]
-        for publication_type in publication_types
-        if (normalised := publication_type.strip().lower()) in PUBLICATION_TYPE_MAP
+        for normalised in normalised_types
+        if normalised in PUBLICATION_TYPE_MAP
     ]
     if matches:
         return max(matches, key=lambda study: EVIDENCE_RANK[study])
 
+    # Checked *after* the map: a real RCT can carry "Comment" alongside its own
+    # type. A positive identification outranks a negative one — except for the
+    # retraction case handled above.
+    if normalised_types & NEGATIVE_PUBLICATION_TYPES:
+        return StudyType.UNKNOWN
+
     haystack = f"{title} {abstract}"
-    for pattern, study_type in TEXT_PATTERNS:
-        if pattern.search(haystack):
-            return study_type
+    guess = next(
+        (study for pattern, study in TEXT_PATTERNS if pattern.search(haystack)), None
+    )
+
+    if normalised_types & PROVISIONAL_REVIEW_TYPES:
+        # Tagged a review and nothing more specific. The text may sharpen that
+        # into a systematic review or meta-analysis; anything else it thinks it
+        # sees is the surveyed literature, not this paper.
+        if guess is not None and guess in REVIEW_FAMILY:
+            return guess
+        return StudyType.NARRATIVE_REVIEW
+
+    if guess is not None:
+        return guess
 
     return StudyType.UNKNOWN
 

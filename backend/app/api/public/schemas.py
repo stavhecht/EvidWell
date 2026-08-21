@@ -33,6 +33,10 @@ class SourceOut(CamelModel):
     url: str
     pmid: str | None
     doi: str | None
+    #: The literature has withdrawn this paper since we cited it. Shown to the
+    #: reader on the source itself, not only in the article banner — a reader
+    #: who scrolls to the citations should not have to infer which one it was.
+    retracted: bool = False
 
 
 class CitationOut(CamelModel):
@@ -77,6 +81,11 @@ class ArticleOut(CamelModel):
     citations: list[CitationOut]
     evidence_grade: StudyType
     published_at: datetime
+    #: Set when a cited source has been retracted since publication. The
+    #: article stays up and stays readable — a human decides whether the
+    #: conclusion still holds — but the reader is told before they read it.
+    #: See scripts/check_retractions.py.
+    retraction_notice: bool = False
     #: Set from a server constant, never from model output — the model cannot
     #: forget it, reword it, or drop it.
     disclaimer: str = Field(

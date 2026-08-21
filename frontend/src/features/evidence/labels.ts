@@ -34,7 +34,7 @@ export const VERDICT_GLOSS: Record<Verdict, string> = {
 };
 
 /**
- * The eight rungs, weakest first. Order is load-bearing: `GRADE_ORDER.indexOf`
+ * The nine rungs, weakest first. Order is load-bearing: `GRADE_ORDER.indexOf`
  * is what fills the grade bar, and it mirrors the server-side ranking in
  * `evidence/grading.py` that caps verdict confidence (invariant #3).
  *
@@ -47,6 +47,7 @@ export const GRADE_ORDER: readonly StudyType[] = [
   "in_vitro",
   "animal",
   "case_report",
+  "narrative_review",
   "observational",
   "rct",
   "systematic_review",
@@ -59,6 +60,7 @@ export const GRADE_LABELS: Record<StudyType, string> = {
   in_vitro: "In vitro",
   animal: "Animal",
   case_report: "Case report",
+  narrative_review: "Narrative review",
   observational: "Observational",
   rct: "RCT",
   systematic_review: "Systematic review",
@@ -74,6 +76,8 @@ export const GRADE_NOTES: Record<StudyType, string> = {
   animal: "Whole organism, wrong species. Dose and physiology rarely transfer cleanly.",
   case_report:
     "One person, no control. Useful for spotting harms, not for establishing benefit.",
+  narrative_review:
+    "A survey of other people's findings with no stated search method. A pointer to the literature, not evidence in itself.",
   observational:
     "Real people, no randomisation. Confounding is the standing objection.",
   rct: "Randomised and controlled. The first rung where causation is on the table.",
@@ -88,6 +92,7 @@ export const STUDY_TYPE_LABELS: Record<StudyType, string> = {
   in_vitro: "In-vitro study",
   animal: "Animal study",
   case_report: "Case report",
+  narrative_review: "Narrative review",
   observational: "Observational study",
   rct: "Randomised controlled trial",
   systematic_review: "Systematic review",
@@ -100,6 +105,7 @@ const WEAK: ReadonlySet<StudyType> = new Set<StudyType>([
   "in_vitro",
   "animal",
   "case_report",
+  "narrative_review",
 ]);
 
 export function isWeakStudyType(type: StudyType): boolean {

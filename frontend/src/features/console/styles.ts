@@ -76,6 +76,47 @@ export const QUEUE_ROW_GRADE_LABEL = "font-body text-micro text-ink-3";
 export const DISCARD_BUTTON =
   "shrink-0 border border-rule-soft p-1.5 text-ink-3 transition-colors hover:border-ink hover:text-accent-ink disabled:opacity-45";
 
+/* ── a run still in flight ──────────────────────────────────────────────── */
+
+/**
+ * The placeholder row for a draft still being generated.
+ *
+ * Same rule, padding and left-rule *width* as `queueRow`, so it sits in the
+ * list rather than on top of it — but the left rule is the hairline rather than
+ * `queueRow`'s structural `border-l-rule`, and there is no aside. Both are the
+ * same statement: this row has no verdict, no grade and nothing to act on, and
+ * stubbing those greyed-out would read as a draft in a bad state rather than
+ * one that has not been written. `cursor-wait` and the absent link are what say
+ * it is not a target.
+ */
+export const PENDING_RUN_ROW =
+  "cursor-wait border-b border-l-[3px] border-rule-soft py-[18px] pl-[15px] pr-0.5";
+
+/**
+ * A spinner, against this codebase's general preference for skeletons.
+ *
+ * The feed uses skeletons because a spinner collapses a layout it is standing
+ * in for. Nothing is being stood in for here: generation takes minutes, the row
+ * is reporting that work is under way elsewhere, and a pulsing grey block would
+ * read as a draft that failed to load. `motion-reduce` slows the rotation
+ * rather than stopping it — a frozen spinner reads as a hung job, which is the
+ * one thing this row must not say by accident.
+ */
+export const PENDING_RUN_SPINNER =
+  "shrink-0 animate-spin text-accent motion-reduce:[animation-duration:2.4s]";
+
+/**
+ * Deliberately the same treatment as the verdict wording it will be replaced
+ * by — the row swaps for a real one in place, and a kicker that changed size or
+ * weight at that moment would read as the list reflowing rather than resolving.
+ */
+export const PENDING_RUN_KICKER = QUEUE_VERDICT_WORDING;
+
+/** The topic, at row weight — it is what the reviewer typed, not a headline. */
+export const PENDING_RUN_TOPIC =
+  "mt-[9px] text-pretty font-heading text-row font-semibold text-ink-2";
+export const PENDING_RUN_NOTE = "mt-1 font-body text-meta text-ink-3";
+
 /* ── queue a new draft ──────────────────────────────────────────────────── */
 
 export const NEW_RUN_FORM = "mt-5 border border-rule-soft bg-surface p-4";

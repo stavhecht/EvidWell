@@ -15,9 +15,9 @@ before it can be published.**
 > queue, run submission, 401s and 404s. `ruff` is clean; the frontend
 > typechecks and builds.
 >
-> The one thing still unexercised is **live external APIs**: no real PubMed,
-> Claude or Voyage call has been made, so provider parsing and the prompts have
-> not met real responses. See **Verification status** below.
+> The pipeline has since run end to end against **live PubMed and OpenAlex** —
+> 92 real papers cached, two articles produced, embedded through **Voyage**.
+> What remains unexercised is **Claude**. See **Verification status** below.
 
 ## Read this first
 
@@ -114,7 +114,7 @@ Honest accounting of what has and has not been exercised.
 
 | Check | Result |
 |---|---|
-| `pytest tests/` | 61 passed, **0 skipped** |
+| `pytest tests/` | 365 passed, **0 skipped** (six suites skip silently with no DB — see CLAUDE.md) |
 | `python -m scripts.migrate` | applies cleanly from empty |
 | DB invariants | CHECK constraint and immutability trigger both confirmed rejecting |
 | API end to end | 13 endpoints exercised: healthz, feed, login (right and wrong password), `/me`, queue, run submission, 404 |
@@ -122,12 +122,76 @@ Honest accounting of what has and has not been exercised.
 | `tsc --noEmit` | clean |
 | `npm run build` | succeeds; public bundle 303 kB, console split into its own 323 kB chunk |
 
-**Not verified — needs API keys.** No live call has been made to PubMed,
-Claude, or Voyage. Provider parsing, the prompt templates, and token accounting
-are written against documented response shapes but have not met real responses.
-Expect the first generation run to need adjustment, most likely in PubMed XML
-edge cases and in the re-rank bonus constants (tagged as tunable in
-`retrieval/rerank.py`).
+**Exercised against live external APIs (2026-08-20):**
+
+| Path | Result |
+|---|---|
+| PubMed E-utilities | 73 papers cached, `raw_study_type` populated on every row |
+| OpenAlex | 19 papers cached (inverted-index abstracts reconstructed) |
+| Extraction + synthesis | two runs completed, ~10.5k in / ~460 out tokens each — **provider unrecorded**, see below |
+| Voyage embeddings | 92 / 92 abstracts embedded at 1024-d, `embedding_model = voyage-4` |
+| Full six-stage pipeline | two runs `succeeded`: one `pending_review`, one `validation_failed` |
+
+The first real run behaved as designed rather than as hoped: the
+`validation_failed` article was caught by invariant #2 for a grouped citation
+marker (`[S1, S5, S8]`) the parser did not yet accept — the draft was kept out
+of the review queue instead of shipping a broken citation. Grouped markers are
+supported now.
+
+Four measured findings, all since fixed. Each was found by looking at
+real rows rather than by reasoning about the code, and two of them ran the
+opposite way from what the design assumed.
+
+- **Fixed — trial protocols were scoring `rct`.** Three of the 92. A protocol
+  describes the randomised trial it *intends* to run, so the abstract
+  heuristics read it as one, and `rct` has ceiling `supported`. Protocols are
+  now refused at retrieval (DESIGN.md §4), and informative-but-unmapped
+  publication types no longer fall through to prose.
+- **Fixed — 41% classified `unknown`** (38/92). Sixteen were narrative reviews
+  with no tier to go to, one a bare `Clinical Trial` missing from the map.
+  After adding `narrative_review` and closing the mapping gaps, `unknown` is
+  24/92 (26%) and every remaining one is a paper PubMed tagged only as
+  `Journal Article`. Re-derive cached grades with
+  `python -m scripts.reclassify_sources` after any classifier change.
+- **Fixed — a retracted paper could be cited at full evidence grade.** The
+  classifier consults the positive publication-type map *before* the negative
+  set, so `Randomized Controlled Trial; Retracted Publication` graded as `rct`
+  — ceiling `supported` — and a retracted trial nearly always carries its own
+  design tag. The cap that was supposed to catch this applied only to papers it
+  did not matter for. Retractions are now checked first, refused at retrieval,
+  and re-checked on a schedule against PubMed and Crossref
+  (`python -m scripts.check_retractions`). Measured on the live corpus: 90/90
+  PMIDs and 92/92 DOIs resolved, **zero retracted**, verified against a known
+  retracted control (DESIGN.md §4).
+- **Fixed — a `supported` verdict could rest on a single cited study.**
+  `check_verdict_within_grade` asked only how good the best source was, never
+  how many there were. `supported` now requires two sources at a
+  supported-tier grade, counted **per claim**, with the article taking its
+  weakest claim's ceiling (DESIGN.md §4). Both existing articles pass — this
+  closed a reachable gap rather than a realised one.
+
+**Corrected 2026-08-21 — Voyage has been exercised.** This section previously
+said no Voyage call had been made. All 92 rows carry
+`sources.embedding_model = 'voyage-4'` with populated 1024-d vectors, created
+during those two runs, and that string is written from
+`VoyageEmbeddingProvider.model_id` and nowhere else — the Ollama provider
+namespaces its own as `ollama/…`. The claim was inherited from the design docs
+rather than checked against the database.
+
+**Which generative provider those runs used is not recorded anywhere**, so the
+table above no longer names one. Both `llm_provider` and `embedding_provider`
+defaulted to `ollama` by then, but the embedding default was plainly overridden,
+which means the defaults say nothing about the environment that ran them. From
+now on `pipeline_stage_runs.model` records it per call; the two historical runs
+are backfilled with their token counts and a NULL model, and therefore report an
+unknown cost rather than a guessed one.
+
+**Still not verified — needs an API key.** No call has been made to **Claude**;
+that client and its token accounting are written against documented response
+shapes only. Europe PMC and Semantic Scholar are wired but have not been enabled
+in a run (`ENABLED_PROVIDERS=pubmed`). The re-rank bonus constants in
+`retrieval/rerank.py` remain tunable starting values — no golden set exists yet
+to measure them against.
 
 ## Tests
 

@@ -26,16 +26,26 @@ import re
 from collections.abc import Iterator
 from typing import Any
 
-from app.domain.contracts import ArticleBody
+from app.domain.contracts import CITATION_MARKER_PATTERN, ArticleBody
 
-#: Splits on a run of adjacent markers so ``[S1][S3]`` becomes one citation
-#: node. A row of separate chips reads as three findings when it is one.
-_CITATION_RUN_RE = re.compile(r"((?:\[S\d+\])+)")
-_SINGLE_HANDLE_RE = re.compile(r"\[(S\d+)\]")
+#: Splits on a run of adjacent markers, so ``[S1][S3]`` and ``[S1, S3]`` both
+#: become one citation node. A row of separate chips reads as three findings
+#: when it is one.
+#:
+#: Built from the contracts pattern rather than restating it: the renderer and
+#: ``extract_handles`` disagreeing about what a marker is means a source the
+#: article visibly cites is recorded as uncited.
+_CITATION_RUN_RE = re.compile(rf"((?:{CITATION_MARKER_PATTERN})+)")
+_HANDLE_RE = re.compile(r"S\d+")
 
-#: Any bracketed token that is *not* a well-formed handle. Catches "[S]",
-#: "[source 1]", and half-deleted markers like "[S1".
-_MALFORMED_RE = re.compile(r"\[(?!S\d+\])[^\]]*\]|\[S\d+(?!\])")
+#: Any bracket still standing once every well-formed marker is removed.
+#:
+#: Checked by elimination rather than with a "not a valid marker" pattern. The
+#: negative form has to enumerate every way a marker can be wrong, and it missed
+#: unterminated runs like ``"[S1, S5"`` — which matched nothing, fell through as
+#: literal text, and printed a broken marker into the finished article instead
+#: of failing. Anything bracketed that is not a marker is a parse failure.
+_STRAY_BRACKET_RE = re.compile(r"\[[^\]]*\]?|\]")
 
 
 class MalformedBodyError(ValueError):
@@ -72,7 +82,7 @@ def body_text_to_doc(body: ArticleBody) -> dict[str, Any]:
 
 
 def _paragraph(text: str, beat: int) -> dict[str, Any]:
-    if match := _MALFORMED_RE.search(text):
+    if match := _STRAY_BRACKET_RE.search(_CITATION_RUN_RE.sub("", text)):
         raise MalformedBodyError(
             f"beat {beat} contains a malformed citation marker: {match.group(0)!r}"
         )
@@ -81,15 +91,13 @@ def _paragraph(text: str, beat: int) -> dict[str, Any]:
     for segment in _CITATION_RUN_RE.split(text):
         if not segment:
             continue
-        handles = _SINGLE_HANDLE_RE.findall(segment)
-        if handles:
+        # ``fullmatch`` rather than "did we find handles here": the handle
+        # pattern is unanchored, so testing it against an arbitrary segment
+        # would read prose like "the S1 group" as a citation.
+        if _CITATION_RUN_RE.fullmatch(segment):
             # Preserve order, drop duplicates within the run.
-            content.append(
-                {
-                    "type": "citation",
-                    "attrs": {"sourceIds": list(dict.fromkeys(handles))},
-                }
-            )
+            handles = list(dict.fromkeys(_HANDLE_RE.findall(segment)))
+            content.append({"type": "citation", "attrs": {"sourceIds": handles}})
         else:
             content.append({"type": "text", "text": segment})
 
