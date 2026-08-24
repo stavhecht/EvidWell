@@ -1,12 +1,16 @@
-# EvidWell — Architecture & Design
+# You.th — Architecture & Design
 
 Evidence-checked wellness content. A Pinterest-style public feed of short articles that
 state what a product or trend claims, what the research actually shows, and a plain-language
 verdict — every factual sentence carrying a citation to a real paper, every article approved
 by a human before publication.
 
-**Status:** implemented and verified against a live Postgres 16 + pgvector — 365 tests pass with
-zero skips, the migration applies cleanly, and every endpoint has been exercised end to end.
+**The product is You.th; the repository, the Python package and the database are still named
+`evidwell`.** The rename was a design change, not a migration: renaming a package, a DSN and a
+table prefix buys nothing a reader ever sees and breaks every local environment that exists.
+
+**Status:** implemented and verified against a live Postgres 16 + pgvector — 490 tests pass with
+zero skips, both migrations apply cleanly, and every endpoint has been exercised end to end.
 The pipeline has run end to end against **live PubMed and OpenAlex** with local Ollama models,
 producing two articles from 92 real cached papers. The caveat is now narrower and detailed in
 README → *Verification status*: the **hosted** providers (Claude, Voyage) have never been
@@ -50,21 +54,27 @@ contradict each other.
 ## 2. System shape
 
 ```
-                    ┌──────────────────────────────┐
-                    │  Public feed (Vite SPA)      │  read-only, unauthenticated
-                    │  masonic + TanStack Query    │
-                    └───────────────┬──────────────┘
-                                    │  GET /api/feed, /api/articles/{slug}
-                    ┌───────────────▼──────────────┐
-                    │        FastAPI backend       │
-                    │  api/public   api/console    │
-                    └───────┬──────────────┬───────┘
-                            │              │  authenticated
-        ┌───────────────────▼───┐   ┌──────▼─────────────────────┐
-        │  Postgres + pgvector  │   │  Editorial console (SPA)   │
-        │  articles / sources / │   │  review queue + TipTap +   │
-        │  article_sources      │   │  sources panel             │
-        └───────────▲───────────┘   └────────────────────────────┘
+        ┌──────────────────────────────┐   ┌──────────────────────────────┐
+        │  Public site  /  (Vite SPA)  │   │  Review desk  /review        │
+        │  feed · article · about ·    │   │  queue · TipTap · sources    │
+        │  join · you · contact        │   │  its own chrome, lazy chunk  │
+        └───────────────┬──────────────┘   └──────────────┬───────────────┘
+       GET /api/feed, /api/articles/{slug}                │
+       reader token (optional) on /api/readers/*          │ reviewer token
+                        │                                 │
+                    ┌───▼─────────────────────────────────▼───┐
+                    │            FastAPI backend              │
+                    │   api/public          api/console       │
+                    │   feed · readers ·    router-level      │
+                    │   contact             bearer gate       │
+                    └───────────────────┬─────────────────────┘
+                                        │
+        ┌───────────────────────────────▼────────────────────────────┐
+        │  Postgres + pgvector                                       │
+        │  articles / sources / article_sources                      │
+        │  users (reviewers)  ·  readers / reader_folders /          │
+        │  reader_saves  ·  contact_requests                         │
+        └───────────▲────────────────────────────────────────────────┘
                     │
         ┌───────────┴────────────────────────────────────┐
         │  Pipeline worker (local process)               │
@@ -78,8 +88,15 @@ contradict each other.
      └──────────────────────────────┘
 ```
 
-Two surfaces, one backend, one database. The console and the feed share nothing but the
-`articles` table and the API server; they are separate route trees with separate auth posture.
+Two surfaces, one backend, one database. They share nothing but the `articles` table, the API
+server and `App.tsx`: separate route groups, separate chrome, separate auth posture, and two
+account tables that cannot be mistaken for each other (§3.2).
+
+**Nothing on the public site links to the review desk.** That is discoverability, not access
+control — a URL is not a secret, and the desk being at `/review` rather than `/console` protects
+nothing on its own. What keeps readers out is `RequireAuth` on the client and the router-level
+bearer dependency on every `/api/console/*` route. The desk links *out* to the live site, which
+is the only crossing that carries no information about what is still unpublished.
 
 ---
 
@@ -94,21 +111,59 @@ it mechanical rather than a rewrite:
 - All data access lives in `frontend/src/lib/api/*` and is framework-agnostic (plain `fetch`
   + typed response contracts). No React Router APIs leak into fetch logic.
 - Route components live in `src/routes/` mirroring a Next `app/` tree one-for-one
-  (`routes/feed.tsx` → `app/(public)/page.tsx`, `routes/article.$slug.tsx` →
+  (`routes/feed.tsx` → `app/(public)/page.tsx`, `routes/article.tsx` →
   `app/(public)/a/[slug]/page.tsx`).
 - Nothing above the route level touches `window` during render, so the components are
   server-renderable as-is.
+- The public group renders under a layout route (`PublicLayout`) rather than above `<Routes>`,
+  which *is* `app/(public)/layout.tsx` with `<Outlet/>` becoming `{children}`. The review group
+  brings its own header, so neither inherits the other's chrome — the earlier tree mounted the
+  site bar above the router and the console rendered the public wordmark as a result.
 
 The port would then be: replace the router, add `generateMetadata` + JSON-LD to the article
-route, and mark the console route group `noindex`. `masonic` is client-only and would need a
+route, and mark the `(review)` route group `noindex`. `masonic` is client-only and would need a
 `dynamic(..., { ssr: false })` wrapper or a static-grid fallback for the first paint.
 
-### 3.2 Auth: minimal, but with a real audit trail
+**Feed narrowing lives in the URL, not in a context.** Search, subject and verdict are all
+things a reader might bookmark, share or reach with the back button, and a provider above the
+router would make all three impossible while adding a second source of truth for the feed to
+disagree with. Raw values are narrowed against the enum on read rather than cast — `?subject=`
+is a string a stranger can send someone, and an unknown value reads as "no filter", which is
+both the safe interpretation and the one that keeps a mistyped link working.
+
+**Search is client-side over loaded pages, and the empty state says so.** There is no search
+endpoint. Inventing a `?q=` answered by a `LIKE` over the card columns would be a search that
+silently misses the body of every article — a smaller promise honestly stated beats a larger
+one quietly broken, so the empty state reads "nothing matching X in the N articles loaded so
+far" rather than "nothing published".
+
+### 3.2 Auth: two kinds of account, minimal, with a real audit trail
 
 A `users` table (email, password hash, role) and a JWT bearer dependency guarding
 `/api/console/*`. Seeded with one admin. This is deliberately small, but it is *not* a shared
 password — `reviewed_by` is a real foreign key, so "who approved this" is answerable forever.
 Adding reviewers later is inserting rows; adding an invite flow is additive.
+
+**Readers are a second table, not a role on the first.** `articles.reviewed_by` points into
+`users`, so a row there is a claim about who is answerable for a published article. Folding
+self-service signups into the same table would leave a correctly-set enum as the only thing
+between registering and the review queue, and the console's gate one `WHERE` clause away from
+admitting anyone. Two tables make the mistake unrepresentable: a reader id cannot satisfy
+`require_reviewer`, because it is not in `users` at all.
+
+The tokens are signed with the same secret and separated by a **`typ` claim** (`reviewer` /
+`reader`), checked in `decode_token_subject` *before* the account lookup. That check is
+redundant today — the missing `users` row would 401 anyway — and it is there because that
+redundancy is exactly what evaporates the day someone changes either query. One secret to
+rotate, one claim to check, and the two surfaces cannot be conflated by a future edit.
+`lib/api/client.ts` chooses which token to send from the request path, never from the caller: a
+caller that picks can pick wrong, and the wrong choice leaks a console token to an endpoint
+with no business seeing one.
+
+`optional_reader` is the feed's gate and **never raises**. A stale thirty-day token on a
+surface that requires no account must degrade to the anonymous feed, not to a 401 — the
+alternative is a reader whose token quietly expired seeing an error page where the site used
+to be.
 
 Password hashing is Argon2id (`argon2-cffi`), not bcrypt — no 72-byte truncation surprise.
 
@@ -147,6 +202,16 @@ Three shapes worth defending, because the obvious alternative is wrong in each c
   fresh identity per request and bypass the IP budget entirely — worse than no limit, because
   the endpoint would look protected. Behind a load balancer this becomes
   `uvicorn --proxy-headers --forwarded-allow-ips=<balancer>` (§10), not a code change here.
+
+**There are three separate throttle instances**, not one shared counter: reviewer login,
+reader login, and the contact form (`api/deps.py`). Sharing would make the endpoints each
+other's denial of service — readers and reviewers arrive from the same office NAT, and enough
+failed reader logins would lock the console out of its own IP budget. The contact form is not a
+login and nothing is being guessed there, but it is the other unauthenticated write on the
+public surface and wants the same shape: an escalating, expiring, reject-don't-sleep budget per
+IP and per address. A *successful* submission spends budget too, deliberately — a successful
+post is exactly what a spammer repeats, and a person sending one message a week never reaches
+the limit.
 
 The state is an in-process dict behind a `LoginThrottle` Protocol. The honest limitation: N
 uvicorn workers means N× the budget and a restart clears it. Neither matters with one local
@@ -497,6 +562,53 @@ bare vectors, and threading usage back through it would change the Protocol's re
 every caller. The gap is about 28k tokens per cold run (~$0.002 at voyage-4 rates), roughly 1%
 of a synthesis call. The number that would justify the refactor is not a run — it is a full
 re-embed of the cache, and that is a script, not a pipeline stage.
+
+### 3.8 The visual system: You.th over Modernist
+
+Two stylesheets, and the split is what makes retuning possible at all.
+`styles/design-system.css` is the **vendored** Modernist design system — treat it as read-only
+and re-copy it from the design project rather than hand-editing, because that project is what
+the readme and the component pages render from. `styles/youth.css` is the product layer: it
+declares the `--ew-*` tokens every component actually speaks, and re-points Modernist's own
+`--color-*` roles at them so the focus ring and `::selection` follow the active theme instead
+of staying stuck on the light palette.
+
+Two things are carried from the previous theme because the new comp does not contradict them.
+**Modernist is light-only** — its `--color-bg` / `--color-text` are fixed hexes — so the
+product tokens are the ones that flip. And **the ink is a four-step ramp, not one ink**:
+headline, excerpt, meta and rule each have a different contrast job, and `color-mix()` on a
+single ink cannot hit those ratios predictably across both grounds.
+
+What the You.th layer changes, and why each matters more than it looks:
+
+- **Warm paper, not grey.** `#f4f1ec` under `#201e1d`, so the page reads as stock rather than
+  as a screen.
+- **Radius is back.** Modernist is a zero-radius system; You.th rounds tiles at 20px and panels
+  at 22px. The radii are tokens in one file rather than literals in components, so the two
+  systems disagree in exactly one place instead of everywhere.
+- **Actions are pills.** Now that cards have corners, `rounded-full` is what still separates a
+  control from a card at a glance. This holds on the review desk too: `features/console/
+  controls.ts` carries the same shapes, because a reviewer crossing between the two surfaces
+  should not have to relearn what a button looks like.
+- **Colour still means subject, never verdict.** The five subject hues are an addition to
+  Modernist rather than accent steps of it, and none of them sits on a judgment. A grid of
+  tiles can be chromatic without becoming a traffic light.
+
+**One exception to the token rule, and it is principled.** Feed-tile text is fixed white over a
+fixed dark scrim (`.ew-tile-scrim`) rather than theme tokens, because it sits over a photograph
+whose colours nobody controls. It is the one place a literal beats a token, and it is written
+as a class so the stops are legible and retune once for every surface that uses a tile.
+
+**The verdict mark is dropped on image tiles**, and that is a deliberate exception to
+"geometry carries the verdict" rather than an oversight. The mark is drawn in the ink ramp;
+over a scrimmed photograph the ink is invisible, and a white version would be a second mark
+meaning the same thing in a different colour. The wording carries it there — which it can,
+because on a tile the verdict is a word to read rather than a value to compare down a column.
+
+`tailwind.config.ts` resolves every value to a custom property, so a hex in a component is a
+bug: it cannot follow the theme and it is invisible to anyone retuning the system. The known
+consequence is that `var()` colours do not support Tailwind's slash-opacity syntax
+(`text-ink/50` produces nothing), which is intentional pressure toward the four-step ramp.
 
 ---
 
@@ -921,10 +1033,19 @@ The review screen is the editor and the sources panel side by side:
 - **Editor** is TipTap with autosave (debounced 800ms) writing to `edited_content`.
   `original_content` is never touched, giving a clean audit trail of what the model wrote
   versus what went live.
+- **Subject picker** is the one field a reviewer *adds* rather than checks. It sits above the
+  decision block, not inside it: it is metadata that stays editable after publication, and
+  grouping it with Approve would imply it is part of the irreversible act.
 
 Publishing sets status, `reviewed_by`, `reviewed_at`, `published_at`, and materialises the
-derived card fields in the same transaction. The public feed only ever queries
-`status = 'published'`.
+derived card fields — headline, excerpt and image — in the same transaction. The public feed
+only ever queries `status = 'published'`.
+
+**The publish control names its destination.** It reads "Publish to the public feed", says the
+article will land at `/a/{slug}` recorded against the reviewer's name, and links there once it
+is live. This is the only path to `published` in the system and it puts the article in front of
+every reader; a button whose label is an abstract state change understates what is being
+decided.
 
 ---
 
@@ -936,11 +1057,51 @@ Full request/response models are in `backend/app/api/*/schemas.py`. Summary:
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/feed` | Cursor-paginated published cards. `?cursor=&limit=&verdict=` |
+| `GET` | `/api/feed` | Cursor-paginated published cards. `?cursor=&limit=&verdict=&subject=&personalise=` |
+| `GET` | `/api/feed/facets` | Published counts per subject and per verdict, for the browse drawer |
 | `GET` | `/api/articles/{slug}` | Full article + citations + sources |
+| `POST` | `/api/contact` | "Let us know" — 202, rate limited, write-only |
 | `GET` | `/api/healthz` | Liveness |
 
+`/api/feed` takes an **optional** reader token. Signed in, the reader's interests add a leading
+sort tier; signed out — or with a stale token — it serves the anonymous feed rather than a 401.
+`personalise=false` is how a signed-in reader asks for the plain chronological order without
+signing out.
+
+`facets` returns **sparse** maps: a key is absent when nothing is published under it, so a
+client must default to zero rather than assume the enum is populated. They also do not sum to
+`total` — an unclassified article is counted in the total and in no subject, which is why
+"Everything" is genuinely larger than the five categories added up.
+
+### Reader accounts (bearer token, own data only)
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/readers/signup` | Create an account, its first folder, and a session |
+| `POST` | `/api/readers/login` | Email + password → access token |
+| `GET` | `/api/readers/me` | The caller's own account; also re-validates a stored token |
+| `PATCH` | `/api/readers/me` | Display name, interests, newsletter. Omitted field = unchanged |
+| `GET` `POST` | `/api/readers/folders` | List / create |
+| `DELETE` | `/api/readers/folders/{id}` | Remove a folder and its saves. Refuses the last one |
+| `GET` | `/api/readers/saved` | The shelf plus its folder tabs, in one request |
+| `GET` | `/api/readers/saved/slugs` | `{slug: folderId}` — one request for a page of tiles |
+| `PUT` `DELETE` | `/api/readers/saved/{slug}` | Save (idempotent; re-saving *moves*) / unsave |
+
+Every route here either creates a session or operates on the caller's own row. There is no
+listing endpoint, no lookup by id, and nothing that can see another reader. `PATCH /me` has
+patch semantics with one consequence worth stating: **`interests: []` is a real instruction**
+— turn personalisation off — and is distinct from omitting the field, which is the only way
+that switch can be thrown back.
+
+`saved/slugs` is deliberately *not* folded into the feed response. The feed is public,
+identical for everyone and cacheable; a per-reader field in it would make it none of those.
+
 ### Console (JWT required)
+
+**The API prefix is still `/api/console`, deliberately.** The *frontend* route moved from
+`/console` to `/review`; the API did not. This is the reviewer API and renaming it would churn
+every handler, schema, client method and test to change a string no reader ever sees. Read
+"console" here as the name of the authenticated surface, not of a page.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -949,11 +1110,25 @@ Full request/response models are in `backend/app/api/*/schemas.py`. Summary:
 | `GET` | `/api/console/articles` | Queue. `?status=pending_review&cursor=&limit=` |
 | `GET` | `/api/console/articles/{id}` | Draft + sources + validation report |
 | `PATCH` | `/api/console/articles/{id}/content` | Autosave into `edited_content` |
+| `PATCH` | `/api/console/articles/{id}/subject` | Classify what the article assesses; nullable |
 | `POST` | `/api/console/articles/{id}/approve` | → `published` |
 | `POST` | `/api/console/articles/{id}/reject` | → `rejected` (reason required); also the discard path from `validation_failed` |
 | `POST` | `/api/console/pipeline/runs` | Enqueue a topic |
 | `GET` | `/api/console/pipeline/runs` | Run history + per-stage status |
 | `GET` | `/api/console/pipeline/runs/{id}` | One run, all stages, errors, token cost |
+| `GET` | `/api/console/contact` | The "Let us know" inbox. `?status=&limit=` |
+| `PATCH` | `/api/console/contact/{id}` | Mark answered / closed, or reopen |
+
+`subject` is a separate route from the content autosave, and is legal **after** publication —
+unlike the body — because it drives a colour and a browse listing rather than a word the reader
+was shown. Getting it wrong should be correctable without touching the article.
+
+The contact inbox is reviewer-only reading of a publicly-written table: the rows carry an email
+address and free text from anyone with the URL, so nothing is ever echoed publicly — no
+"recently requested" list, no counts — and the console renders note and link as text, never as
+markup. A submission also **does not create a pipeline run**. Nothing reaches generation because
+a stranger asked for it, which is invariant #1's principle applied at the other end of the
+pipeline.
 
 Two deliberate omissions: no `DELETE` on articles (rejection is a state, and the audit trail is
 the point), and no endpoint that can set `status = published` other than `approve`.
@@ -962,12 +1137,44 @@ the point), and no endpoint that can set `status = published` other than `approv
 
 ## 9. Data model
 
-Full DDL: `backend/migrations/0001_initial.sql`. Shape:
+Full DDL: `backend/migrations/0001_initial.sql` and `0002_readers_and_subjects.sql`. Shape:
 
 - **`users`** — reviewers. `role` in (`admin`, `reviewer`).
 - **`articles`** — `status`, `slug`, `topic`, `original_content` (JSONB, immutable),
   `edited_content` (JSONB), `verdict`, `verdict_qualifier`, `evidence_grade`, derived card
-  fields, `validation_report` (JSONB), `reviewed_by`, `reviewed_at`, `published_at`.
+  fields, `subject`, `validation_report` (JSONB), `reviewed_by`, `reviewed_at`,
+  `published_at`.
+- **`readers`** — public accounts. `email`, `password_hash` (same Argon2id hasher as `users`),
+  `display_name`, `interests subject[]`, `newsletter`. Separate from `users` for the reason in
+  §3.2.
+- **`reader_folders`** / **`reader_saves`** — one shelf per folder. See below for the two
+  constraints that carry the behaviour.
+- **`contact_requests`** — `kind`, `email`, `link`, `note`, `status`, `handled_by`,
+  `handled_at`. Written unauthenticated, read only in the console.
+
+**Two card columns are derived, and one enum is not.** `card_image` / `card_image_alt` are
+materialised at publish time from the first `image` node in the approved body, by the same rule
+as `card_headline` and `card_excerpt` — so a feed tile cannot show a picture the article does
+not contain. `youtube` nodes are excluded on purpose: a video thumbnail lives on a third-party
+host, and deriving one would put a YouTube request on every render of the feed, which is the
+tracking the article page's click-to-load facade exists to avoid. NULL is the normal case and
+the feed draws a typographic tile.
+
+`subject`, by contrast, is **set by a reviewer and never inferred**. It cannot be derived from
+`product`, which is free text, and a guess would put a confident colour on an unchecked
+classification. It stays nullable everywhere: an unclassified article renders in ink and sits
+under "Everything", which is the design's resting state rather than a gap, so it must never
+block publishing.
+
+**Interests reorder the feed; they never filter it.** `FeedService.page` gains a leading sort
+tier — 0 for a subject the reader picked, 1 for everything else — and the rest follows below.
+Filtering would let an account quietly shrink the world, and it would make every *unclassified*
+article permanently invisible to anyone with an interest set. The cost is that the tiered sort
+cannot use `articles_feed_idx`, because the leading key is a `CASE` expression; the tier is
+therefore skipped entirely for a reader with no interests, which is every anonymous request.
+The keyset cursor encodes the tier as well as `(published_at, id)`, so signing in or out
+mid-scroll hands back a cursor the other mode can still read. If personalised paging ever
+becomes hot the fix is a materialised tier column, not a different sort.
 - **`sources`** — `pmid`, `doi`, `title`, `abstract`, `journal`, `year`, `study_type`,
   `citation_count`, `url`, `source_api`, `embedding vector(N)`, `last_seen_at`, plus the
   retraction record: `retracted_at`, `concern_at`, `retraction_checked_at`, `retraction_note`
@@ -985,7 +1192,27 @@ Indexes that matter:
 CREATE UNIQUE INDEX sources_doi_key  ON sources (lower(doi)) WHERE doi IS NOT NULL;
 CREATE UNIQUE INDEX sources_pmid_key ON sources (pmid)       WHERE pmid IS NOT NULL;
 CREATE INDEX articles_feed_idx ON articles (published_at DESC) WHERE status = 'published';
+CREATE INDEX articles_subject_feed_idx
+    ON articles (subject, published_at DESC, id DESC) WHERE status = 'published';
+CREATE UNIQUE INDEX readers_email_key      ON readers (lower(email));
+CREATE UNIQUE INDEX reader_folders_name_key ON reader_folders (reader_id, lower(name));
 ```
+
+The subject index is a second index rather than a widening of `articles_feed_idx`: the
+unfiltered feed is the common path and must not pay for the narrow one.
+
+**Two constraints on `reader_saves` carry behaviour that would otherwise be a handler's
+discipline.** The primary key is `(reader_id, article_id)`, so re-saving an article into a
+different folder is an `UPDATE` of `folder_id` — a *move*, not a second row — and the same
+article cannot accumulate a copy per folder. And the foreign key is composite,
+`(folder_id, reader_id) → reader_folders (id, reader_id)`, which makes "you can only save into
+your own folder" a database fact rather than a check every route has to remember. Both are
+tested against a live database in `test_reader_accounts.py`, because a fake session cannot
+demonstrate either.
+
+`contact_requests` carries a CHECK in the same shape as the one behind invariant #1: a row
+whose status claims a human dealt with it has to name the human, so reopening a request must
+clear `handled_by` and `handled_at` or the row is refused.
 
 **There is deliberately no HNSW index on `sources.embedding`.** An earlier draft of the schema
 created one and nothing could ever use it. The only vector query is

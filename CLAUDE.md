@@ -11,6 +11,8 @@ All backend commands run from `backend/` with the venv active (`source .venv/bin
 docker compose up -d db                  # pgvector/pgvector:pg16 on :5432
 pip install -e ".[dev]"
 python -m scripts.migrate                # applies migrations via asyncpg; no psql needed
+                                         # 0002 adds readers, folders, the contact inbox,
+                                         # articles.subject and articles.card_image
 python -m scripts.migrate --status
 python -m scripts.seed_admin --email you@example.com --name "Your Name"
 
@@ -30,7 +32,7 @@ ruff check app tests scripts             # clean; treat as a gate
 mypy app                                 # NOT clean — see below
 
 # frontend, from frontend/
-npm run dev            # :5173, console at /console
+npm run dev            # :5173, public site at /, review desk at /review
 npm run typecheck
 npm run build          # tsc -b && vite build
 ```
@@ -58,7 +60,7 @@ Two declared checks do not currently pass, so don't read a failure as something 
 
 ## Testing gotchas
 
-**Six suites skip silently when no database is reachable**, and they are the ones covering
+**Seven suites skip silently when no database is reachable**, and they are the ones covering
 guarantees a fake session cannot express — SQL semantics, transaction boundaries, and the
 query planner. A green `pytest` with the DB down is a much weaker signal than it looks:
 
@@ -70,6 +72,7 @@ query planner. A green `pytest` with the DB down is a much weaker signal than it
 | `test_worker_claim.py` | the claim `UPDATE`, and `attempts` counted at claim time |
 | `test_stale_recovery.py` | heartbeat sweep, requeue-vs-fail on a spent budget |
 | `test_rerank_plan.py` | the `EXPLAIN` assertion that no approximate scan is chosen |
+| `test_reader_accounts.py` | the composite FK on `reader_saves`, the save-is-a-move primary key, folder-name uniqueness, and the contact `CHECK` |
 
 Point them elsewhere with `TEST_DATABASE_URL`; they otherwise use `database_url` from
 settings. `test_worker_claim.py` and `test_stale_recovery.py` also skip when the queue is
@@ -270,10 +273,73 @@ to ~328 fewer input tokens than the run rollup: extraction's *input* count was n
 `metrics` (only `"tokens"`, its output). Expected, not drift — don't "fix" it. Their `model` is
 NULL, so they report an unknown cost rather than a guessed one.
 
+**The theme is `styles/youth.css`; `styles/design-system.css` is vendored and read-only.**
+The second is Modernist, copied from the Claude Design project — retune it *there* and re-copy,
+because hand-edits are lost on the next sync and that project is what the readme and the
+component pages render from. `youth.css` declares the `--ew-*` tokens components speak and
+re-points Modernist's `--color-*` roles at them, so the focus ring and `::selection` follow the
+active theme. Every Tailwind value resolves to a custom property: a hex in a component is a bug,
+because it cannot follow the theme and is invisible to anyone retuning the system. Two
+deliberate exceptions, both because the surface underneath is a photograph nobody controls —
+feed-tile text and `.ew-tile-scrim` are fixed white on fixed dark, and the verdict *mark* is
+dropped on an image tile because ink is invisible on a scrim and a white version would be a
+second mark meaning the same thing. `features/console/controls.ts` carries the same pill-and-
+rounded-field shapes as the public side, on purpose: a reviewer crossing between the two
+surfaces should not have to relearn what a button looks like, and that file's own rule is that
+those three controls staying consistent is a safety property.
+
 **Frontend is a Vite SPA shaped for a cheap Next.js port.** Keep all data access in
 `src/lib/api/*` framework-agnostic (plain fetch + typed contracts), keep `src/routes/`
 mirroring a Next `app/` tree one-for-one, and keep `window` out of render paths above the
 route level.
+
+**Two route groups that share only `App.tsx`.** The public site (`/`, `/a/:slug`, `/about`,
+`/join`, `/you`, `/contact`) renders under `PublicLayout` — site bar, category drawer, mobile
+tab bar. The review desk is at **`/review`**, is lazy-loaded, and renders `ReviewHeader`
+instead. Nothing public links to it. That is chrome and discoverability, *not* access control:
+a URL is not a secret, and what actually keeps readers out is `RequireAuth` plus the
+router-level bearer check on every `/api/console/*` route. Public routes must never import
+from `features/console`, and the desk must never render public chrome.
+
+**Two accounts, two tables, two tokens.** `users` is the reviewer roster and
+`articles.reviewed_by` is a foreign key into it, so a row there is a claim about who is
+answerable for a published article. `readers` are self-service. One table with a role column
+would put a correctly-set enum between a public signup and the review queue; two tables make
+that unrepresentable. The tokens carry a `typ` claim (`reviewer` / `reader`) checked in
+`decode_token_subject` **before** the account lookup, so a reader token presented to the
+console is rejected as malformed rather than merely failing to resolve — the separation
+survives a future change to either query. `lib/api/client.ts` picks which token to send from
+the path, never from the caller.
+
+**The browse drawer offers subject only.** It listed the four verdicts for a while and they
+were removed deliberately: a standing menu of Supported / Mixed / Weak / No evidence is a
+scoreboard, and offering it as a primary way into the feed invites browsing by score rather
+than by subject — the framing the content rules exist to avoid. `?verdict=` is still a real
+narrowing and still works from a shared link; the navigation just does not propose it.
+
+**A reader account orders the feed; it never narrows it.** `FeedService.page` gains a leading
+sort tier — 0 for a subject the reader picked, 1 for everything else — and the rest of the
+feed follows below. Filtering instead would let an account quietly shrink the world, and it
+would make every *unclassified* article (`subject IS NULL`) invisible to anyone with an
+interest set. The cost is that the tiered sort cannot use `articles_feed_idx`; the tier is
+therefore skipped entirely for a reader with no interests, which is every anonymous request.
+Free-text search is client-side over loaded pages — there is no search endpoint — and the
+empty state says so rather than claiming nothing exists.
+
+**`subject` is reviewer-set and stays optional.** It is the product's one chromatic axis and
+it cannot be derived: `product` is free text, and guessing would put a confident colour on an
+unchecked classification. `PATCH /console/articles/{id}/subject` is deliberately separate from
+the content autosave and legal *after* publication, because it drives a colour and a browse
+listing rather than a word the reader was shown. An unclassified article renders in ink and
+sits under "Everything" — the design's resting state, not a broken cell — so it must never
+block publishing.
+
+**The feed tile's picture is derived, like its headline and excerpt.** `derive_card()` takes
+the first `image` node from the approved body into `articles.card_image` at publish time, so a
+tile cannot show a picture the article does not contain. `youtube` nodes are excluded on
+purpose: a video thumbnail lives on a third-party host, and deriving one would put a YouTube
+request on every feed render — the same tracking the article page's click-to-load facade
+exists to avoid. `NULL` is the normal case and the feed draws a typographic tile.
 
 ## Invariants — do not route around these
 
@@ -354,7 +420,11 @@ generated by a separate model call, so card and article cannot contradict each o
   attempt, so `/auth/login` saturates a core at ~32 req/s of junk, and `equalise_timing()`
   makes nonsense input cost the same as a real try. `security/login_throttle.py` is checked
   before the user lookup for that reason; moving it after would still pass every behavioural
-  test and leave the process exposed. Failures are counted for unknown emails too, or the 429
+  test and leave the process exposed. **There are three separate instances** of it —
+  reviewer login, reader login, and the contact form (`api/deps.py`). One shared counter
+  would make the endpoints each other's denial of service: readers and reviewers arrive from
+  the same office NAT, and enough failed reader logins would lock the console out of its own
+  IP budget. Failures are counted for unknown emails too, or the 429
   becomes the account-enumeration oracle the equal timing exists to prevent. Unlike
   `retrieval/throttle.py` it rejects instead of sleeping — a delay only slows a client that
   chooses to wait, which is the honest user and not the attacker.

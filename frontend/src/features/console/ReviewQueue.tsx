@@ -32,7 +32,6 @@ import { VerdictMark } from "@/features/evidence/VerdictMark";
 import { GRADE_LABELS, VERDICT_LABELS } from "@/features/evidence/labels";
 import { subjectBorderLeft } from "@/features/evidence/subject";
 import type { ArticleStatus, PipelineRun, QueueItem } from "@/types/api";
-import { useAuth } from "./auth";
 import { PRIMARY } from "./controls";
 import {
   CONSOLE_PAGE,
@@ -64,8 +63,6 @@ import {
   QUEUE_TITLE,
   QUEUE_VALIDATION_BADGE,
   QUEUE_VERDICT_WORDING,
-  SIGNED_IN_AS,
-  SIGN_OUT_ACTION,
   TAB_BAR,
   TAB_COUNT,
   WEAK_EVIDENCE_FLAG,
@@ -82,7 +79,6 @@ const TABS: { status: ArticleStatus; label: string }[] = [
 
 export function ReviewQueue() {
   const [status, setStatus] = useState<ArticleStatus>("pending_review");
-  const { reviewer, logout } = useAuth();
 
   const { data, status: queryStatus } = useQuery({
     queryKey: consoleKeys.queue(status),
@@ -110,12 +106,9 @@ export function ReviewQueue() {
             named reviewer.
           </p>
         </div>
-        <span className={SIGNED_IN_AS}>
-          Signed in as {reviewer?.displayName ?? "—"} ·
-          <button onClick={logout} className={SIGN_OUT_ACTION}>
-            Sign out
-          </button>
-        </span>
+        {/* Who is signed in, and signing out, moved to `ReviewHeader` when
+            the desk gained its own chrome — repeating them here would be two
+            sign-out buttons on one screen. */}
       </div>
 
       <NewRunForm />
@@ -325,7 +318,7 @@ function QueueRow({ item, tab }: { item: QueueItem; tab: ArticleStatus }) {
 
   return (
     <li className={queueRow(subjectBorderLeft(item.subject ?? null))}>
-      <Link to={`/console/review/${item.id}`} className={QUEUE_ROW_LINK}>
+      <Link to={`/review/article/${item.id}`} className={QUEUE_ROW_LINK}>
         <div className={QUEUE_ROW_SIGNALS}>
           <VerdictMark verdict={item.verdict} size="sm" />
           <span className={QUEUE_VERDICT_WORDING}>{VERDICT_LABELS[item.verdict]}</span>

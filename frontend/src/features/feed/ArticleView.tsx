@@ -1,71 +1,67 @@
 /**
  * The full on-tap article.
  *
- * Two columns, and the split is the argument: the claim and the prose on the
- * left, the *warrant* — strongest evidence available, then every paper — pinned
- * on the right. The sidebar is sticky because the reader's question while
- * reading paragraph three is "what is this resting on?", and making them scroll
- * to the bottom to answer it is how a reader learns not to bother.
+ * One column at 760px, where the previous design used two with the evidence
+ * pinned in a sidebar. The sidebar answered "what is this resting on?" without
+ * scrolling, and that question still has to be answerable mid-paragraph — but
+ * the citation chips are what answer it now, each opening its own paper in
+ * place. At this measure a 320px sidebar would leave the prose too narrow to be
+ * the thing the page is for, so the sources moved to a panel at the end and the
+ * grade moved up beside the verdict, where it is read before the article rather
+ * than beside it.
  *
  * The disclaimer is rendered from a server-provided constant and is not
  * conditional on anything — it is the one element that must appear on every
  * article regardless of verdict, and it is deliberately not model output.
  */
 
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { ApiError } from "@/lib/api/client";
 import { GradeBar } from "@/features/evidence/GradeBar";
-import { VerdictLabel } from "@/features/evidence/VerdictLabel";
-import { GRADE_NOTES, VERDICT_GLOSS } from "@/features/evidence/labels";
+import { VerdictMark } from "@/features/evidence/VerdictMark";
+import { GRADE_NOTES, VERDICT_GLOSS, VERDICT_LABELS } from "@/features/evidence/labels";
+import { verdictWording } from "@/features/evidence/styles";
+import { subjectLabel, subjectText } from "@/features/evidence/subject";
 import { fetchArticle, feedKeys } from "@/lib/api/feed";
 import { PublishedDate } from "./ArticleCard";
 import { ArticleContent } from "./ArticleContent";
+import { ArticleActions } from "./ArticleActions";
+import { ReadMore } from "./ReadMore";
 import { SourceList } from "./SourceList";
-import { subjectBorderTop, subjectLabel, subjectText } from "@/features/evidence/subject";
 import {
   ARTICLE_BACK_LINK,
-  ARTICLE_BODY_COLUMN,
-  ARTICLE_COLUMNS,
+  ARTICLE_BYLINE,
+  ARTICLE_BYLINE_SEP,
+  ARTICLE_BYLINE_STRONG,
   ARTICLE_DISCLAIMER,
-  RETRACTION_BANNER,
-  RETRACTION_BANNER_LABEL,
-  RETRACTION_BANNER_TEXT,
   ARTICLE_ERROR_PAGE,
   ARTICLE_ERROR_TITLE,
   ARTICLE_LEDE,
-  ARTICLE_META_STRIP,
   ARTICLE_PAGE,
-  ARTICLE_SIDEBAR,
-  ARTICLE_SKELETON_COLUMNS,
   ARTICLE_SKELETON_PAGE,
   ARTICLE_TITLE,
+  ARTICLE_VERDICT_BAR,
+  ARTICLE_VERDICT_QUALIFIER,
   BACK_TO_FEED_LINK,
-  META_CELL,
-  META_CELL_LABEL,
-  META_CELL_VALUE,
-  SECTION_LABEL_BLOCK,
-  SIDEBAR_BLOCK,
-  SIDEBAR_GRADE_BAR,
-  SIDEBAR_NOTE,
-  SIDEBAR_SOURCES,
+  RETRACTION_BANNER,
+  RETRACTION_BANNER_LABEL,
+  RETRACTION_BANNER_TEXT,
   SKELETON_KICKER,
+  SKELETON_LEAD_IMAGE,
   SKELETON_LEDE,
   SKELETON_PARAGRAPH,
   SKELETON_PROSE,
-  SKELETON_SIDEBAR,
-  SKELETON_SIDEBAR_BLOCK,
-  SKELETON_SOURCE_LIST,
   SKELETON_TITLE,
   VERDICT_GLOSS_TEXT,
   articleKicker,
-  articleVerdictBlock,
 } from "./styles";
 
 export function ArticleView() {
   const { slug = "" } = useParams();
+  const navigate = useNavigate();
 
   // Which source the reader last opened from the prose. Lives here because both
   // the chips and the list need it, and neither owns the other.
@@ -102,111 +98,113 @@ export function ArticleView() {
     );
   }
 
-  const subject = article.subject ?? null;
+  const subject = article.subject;
   const kicker = subjectLabel(subject);
 
   return (
     <main className={ARTICLE_PAGE}>
-      <Link to="/" className={ARTICLE_BACK_LINK}>
-        ← All articles
-      </Link>
+      {/*
+        `navigate(-1)` rather than a link to `/`, so a reader who arrived from a
+        narrowed feed goes back to that feed rather than to an unfiltered one
+        they then have to narrow again. Falls through to the feed when there is
+        no history to go back to — a shared link opened in a new tab.
+      */}
+      <button
+        onClick={() => (window.history.length > 1 ? navigate(-1) : navigate("/"))}
+        className={ARTICLE_BACK_LINK}
+      >
+        ← Feed
+      </button>
 
-      <div className={ARTICLE_COLUMNS}>
-        <article className={ARTICLE_BODY_COLUMN}>
-          {article.retractionNotice ? (
-            <aside className={RETRACTION_BANNER} role="note">
-              <span className={RETRACTION_BANNER_LABEL}>Source retracted</span>
-              <span className={RETRACTION_BANNER_TEXT}>
-                A paper cited below has been withdrawn by the journal that
-                published it since this article was written. The article is
-                under review and has not been updated yet — weigh the verdict
-                accordingly. The affected source is marked in the list.
-              </span>
-            </aside>
+      <article>
+        {article.retractionNotice ? (
+          <aside className={RETRACTION_BANNER} role="note">
+            <span className={RETRACTION_BANNER_LABEL}>Source retracted</span>
+            <span className={RETRACTION_BANNER_TEXT}>
+              A paper cited below has been withdrawn by the journal that
+              published it since this article was written. The article is under
+              review and has not been updated yet — weigh the verdict
+              accordingly. The affected source is marked in the list.
+            </span>
+          </aside>
+        ) : null}
+
+        {kicker ? (
+          <div className={articleKicker(subjectText(subject))}>{kicker}</div>
+        ) : null}
+
+        <h1 className={ARTICLE_TITLE}>{article.headline}</h1>
+        <p className={ARTICLE_LEDE}>{article.summary}</p>
+
+        <div className={ARTICLE_BYLINE}>
+          <span>
+            Written by{" "}
+            <strong className={ARTICLE_BYLINE_STRONG}>You.th Medical Team</strong>
+          </span>
+          <span className={ARTICLE_BYLINE_SEP}>|</span>
+          <span>
+            <PublishedDate iso={article.publishedAt} />
+          </span>
+          <span className={ARTICLE_BYLINE_SEP}>|</span>
+          <span>{sourceSummary(article.sources.length)}</span>
+          <span className={ARTICLE_BYLINE_SEP}>|</span>
+          <span>Reviewed by a person before publishing</span>
+        </div>
+
+        {/*
+          Verdict and evidence grade on one line, because they are one thought:
+          the judgment and the warrant for it. The previous design put the grade
+          in a sidebar, which let a reader take the verdict without ever meeting
+          what caps it.
+        */}
+        <div className={ARTICLE_VERDICT_BAR}>
+          <GradeBar grade={article.evidenceGrade} />
+          <VerdictMark verdict={article.verdict} size="sm" />
+          <span className={verdictWording(article.verdict, "sm")}>
+            {VERDICT_LABELS[article.verdict]}
+          </span>
+          {article.verdictQualifier ? (
+            <span className={ARTICLE_VERDICT_QUALIFIER}>
+              {article.verdictQualifier}
+            </span>
           ) : null}
+        </div>
 
-          <div className={articleVerdictBlock(subjectBorderTop(subject))}>
-            {kicker ? (
-              <div className={articleKicker(subjectText(subject))}>{kicker}</div>
-            ) : null}
+        <p className={VERDICT_GLOSS_TEXT}>
+          {VERDICT_GLOSS[article.verdict]} {GRADE_NOTES[article.evidenceGrade]}
+        </p>
 
-            <VerdictLabel
-              verdict={article.verdict}
-              qualifier={article.verdictQualifier}
-              size="lg"
-            />
+        <ArticleContent
+          doc={article.content}
+          sources={article.sources}
+          onCite={setActiveHandle}
+        />
 
-            <p className={VERDICT_GLOSS_TEXT}>{VERDICT_GLOSS[article.verdict]}</p>
-          </div>
+        <SourceList
+          sources={article.sources}
+          citations={article.citations}
+          activeHandle={activeHandle}
+        />
 
-          <h1 className={ARTICLE_TITLE}>{article.headline}</h1>
-          <p className={ARTICLE_LEDE}>{article.summary}</p>
+        <p className={ARTICLE_DISCLAIMER}>{article.disclaimer}</p>
 
-          <div className={ARTICLE_META_STRIP}>
-            <MetaCell label="Product" value={article.product} />
-            {article.targetClaims.length > 0 ? (
-              <MetaCell
-                label="Claims assessed"
-                value={article.targetClaims.join(" · ")}
-              />
-            ) : null}
-            {article.ingredients.length > 0 ? (
-              <MetaCell
-                label="Ingredients"
-                value={article.ingredients.join(" · ")}
-              />
-            ) : null}
-            <MetaCell
-              label="Published"
-              value={<PublishedDate iso={article.publishedAt} />}
-            />
-          </div>
+        <ArticleActions slug={article.slug} headline={article.headline} />
+      </article>
 
-          <ArticleContent
-            doc={article.content}
-            sources={article.sources}
-            onCite={setActiveHandle}
-          />
-
-          <p className={ARTICLE_DISCLAIMER}>{article.disclaimer}</p>
-        </article>
-
-        <aside className={ARTICLE_SIDEBAR}>
-          <div className={SIDEBAR_BLOCK}>
-            <span className={SECTION_LABEL_BLOCK}>Strongest evidence available</span>
-            <GradeBar
-              grade={article.evidenceGrade}
-              showLabel
-              className={SIDEBAR_GRADE_BAR}
-            />
-            <p className={SIDEBAR_NOTE}>{GRADE_NOTES[article.evidenceGrade]}</p>
-          </div>
-
-          <div className={SIDEBAR_SOURCES}>
-            <SourceList
-              sources={article.sources}
-              citations={article.citations}
-              activeHandle={activeHandle}
-            />
-          </div>
-        </aside>
-      </div>
+      <ReadMore slug={article.slug} subject={subject} />
     </main>
   );
 }
 
-function MetaCell({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div className={META_CELL}>
-      <span className={META_CELL_LABEL}>{label}</span>
-      <span className={META_CELL_VALUE}>{value}</span>
-    </div>
-  );
+/** "4 sources cited" — the byline's evidence line, in the reader's terms. */
+function sourceSummary(total: number): string {
+  if (total === 0) return "No study tests this claim";
+  return `${total} ${total === 1 ? "source" : "sources"} cited`;
 }
 
 /**
- * Skeleton, not a spinner: the article is a two-column layout and a spinner
- * collapses it, so the page reflows the moment content lands.
+ * Skeleton, not a spinner: a spinner collapses the layout, so the page reflows
+ * the moment content lands.
  */
 function ArticleSkeleton() {
   return (
@@ -215,21 +213,14 @@ function ArticleSkeleton() {
       aria-busy="true"
       aria-label="Loading article"
     >
-      <div className={ARTICLE_SKELETON_COLUMNS}>
-        <div>
-          <div className={SKELETON_KICKER} />
-          <div className={SKELETON_TITLE} />
-          <div className={SKELETON_LEDE} />
-          <div className={SKELETON_PROSE}>
-            {[0, 1, 2].map((index) => (
-              <div key={index} className={SKELETON_PARAGRAPH} />
-            ))}
-          </div>
-        </div>
-        <div className={SKELETON_SIDEBAR}>
-          <div className={SKELETON_SIDEBAR_BLOCK} />
-          <div className={SKELETON_SOURCE_LIST} />
-        </div>
+      <div className={SKELETON_KICKER} />
+      <div className={SKELETON_TITLE} />
+      <div className={SKELETON_LEDE} />
+      <div className={SKELETON_LEAD_IMAGE} />
+      <div className={SKELETON_PROSE}>
+        {[0, 1, 2].map((index) => (
+          <div key={index} className={SKELETON_PARAGRAPH} />
+        ))}
       </div>
     </main>
   );

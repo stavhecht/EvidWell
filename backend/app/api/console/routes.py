@@ -25,6 +25,7 @@ from sqlalchemy import select, tuple_
 
 from app.api.console.schemas import (
     ArticleDetailOut,
+    ContactRequestOut,
     CreateRunRequest,
     LoginRequest,
     MediaUploadOut,
@@ -34,6 +35,8 @@ from app.api.console.schemas import (
     RunOut,
     RunPageOut,
     SaveContentRequest,
+    SetContactStatusRequest,
+    SetSubjectRequest,
     StageRunOut,
     TokenResponse,
 )
@@ -45,7 +48,7 @@ from app.api.deps import (
     SettingsDep,
     require_reviewer,
 )
-from app.domain.enums import ArticleStatus, RunStatus, UserRole
+from app.domain.enums import ArticleStatus, ContactStatus, RunStatus, UserRole
 from app.domain.models import PipelineRun, PipelineStageRun, User
 from app.llm.base import TokenUsage
 from app.llm.pricing import cost_usd, total_cost_usd
@@ -55,6 +58,7 @@ from app.security.auth import (
     equalise_timing,
     verify_password,
 )
+from app.services.contact import ContactError, ContactService
 from app.services.media import UnsupportedMediaError, store_image
 from app.services.review import ReviewError, ReviewService
 
@@ -203,6 +207,26 @@ async def save_content(
     """
     try:
         await ReviewService(session).save_edits(article_id, payload.content, reviewer.id)
+    except ReviewError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.patch("/articles/{article_id}/subject", status_code=status.HTTP_204_NO_CONTENT)
+async def set_subject(
+    article_id: str,
+    payload: SetSubjectRequest,
+    session: SessionDep,
+    reviewer: ReviewerDep,
+) -> None:
+    """Classify what kind of thing the article assesses.
+
+    Separate from the content PATCH, and not part of approve, because it is the
+    one field a reviewer may legitimately change *after* publication: it drives
+    a colour and a browse listing rather than a word the reader was shown, and
+    getting it wrong should be correctable without touching the article.
+    """
+    try:
+        await ReviewService(session).set_subject(article_id, payload.subject, reviewer.id)
     except ReviewError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
@@ -472,3 +496,43 @@ def _run_out(run: PipelineRun, stages: list[PipelineStageRun]) -> RunOut:
         created_at=run.created_at,
         finished_at=run.finished_at,
     )
+
+
+# --- contact inbox ---------------------------------------------------------
+#
+# The reading half of "Let us know". The writing half is a public route; this
+# side is reviewer-only because the rows carry an email address and free text
+# written by anyone with the URL.
+
+
+@router.get("/contact", response_model=list[ContactRequestOut])
+async def contact_inbox(
+    session: SessionDep,
+    contact_status: Annotated[
+        ContactStatus | None,
+        Query(alias="status", description="Filter by handling state"),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+) -> list[ContactRequestOut]:
+    """Newest first. Deliberately unpaginated — see ``ContactService.inbox``."""
+    rows = await ContactService(session).inbox(contact_status, limit)
+    return [ContactRequestOut(**row) for row in rows]
+
+
+@router.patch("/contact/{request_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def set_contact_status(
+    request_id: str,
+    payload: SetContactStatusRequest,
+    session: SessionDep,
+    reviewer: ReviewerDep,
+) -> None:
+    """Mark a request answered or closed, or put it back in the queue.
+
+    Reversible on purpose: closing a request is bookkeeping, not a decision
+    anyone is answerable for, and the trail of who last touched it is kept
+    either way.
+    """
+    try:
+        await ContactService(session).set_status(request_id, payload.status, reviewer.id)
+    except ContactError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc

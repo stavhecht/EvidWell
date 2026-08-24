@@ -12,7 +12,16 @@ from decimal import Decimal
 from pydantic import BaseModel, Field
 
 from app.api.schemas_base import CamelModel
-from app.domain.enums import ArticleStatus, RunStatus, StudyType, UserRole, Verdict
+from app.domain.enums import (
+    ArticleStatus,
+    ContactKind,
+    ContactStatus,
+    RunStatus,
+    StudyType,
+    Subject,
+    UserRole,
+    Verdict,
+)
 
 # --- auth ------------------------------------------------------------------
 
@@ -57,6 +66,9 @@ class QueueItemOut(CamelModel):
     #: True when the verdict rests on in-vitro/animal/case-report evidence.
     #: Surfaced in the list so a reviewer can triage before opening anything.
     has_weak_evidence: bool
+    #: Reviewer-set. Drives the left rule's colour in the queue, and the tile's
+    #: on the public feed. Null means nobody has classified it yet.
+    subject: Subject | None = None
     created_at: datetime
 
 
@@ -123,7 +135,13 @@ class ArticleDetailOut(CamelModel):
     """Everything the review screen needs, in one request."""
 
     id: str
+    #: Where this article lives on the public feed once published. Sent for
+    #: every draft — the slug is assigned at persist time — so the console gates
+    #: the "view on the feed" link on `status`, not on this being set.
+    slug: str
     status: ArticleStatus
+    #: What kind of thing this assesses; see PATCH /articles/{id}/subject.
+    subject: Subject | None = None
     topic: str
     product: str
     target_claims: list[str]
@@ -155,6 +173,17 @@ class SaveContentRequest(CamelModel):
     """Autosave payload. Debounced ~800ms from the editor."""
 
     content: dict = Field(description="TipTap document")
+
+
+class SetSubjectRequest(CamelModel):
+    """Classify what kind of thing the article assesses.
+
+    Explicitly nullable: clearing the subject is a real answer, not a missing
+    one — an unclassified article renders in ink, which is the design's resting
+    state rather than a broken cell.
+    """
+
+    subject: Subject | None = None
 
 
 class MediaUploadOut(CamelModel):
@@ -246,3 +275,28 @@ class RunOut(CamelModel):
 class RunPageOut(CamelModel):
     items: list[RunOut]
     next_cursor: str | None = None
+
+
+# --- contact inbox ---------------------------------------------------------
+
+
+class ContactRequestOut(CamelModel):
+    """A "Let us know" submission, as the console sees it.
+
+    Free text written by a member of the public. Rendered as text and never as
+    markup — the note and the link are both attacker-controlled.
+    """
+
+    id: str
+    kind: ContactKind
+    name: str | None
+    email: str
+    link: str | None
+    note: str
+    status: ContactStatus
+    handled_at: datetime | None = None
+    created_at: datetime
+
+
+class SetContactStatusRequest(CamelModel):
+    status: ContactStatus

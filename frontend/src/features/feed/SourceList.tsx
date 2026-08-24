@@ -20,7 +20,8 @@ import {
   CITATION_MAP_ITEM,
   CITATION_MAP_LIST,
   CITATION_MAP_SUMMARY,
-  SECTION_LABEL,
+  SOURCES_TITLE,
+  SOURCE_SUBLINE,
   SOURCES_COUNT,
   SOURCES_EMPTY_NOTE,
   SOURCES_FOOTNOTE,
@@ -48,7 +49,7 @@ export function SourceList({ sources, citations, activeHandle }: Props) {
   if (sources.length === 0) {
     return (
       <section className={SOURCES_SECTION}>
-        <h2 className={SECTION_LABEL}>Sources</h2>
+        <h2 className={SOURCES_TITLE}>Scientific sources &amp; clinical studies</h2>
         <p className={SOURCES_EMPTY_NOTE}>
           No studies were found that test this claim directly. That is a gap in the
           literature, not a judgment on the product.
@@ -60,7 +61,7 @@ export function SourceList({ sources, citations, activeHandle }: Props) {
   return (
     <section className={SOURCES_SECTION}>
       <div className={SOURCES_HEAD}>
-        <h2 className={SECTION_LABEL}>Sources</h2>
+        <h2 className={SOURCES_TITLE}>Scientific sources &amp; clinical studies</h2>
         <span className={SOURCES_COUNT}>
           {sources.length} {sources.length === 1 ? "paper" : "papers"}
         </span>
@@ -87,18 +88,23 @@ export function SourceList({ sources, citations, activeHandle }: Props) {
                 </a>
               </div>
 
-              {source.retracted ? (
-                // Above the study type, not beside it: a retraction is not a
-                // grade. "Randomised controlled trial" is still true of a
-                // withdrawn paper, and is exactly the wrong thing for a reader
-                // to weigh it by.
-                <div className={SOURCE_RETRACTED}>Retracted by the journal</div>
-              ) : null}
-              <div className={sourceStudyType(isWeakStudyType(source.studyType))}>
-                {STUDY_TYPE_LABELS[source.studyType]}
-              </div>
-              <div className={SOURCE_META}>
-                {[source.journal, source.year].filter(Boolean).join(" · ")}
+              {/* Indented to the handle pill's right edge, so the study
+                  type and the journal read as belonging to the title above
+                  them rather than as a second list. */}
+              <div className={SOURCE_SUBLINE}>
+                {source.retracted ? (
+                  // Above the study type, not beside it: a retraction is not a
+                  // grade. "Randomised controlled trial" is still true of a
+                  // withdrawn paper, and is exactly the wrong thing for a
+                  // reader to weigh it by.
+                  <div className={SOURCE_RETRACTED}>Retracted by the journal</div>
+                ) : null}
+                <div className={sourceStudyType(isWeakStudyType(source.studyType))}>
+                  {STUDY_TYPE_LABELS[source.studyType]}
+                </div>
+                <div className={SOURCE_META}>
+                  {[source.journal, source.year].filter(Boolean).join(" · ")}
+                </div>
               </div>
             </li>
           );

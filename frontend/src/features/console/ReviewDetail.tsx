@@ -39,14 +39,15 @@ import {
 import { VerdictMark } from "@/features/evidence/VerdictMark";
 import { VERDICT_LABELS } from "@/features/evidence/labels";
 import { ArticleEditor } from "./ArticleEditor";
+import { SubjectPicker } from "./SubjectPicker";
 import { SourcesPanel, ValidationSummary } from "./SourcesPanel";
-import { useAuth } from "./auth";
 import { SECTION_LABEL } from "./controls";
 import {
   ACTION_ERROR_ALERT,
   APPROVE_BUTTON,
   BACK_TO_QUEUE,
   DECISION_BLOCK,
+  DECISION_LINK,
   DECISION_NOTE,
   DRAFT_HEADLINE,
   DRAFT_META,
@@ -62,8 +63,6 @@ import {
   REVIEW_SIDEBAR,
   REVIEW_TOP_BAR,
   SIDEBAR_SOURCES,
-  SIGNED_IN_AS,
-  SIGN_OUT_ACTION,
   STATUS_DIVIDER,
 } from "./styles";
 import { ROUTE_ERROR_MESSAGE, ROUTE_MESSAGE } from "@/features/shell/styles";
@@ -74,7 +73,6 @@ export function ReviewDetail() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const autosave = useAutosave(id);
-  const { reviewer, logout } = useAuth();
 
   const [actionError, setActionError] = useState<string | null>(null);
   const [focusedHandle, setFocusedHandle] = useState<string | null>(null);
@@ -95,7 +93,7 @@ export function ReviewDetail() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["console"] });
-      void navigate("/console");
+      void navigate("/review");
     },
     onError: (error) => setActionError(describeError(error)),
   });
@@ -104,7 +102,7 @@ export function ReviewDetail() {
     mutationFn: (reason: string) => rejectArticle(id, reason),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["console"] });
-      void navigate("/console");
+      void navigate("/review");
     },
     onError: (error) => setActionError(describeError(error)),
   });
@@ -141,7 +139,7 @@ export function ReviewDetail() {
       );
       if (!leave) return;
     }
-    void navigate("/console");
+    void navigate("/review");
   }
 
   function onReject() {
@@ -163,12 +161,9 @@ export function ReviewDetail() {
         <button onClick={() => void goBack()} className={BACK_TO_QUEUE}>
           ← Queue
         </button>
-        <span className={SIGNED_IN_AS}>
-          Signed in as {reviewer?.displayName ?? "—"} ·
-          <button onClick={logout} className={SIGN_OUT_ACTION}>
-            Sign out
-          </button>
-        </span>
+        {/* Identity and sign-out live in `ReviewHeader` now that the desk
+            has its own chrome — two sign-out buttons on one screen is one
+            more than a reviewer needs. */}
       </div>
 
       <div className={REVIEW_COLUMNS}>
@@ -220,6 +215,12 @@ export function ReviewDetail() {
             <SourcesPanel sources={article.sources} focusedHandle={focusedHandle} />
           </div>
 
+          {/* Classification sits above the decision, not inside it: it is
+              metadata a reviewer sets while reading, and it stays editable
+              after publication. Grouping it with Approve would imply it is
+              part of the irreversible act. */}
+          <SubjectPicker articleId={article.id} subject={article.subject} />
+
           <div className={DECISION_BLOCK}>
             <span className={SECTION_LABEL}>Decision</span>
 
@@ -234,12 +235,36 @@ export function ReviewDetail() {
                   ? "Only drafts pending review can be published"
                   : blockedByUnsaved
                     ? "Unsaved edits — resolve the save error first"
-                    : "Publish this article"
+                    : "Publish this article to the public feed"
               }
               className={APPROVE_BUTTON}
             >
-              {approve.isPending ? "Publishing…" : "Approve and publish"}
+              {approve.isPending ? "Publishing…" : "Publish to the public feed"}
             </button>
+
+            {/* Named, so the button is not an abstract state change. This is
+                the only path to `published` in the system, and it puts the
+                article in front of every reader — worth saying in words. */}
+            <p className={DECISION_NOTE}>
+              {article.status === "published" ? (
+                <>
+                  Live at{" "}
+                  <a
+                    href={`/a/${article.slug}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className={DECISION_LINK}
+                  >
+                    /a/{article.slug} ↗
+                  </a>
+                </>
+              ) : (
+                <>
+                  Publishing puts this on the public feed at <code>/a/{article.slug}</code>,
+                  recorded against your name.
+                </>
+              )}
+            </p>
 
             <input
               value={rejectReason}

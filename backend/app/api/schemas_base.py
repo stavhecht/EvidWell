@@ -11,8 +11,31 @@ the service layer returns, and only serialisation is camelCased.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, StringConstraints
 from pydantic.alias_generators import to_camel
+
+#: An email address on the wire.
+#:
+#: A shape check, not ``pydantic.EmailStr``. The full validator pulls in
+#: ``email-validator`` and its DNS-adjacent rules to reject addresses that are
+#: technically legal, which buys nothing here: the only thing this system does
+#: with an address is send to it, and delivery is the real test either way.
+#: What the constraint does buy is a normalised value — trimmed and lowercased
+#: before it reaches the unique index — so `Ada@Example.com` and
+#: `ada@example.com ` cannot become two accounts.
+#:
+#: 254 is the RFC 5321 ceiling on a full address.
+EmailAddress = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        to_lower=True,
+        max_length=254,
+        pattern=r"^[^@\s]+@[^@\s.]+(\.[^@\s.]+)+$",
+    ),
+]
 
 
 class CamelModel(BaseModel):

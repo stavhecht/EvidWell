@@ -23,11 +23,14 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.console import routes as console_routes
+from app.api.public import contact as public_contact
 from app.api.public import feed as public_feed
+from app.api.public import readers as public_readers
 from app.config import get_settings
 from app.db import dispose_engine
 from app.security.auth import AuthError
 from app.services.media import MEDIA_URL_PREFIX, ensure_media_root
+from app.services.reader import ReaderError
 from app.services.review import ReviewError
 
 logger = logging.getLogger(__name__)
@@ -75,6 +78,8 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(public_feed.router, prefix="/api")                      # app client
+    app.include_router(public_readers.router, prefix="/api")                  # accounts
+    app.include_router(public_contact.router, prefix="/api")                  # let us know
     app.include_router(console_routes.auth_router, prefix="/api/console")     # login
     app.include_router(console_routes.router, prefix="/api/console")           # reviewer
 
@@ -96,6 +101,15 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(ReviewError)
     async def _review_error(_: Request, exc: ReviewError) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT, content={"detail": str(exc)}
+        )
+
+    @app.exception_handler(ReaderError)
+    async def _reader_error(_: Request, exc: ReaderError) -> JSONResponse:
+        # Same treatment as ReviewError: an illegal operation on your own data
+        # is a conflict, and the message is safe to show because it can only
+        # describe the caller's own account.
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT, content={"detail": str(exc)}
         )

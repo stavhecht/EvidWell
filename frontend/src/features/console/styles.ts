@@ -18,6 +18,39 @@ import { FIELD, PRIMARY, SECONDARY } from "./controls";
 /** Wider than the public measure — the queue is a working surface, not prose. */
 export const CONSOLE_PAGE = "mx-auto max-w-console px-gutter pb-[90px]";
 
+/**
+ * The desk's own bar, and it does not look like the public site's.
+ *
+ * A 2px rule where the public header has a hairline, and a wordmark that names
+ * the surface. A reviewer who cannot tell the queue from the live site at a
+ * glance is a reviewer who can mistake a draft for something readers can
+ * already see.
+ */
+export const REVIEW_HEADER = "sticky top-0 z-40 border-b-2 border-rule bg-ground";
+
+/**
+ * The same three-column grid as the public bar, so the mark sits on the page's
+ * centre line rather than wherever the left cluster happens to end. The outer
+ * columns are `minmax(0,1fr)` so a long reviewer name truncates instead of
+ * pushing the logo off centre.
+ *
+ * The 2px bottom rule against the public bar's hairline is the whole visual
+ * difference, and it is deliberate: the desk should be recognisably the same
+ * product and unmistakably not the live site.
+ */
+export const REVIEW_BAR =
+  "mx-auto grid h-header max-w-console grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 px-gutter";
+export const REVIEW_BRAND = "block justify-self-center leading-none";
+export const REVIEW_BRAND_LOGO = "youth-mark block h-auto w-[132px] sm:w-[150px]";
+
+/** Names the surface, in the left column where the public bar puts browse. */
+export const REVIEW_BRAND_TAG =
+  "justify-self-start whitespace-nowrap font-body text-micro font-bold uppercase leading-none tracking-[0.13em] text-accent-ink";
+export const REVIEW_NAV =
+  "flex min-w-0 flex-wrap items-center justify-end gap-3 justify-self-end";
+export const REVIEW_NAV_LINK =
+  "whitespace-nowrap font-body text-micro font-semibold uppercase leading-none tracking-[0.11em] text-ink-3 transition-colors hover:text-ink";
+
 export const SIGNED_IN_AS =
   "inline-flex items-baseline gap-[7px] font-body text-[12px] leading-normal text-ink-3";
 export const SIGN_OUT_ACTION =
@@ -174,6 +207,28 @@ export const REASON_MISSING_ALERT = "mt-2.5 font-body text-micro text-accent-ink
 export const ACTION_ERROR_ALERT =
   "mt-2.5 border-l-2 border-accent bg-accent-wash px-[11px] py-[9px] font-body text-micro font-semibold leading-[1.45] text-accent-ink";
 export const DECISION_NOTE = "mt-[11px] font-body text-micro text-ink-3";
+export const DECISION_LINK = "border-b border-accent pb-px font-semibold text-accent-ink";
+
+/* ── classification ─────────────────────────────────────────────────────── */
+
+/**
+ * The subject picker.
+ *
+ * Sits above the decision block rather than inside it: this is metadata a
+ * reviewer sets while reading, editable after publication, and grouping it with
+ * Approve would imply it is part of the irreversible act.
+ */
+export const SUBJECT_BLOCK = "mt-6 border-t border-rule-soft pt-[13px]";
+export const SUBJECT_ROW = "mt-2.5 flex flex-wrap gap-1.5";
+export const SUBJECT_NOTE = "mt-2 font-body text-micro text-ink-3";
+
+export function subjectChip(active: boolean): string {
+  return `rounded-full border px-2.5 py-[5px] font-body text-[11px] font-semibold leading-none transition-colors disabled:opacity-50 ${
+    active
+      ? "border-ink bg-ink text-ground"
+      : "border-rule-soft bg-transparent text-ink-2 hover:border-ink"
+  }`;
+}
 
 /* ── the sources panel ──────────────────────────────────────────────────── */
 
@@ -223,17 +278,44 @@ export const WEAK_EVIDENCE_WARNING =
 
 /* ── login ──────────────────────────────────────────────────────────────── */
 
+/**
+ * One rounded card on the paper, vertically centred.
+ *
+ * The card is the You.th panel — same radius and same surface as the source
+ * block on an article — because a reviewer arriving here should recognise the
+ * product before they recognise the tool. What tells them which one they are on
+ * is the accent kicker and the bar above, not a different set of shapes.
+ *
+ * `min-h` rather than a fixed height so a visible-keyboard viewport on a phone
+ * scrolls instead of clipping the submit button.
+ */
+// 68px is `spacing.header` in tailwind.config.ts — the bar this page sits
+// under. Written as a literal because a custom property would be a second
+// place to keep the number, and the config is already the first.
 export const LOGIN_PAGE =
-  "mx-auto flex max-w-page justify-center px-gutter pb-[120px] pt-16";
-export const LOGIN_COLUMN = "w-full max-w-[400px]";
-export const LOGIN_INTRO = "border-t-2 border-rule pt-[15px]";
-export const LOGIN_TITLE = "font-heading text-subhead font-extrabold text-ink";
-export const LOGIN_STANDFIRST = "mt-[11px] font-body text-field leading-normal text-ink-3";
-export const LOGIN_FORM = "mt-[22px] border border-rule-soft bg-surface p-5";
+  "mx-auto flex min-h-[calc(100vh-68px)] max-w-page items-center justify-center px-gutter pb-24 pt-12";
+export const LOGIN_COLUMN = "w-full max-w-[420px]";
+export const LOGIN_CARD =
+  "rounded-panel border border-rule-soft bg-surface px-7 py-8 shadow-panel";
+export const LOGIN_KICKER =
+  "mb-3.5 font-body text-micro font-bold uppercase tracking-[0.14em] text-accent-ink";
+export const LOGIN_TITLE =
+  "font-heading text-[28px] font-bold leading-[1.1] tracking-[-0.025em] text-ink";
+export const LOGIN_STANDFIRST =
+  "mt-3 font-body text-[13.5px] leading-[1.55] text-ink-3";
+export const LOGIN_FORM = "mt-6";
 export const LOGIN_FIELD = `${FIELD} mt-2`;
 export const LOGIN_FIELD_GROUP = "mt-4";
-export const LOGIN_ERROR = "mt-3 font-body text-meta text-accent-ink";
-export const LOGIN_SUBMIT = `${PRIMARY} mt-[18px] w-full`;
+
+/** Kept inside the card, above the button, so it is read before the retry. */
+export const LOGIN_ERROR =
+  "mt-4 rounded-field border-l-2 border-accent bg-accent-wash px-3.5 py-2.5 font-body text-[12.5px] leading-normal text-ink";
+export const LOGIN_SUBMIT = `${PRIMARY} mt-5 w-full`;
+
+/** The one way back to the public site from here. */
+export const LOGIN_FOOTNOTE = "mt-5 text-center font-body text-micro text-ink-4";
+export const LOGIN_FOOTNOTE_LINK = "text-ink-3 underline underline-offset-2 hover:text-ink";
+
 export const FIELD_LABEL =
   "block font-body text-kicker font-semibold uppercase tracking-[0.12em] text-ink-3";
 

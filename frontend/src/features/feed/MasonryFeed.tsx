@@ -1,20 +1,22 @@
 /**
  * The public masonry grid.
  *
- * Virtualised with `masonic`, which only renders cards near the viewport. That
+ * Virtualised with `masonic`, which only renders tiles near the viewport. That
  * matters more here than in a typical grid: this feed is designed to grow
- * indefinitely and cards are variable-height, so an unvirtualised list degrades
- * on exactly the axis the product is meant to scale on.
+ * indefinitely and tiles are variable-height by design (see `tileRatio`), so an
+ * unvirtualised list degrades on exactly the axis the product is meant to scale
+ * on.
  *
- * The design comp lays the feed out with plain CSS `column-width`, which is the
- * simpler mechanism and produces the same picture — but CSS columns render
- * every card in the document, so it is the one part of the comp not carried
- * over literally. The measurements are: 320px columns, 18px gutter.
+ * The design comp lays the feed out with plain CSS `column-count`, which is the
+ * simpler mechanism and produces the same picture — but CSS columns render every
+ * tile in the document, so it is the one part of the comp not carried over
+ * literally. The measurements are: ~190px columns, 14px gutter, which lands at
+ * six columns on the 1240px measure and reflows down to two on a phone.
  *
  * Note for a future Next.js port (DESIGN.md §3.1): `masonic` measures DOM
  * nodes, so it is client-only. It would need `dynamic(..., { ssr: false })`
- * with a static single-column grid as the server-rendered fallback — which is
- * also the better mobile layout, so the fallback is not wasted work.
+ * with a static grid as the server-rendered fallback — which is also the better
+ * mobile layout, so the fallback is not wasted work.
  */
 
 import { useCallback, useEffect, useRef } from "react";
@@ -29,8 +31,8 @@ import {
   LOADING_MORE,
   RETRY_BUTTON,
   SCROLL_SENTINEL,
-  SKELETON_CARD,
   SKELETON_GRID,
+  SKELETON_TILE,
 } from "./styles";
 import type { Feed } from "./useFeed";
 import type { FeedCard } from "@/types/api";
@@ -39,6 +41,8 @@ interface Props extends Feed {
   /** True when the reader has narrowed the feed, so "empty" needs a way out. */
   filtered: boolean;
   onClearFilters: () => void;
+  /** The current text search, for an empty state that can name it. */
+  query: string;
 }
 
 export function MasonryFeed({
@@ -51,6 +55,8 @@ export function MasonryFeed({
   refetch,
   filtered,
   onClearFilters,
+  query,
+  matchedWithin,
 }: Props) {
   const sentinel = useRef<HTMLDivElement>(null);
 
@@ -70,7 +76,7 @@ export function MasonryFeed({
     return () => observer.disconnect();
   }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
-  const renderCard = useCallback(
+  const renderTile = useCallback(
     ({ data: card }: { data: FeedCard }) => <ArticleCard card={card} />,
     [],
   );
@@ -87,20 +93,27 @@ export function MasonryFeed({
   }
 
   if (items.length === 0) {
-    return <EmptyState filtered={filtered} onClearFilters={onClearFilters} />;
+    return (
+      <EmptyState
+        filtered={filtered}
+        query={query}
+        matchedWithin={matchedWithin}
+        onClearFilters={onClearFilters}
+      />
+    );
   }
 
   return (
     <>
       <Masonry
         items={items}
-        columnWidth={320}
-        columnGutter={18}
+        columnWidth={190}
+        columnGutter={14}
         overscanBy={2}
         // Keyed by slug so masonic reuses cells across page appends rather
         // than remounting the whole grid on every fetch.
         itemKey={(card: FeedCard) => card.slug}
-        render={renderCard}
+        render={renderTile}
       />
       <div ref={sentinel} aria-hidden className={SCROLL_SENTINEL} />
       {isFetchingNextPage ? <p className={LOADING_MORE}>Loading more…</p> : null}
@@ -109,41 +122,61 @@ export function MasonryFeed({
 }
 
 /**
- * Skeleton cards rather than a spinner: a spinner collapses the layout, so the
- * page jumps when content lands. Varied heights match the real masonry shape,
- * and the 3px top rule keeps the grid's structure visible while it fills.
+ * Skeleton tiles rather than a spinner: a spinner collapses the layout, so the
+ * page jumps when content lands. Varied heights match the real masonry shape.
  */
 function FeedSkeleton() {
-  const heights = [180, 140, 220, 160, 200, 150, 190, 170];
+  const heights = [230, 190, 260, 200, 240, 180, 250, 210, 230, 190, 260, 200];
   return (
     <div className={SKELETON_GRID} aria-busy="true" aria-label="Loading articles">
       {heights.map((height, index) => (
-        <div key={index} style={{ height }} className={SKELETON_CARD} />
+        <div key={index} style={{ height }} className={SKELETON_TILE} />
       ))}
     </div>
   );
 }
 
+/**
+ * Nothing to show, and the three reasons are not interchangeable.
+ *
+ * A text search matched nothing *in what has loaded* — which is a smaller claim
+ * than "nothing exists", and saying the larger one would be a lie about the
+ * archive, because search runs client-side (see `useFeed`). A filter matched
+ * nothing published. Or the feed itself is empty, which on a human-reviewed
+ * publication is a normal early state rather than a failure.
+ */
 function EmptyState({
   filtered,
+  query,
+  matchedWithin,
   onClearFilters,
 }: {
   filtered: boolean;
+  query: string;
+  matchedWithin: number;
   onClearFilters: () => void;
 }) {
+  const searching = Boolean(query);
+
   return (
     <div className={FEED_STATE}>
       <p className={FEED_STATE_TITLE}>
-        {filtered
-          ? "Nothing published with that filter yet."
-          : "Nothing published yet."}
+        {searching
+          ? `Nothing matching “${query}” yet.`
+          : filtered
+            ? "Nothing published under that yet."
+            : "Nothing published yet."}
       </p>
       <p className={FEED_STATE_BODY}>
-        Every article here is reviewed by a person before it goes live.
+        {searching
+          ? `Searched the ${matchedWithin} ${
+              matchedWithin === 1 ? "article" : "articles"
+            } loaded so far. Scroll the full feed to widen the search, or clear it and browse by category.`
+          : "Every article here is read and approved by a person before it goes live, so the shelf fills slowly on purpose."}
       </p>
       {filtered ? (
         <button onClick={onClearFilters} className={CLEAR_FILTERS_ACTION}>
-          Clear filters
+          Clear and show everything
         </button>
       ) : null}
     </div>

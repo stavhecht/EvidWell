@@ -4,8 +4,8 @@ import type { Config } from "tailwindcss";
  * Every value here resolves to a design-system custom property rather than a
  * literal. Components therefore say `text-ink-3` / `border-rule-soft`, and the
  * theme — including the light/dark flip — is decided entirely in
- * `src/styles/evidwell.css`. A hex in a component is a bug: it cannot follow
- * the theme, and it is invisible to anyone retuning the system.
+ * `src/styles/youth.css`. A hex in a component is a bug: it cannot follow the
+ * theme, and it is invisible to anyone retuning the system.
  *
  * The old `verdict.*` ramp (green / amber / orange / stone) is deliberately
  * gone. The design direction takes verdict off the colour axis entirely and
@@ -25,6 +25,24 @@ export default {
       colors: {
         ground: "var(--ew-bg)",
         surface: "var(--ew-surface)",
+        // A third ground, warmer and one step down from `surface`: the resting
+        // state of a tile before its picture loads, and the fill behind the
+        // source block on an article.
+        "surface-2": "var(--ew-surface-2)",
+        tile: "var(--ew-tile)",
+
+        // The inverted pair, named for the relationship rather than the
+        // colour, so they flip with the theme instead of becoming a
+        // light-on-light bug. `bg-invert text-invert-fg` is the filled
+        // control; `bg-panel text-panel-fg` is the dark explainer block.
+        invert: {
+          DEFAULT: "var(--ew-invert-bg)",
+          fg: "var(--ew-invert-fg)",
+        },
+        panel: {
+          DEFAULT: "var(--ew-panel)",
+          fg: "var(--ew-panel-fg)",
+        },
 
         // The ink ramp. Each step has a contrast job: see the palette table on
         // the design-system page for the measured ratios.
@@ -43,6 +61,7 @@ export default {
         accent: {
           DEFAULT: "var(--ew-accent)", // chrome, marks, focus — not text
           ink: "var(--ew-accent-ink)", // the accent at text size
+          hover: "var(--ew-accent-hover)",
           wash: "var(--ew-accent-wash)",
         },
 
@@ -59,6 +78,14 @@ export default {
       fontFamily: {
         heading: "var(--font-heading)",
         body: "var(--font-body)",
+        /**
+         * Playfair Display, and it earns its place on exactly one element: the
+         * statement over the hero video. A serif at 60px against a moving
+         * image is the comp's one flourish, and spending a second font file on
+         * one line is the trade it makes deliberately. Anywhere else in the
+         * product this is the wrong face — reach for `font-heading`.
+         */
+        display: '"Playfair Display", Georgia, serif',
       },
 
       /**
@@ -89,9 +116,52 @@ export default {
         panel: "var(--ew-shadow-panel)",
       },
 
-      // The comp's page frame: a 1240px measure inset 28px, under a 62px bar.
-      maxWidth: { page: "1240px", console: "1040px" },
-      spacing: { gutter: "28px", header: "62px" },
+      /**
+       * Modernist is a zero-radius system and You.th is not, which is the
+       * single largest visual difference between the two. Three steps only,
+       * named for what they belong to rather than by size, so a component
+       * cannot pick "the medium one" and drift:
+       *
+       *   `tile`  — anything showing a picture: feed tiles, lead images.
+       *   `panel` — a block of content resting on the page: source lists,
+       *             the dark explainer, the sign-up card.
+       *   `field` — text inputs and textareas, softer than a panel so a form
+       *             row does not read as a stack of cards.
+       *
+       * Actions are `rounded-full`, not one of these. A pill against a rounded
+       * rectangle is what still separates a control from a card now that both
+       * have corners.
+       */
+      borderRadius: {
+        tile: "20px",
+        panel: "22px",
+        field: "14px",
+      },
+
+      keyframes: {
+        // The category drawer, in from the left edge it is anchored to.
+        "slide-in": {
+          from: { transform: "translateX(-100%)" },
+          to: { transform: "translateX(0)" },
+        },
+        // The toast, up into place rather than simply appearing — a message
+        // that arrives without motion reads as something that was always
+        // there and went unnoticed.
+        "fade-up": {
+          from: { opacity: "0", transform: "translateY(6px)" },
+          to: { opacity: "1", transform: "translateY(0)" },
+        },
+      },
+      animation: {
+        "slide-in": "slide-in 0.22s ease-out",
+        "fade-up": "fade-up 0.2s ease-out",
+      },
+
+      // The comp's page frame: a 1240px measure inset 28px. `prose` is the
+      // article's own narrower measure — the feed is a grid and the article is
+      // a column, and they are not the same page width.
+      maxWidth: { page: "1240px", prose: "760px", console: "1040px" },
+      spacing: { gutter: "28px", header: "68px" },
     },
   },
   plugins: [],

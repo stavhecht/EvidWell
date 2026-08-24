@@ -14,10 +14,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 
-from app.api.schemas_base import CamelModel
-from app.domain.enums import StudyType, Verdict
+from app.api.schemas_base import CamelModel, EmailAddress
+from app.domain.enums import ContactKind, StudyType, Subject, Verdict
 
 
 class SourceOut(CamelModel):
@@ -52,7 +52,28 @@ class FeedCardOut(CamelModel):
     excerpt: str
     verdict: Verdict
     verdict_qualifier: str | None
+    #: The article's own first picture, materialised at publish time. Null is
+    #: the normal case and not a missing asset — the tile falls back to type.
+    image: str | None = None
+    image_alt: str | None = None
+    #: What kind of thing this assesses. Null until a reviewer classifies it;
+    #: the tile then renders in ink rather than in a subject hue.
+    subject: Subject | None = None
     published_at: datetime
+
+
+class FeedFacetsOut(CamelModel):
+    """Counts for the browse drawer.
+
+    ``subjects`` and ``verdicts`` are sparse — a key is absent when nothing is
+    published under it, so a client must default to zero rather than assume the
+    enum is fully populated. They also do **not** sum to ``total``: an
+    unclassified article is counted in the total and in no subject.
+    """
+
+    total: int
+    subjects: dict[str, int]
+    verdicts: dict[str, int]
 
 
 class FeedPageOut(CamelModel):
@@ -71,6 +92,7 @@ class ArticleOut(CamelModel):
     summary: str
     verdict: Verdict
     verdict_qualifier: str | None
+    subject: Subject | None = None
     product: str
     target_claims: list[str]
     ingredients: list[str]
@@ -92,3 +114,98 @@ class ArticleOut(CamelModel):
         default="This article is informational and is not medical advice. "
         "Talk to a qualified professional about your own situation."
     )
+
+
+# --- reader accounts -------------------------------------------------------
+#
+# The public side's own auth surface. Nothing here overlaps the console's: a
+# reader has no role, sees no draft, and its token is minted with a different
+# `typ` claim so it cannot be presented to /api/console at all.
+
+
+class SignupRequest(CamelModel):
+    email: EmailAddress
+    #: Floor only. A ceiling belongs here too once a password policy exists;
+    #: what must not appear is a *low* ceiling, which is the classic tell that
+    #: something downstream is storing the plaintext.
+    password: str = Field(min_length=10, max_length=200)
+    display_name: str = Field(min_length=1, max_length=80)
+    interests: list[Subject] = Field(default_factory=list)
+    newsletter: bool = False
+
+
+class ReaderLoginRequest(CamelModel):
+    email: EmailAddress
+    password: str = Field(min_length=1, max_length=200)
+
+
+class ReaderTokenResponse(BaseModel):
+    """OAuth 2's snake_case field names, deliberately not camelCased.
+
+    Same reasoning as the console's ``TokenResponse``: that shape is a
+    standard, not our house style.
+    """
+
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+
+
+class ReaderOut(CamelModel):
+    id: str
+    email: str
+    display_name: str
+    interests: list[Subject]
+    newsletter: bool
+
+
+class UpdateReaderRequest(CamelModel):
+    """Patch semantics: an omitted field is left alone.
+
+    An empty ``interests`` list is therefore a real instruction — turn
+    personalisation off — and is distinct from not sending the field.
+    """
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=80)
+    interests: list[Subject] | None = None
+    newsletter: bool | None = None
+
+
+class FolderOut(CamelModel):
+    id: str
+    name: str
+    count: int
+
+
+class CreateFolderRequest(CamelModel):
+    name: str = Field(min_length=1, max_length=60)
+
+
+class SaveRequest(CamelModel):
+    """Which shelf to put it on. Omitted means the reader's first folder."""
+
+    folder_id: str | None = None
+
+
+class SavedCardOut(FeedCardOut):
+    """A feed card plus which folder it is on, so the grid can render both."""
+
+    folder_id: str
+
+
+class SavedPageOut(CamelModel):
+    folders: list[FolderOut]
+    items: list[SavedCardOut]
+
+
+# --- contact ---------------------------------------------------------------
+
+
+class ContactRequestIn(CamelModel):
+    kind: ContactKind = ContactKind.OTHER
+    name: str | None = Field(default=None, max_length=80)
+    #: Required even though the form calls the name optional: without a way to
+    #: reply, a request we can answer is indistinguishable from one we cannot.
+    email: EmailAddress
+    link: str | None = Field(default=None, max_length=2000)
+    note: str = Field(min_length=1, max_length=4000)

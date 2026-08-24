@@ -13,8 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings, get_settings
 from app.db import get_session_factory
 from app.domain.enums import UserRole
-from app.domain.models import User
-from app.security.auth import AuthenticatedReviewer, AuthError, decode_token_subject
+from app.domain.models import Reader, User
+from app.security.auth import (
+    TOKEN_TYPE_READER,
+    AuthenticatedReader,
+    AuthenticatedReviewer,
+    AuthError,
+    decode_token_subject,
+)
 from app.security.login_throttle import InMemoryLoginThrottle, LoginThrottle
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -56,6 +62,37 @@ def get_login_throttle() -> LoginThrottle:
 
 
 LoginThrottleDep = Annotated[LoginThrottle, Depends(get_login_throttle)]
+
+#: A **separate** counter for the reader login, not the console's.
+#:
+#: One shared instance would make the two endpoints each other's denial of
+#: service: readers and reviewers arrive from the same office NAT, and enough
+#: failed reader logins would lock the console out of its own IP budget. The
+#: budgets protect the same process, but they are not the same budget.
+_reader_login_throttle: LoginThrottle = InMemoryLoginThrottle()
+
+
+def get_reader_login_throttle() -> LoginThrottle:
+    return _reader_login_throttle
+
+
+ReaderLoginThrottleDep = Annotated[LoginThrottle, Depends(get_reader_login_throttle)]
+
+#: And a third for the contact form, for the same reason again.
+#:
+#: It is not a login — nothing is being guessed — but it is the other
+#: unauthenticated write on the public surface, and the same token bucket is
+#: the right shape: an escalating, expiring, reject-don't-sleep budget per IP
+#: and per address. Sharing the reader-login instance would let a burst of
+#: messages lock someone out of their own account.
+_contact_throttle: LoginThrottle = InMemoryLoginThrottle()
+
+
+def get_contact_throttle() -> LoginThrottle:
+    return _contact_throttle
+
+
+ContactThrottleDep = Annotated[LoginThrottle, Depends(get_contact_throttle)]
 
 
 def client_ip(request: Request) -> str:
@@ -115,3 +152,67 @@ async def require_reviewer(
 
 
 ReviewerDep = Annotated[AuthenticatedReviewer, Depends(require_reviewer)]
+
+
+async def _resolve_reader(
+    session: AsyncSession,
+    settings: Settings,
+    credentials: HTTPAuthorizationCredentials | None,
+) -> AuthenticatedReader | None:
+    """Shared body of the two reader gates. Returns None for any failure."""
+    if credentials is None or not credentials.credentials:
+        return None
+
+    try:
+        reader_id = decode_token_subject(
+            credentials.credentials, settings.jwt_secret, expect=TOKEN_TYPE_READER
+        )
+    except AuthError:
+        return None
+
+    result = await session.execute(
+        select(Reader).where(Reader.id == reader_id, Reader.is_active.is_(True))
+    )
+    reader = result.scalar_one_or_none()
+    if reader is None:
+        return None
+
+    return AuthenticatedReader(
+        id=reader.id, email=reader.email, display_name=reader.display_name
+    )
+
+
+async def require_reader(
+    session: SessionDep,
+    settings: SettingsDep,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)] = None,
+) -> AuthenticatedReader:
+    """Auth gate for a reader's own data — their profile, folders and saves.
+
+    Re-loads the reader for the same reason ``require_reviewer`` does: a
+    deactivated account must stop authenticating immediately rather than at
+    token expiry, and a reader token lasts thirty days.
+    """
+    reader = await _resolve_reader(session, settings, credentials)
+    if reader is None:
+        raise _UNAUTHORIZED
+    return reader
+
+
+async def optional_reader(
+    session: SessionDep,
+    settings: SettingsDep,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)] = None,
+) -> AuthenticatedReader | None:
+    """The feed's gate: signed in personalises the order, signed out still works.
+
+    **Never raises.** A stale or malformed token on the public feed has to
+    degrade to the anonymous feed rather than to a 401 — the alternative is a
+    reader whose month-old token has expired seeing an error page where the
+    site used to be, on a surface that requires no account at all.
+    """
+    return await _resolve_reader(session, settings, credentials)
+
+
+ReaderDep = Annotated[AuthenticatedReader, Depends(require_reader)]
+OptionalReaderDep = Annotated[AuthenticatedReader | None, Depends(optional_reader)]

@@ -1,21 +1,30 @@
 /**
  * The feed query, split out from the grid that draws it.
  *
- * The filter panel needs to know how many articles are showing and which
- * subjects are present; the grid needs the same items to lay out. Rather than
- * fetch twice or thread a callback back up out of the grid, the route owns the
- * query through this hook and hands the result to both.
+ * The feed heading needs to know how many articles are showing; the grid needs
+ * the same items to lay out. Rather than fetch twice or thread a callback back
+ * up out of the grid, the route owns the query through this hook and hands the
+ * result to both.
  *
  * This is the React binding only — the fetch itself stays in `lib/api/feed.ts`,
  * framework-agnostic, so the Next.js port can call it from a server component
  * without dragging react-query along (DESIGN.md §3.1).
+ *
+ * **Which narrowing happens where, and why.** Verdict and subject are *server*
+ * filters: the feed is paginated, so narrowing those client-side would only
+ * narrow the pages already loaded and a category with nothing on page one would
+ * look empty. Free text is the opposite — there is no search endpoint, and
+ * inventing a `?q=` that the backend answers with a `LIKE` over card columns
+ * would be a search that quietly misses the body of every article. Matching
+ * what has loaded is a smaller promise, and `matchedWithin` below is what lets
+ * the UI make exactly that promise rather than implying a full-corpus search.
  */
 
+import { useMemo } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 
-import { SUBJECTS } from "@/features/evidence/subject";
-import { feedKeys, fetchFeed } from "@/lib/api/feed";
-import type { FeedCard, Subject, Verdict } from "@/types/api";
+import { feedKeys, fetchFeed, type FeedFilter } from "@/lib/api/feed";
+import type { FeedCard } from "@/types/api";
 
 export interface Feed {
   items: FeedCard[];
@@ -25,44 +34,61 @@ export interface Feed {
   isFetchingNextPage: boolean;
   fetchNextPage: () => void;
   refetch: () => void;
+  /**
+   * How many cards the text search was applied to. Zero when nothing is being
+   * searched. The empty state uses it to say "nothing in the N loaded so far"
+   * rather than "nothing published", which would be a claim about the archive.
+   */
+  matchedWithin: number;
 }
 
-export function useFeed(verdict: Verdict | null): Feed {
+export function useFeed(filter: FeedFilter & { query?: string }): Feed {
+  const serverFilter: FeedFilter = {
+    verdict: filter.verdict ?? null,
+    subject: filter.subject ?? null,
+    personalise: filter.personalise,
+  };
+
   const query = useInfiniteQuery({
-    // Verdict is a *server* filter: the feed is paginated, so narrowing it
-    // client-side would only narrow the pages already loaded.
-    queryKey: feedKeys.list(verdict ?? undefined),
-    queryFn: ({ pageParam }) =>
-      fetchFeed({ cursor: pageParam, verdict: verdict ?? undefined }),
+    queryKey: feedKeys.list(serverFilter),
+    queryFn: ({ pageParam }) => fetchFeed({ cursor: pageParam, ...serverFilter }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) => last.nextCursor ?? undefined,
   });
 
+  const loaded = useMemo(
+    () => query.data?.pages.flatMap((page) => page.items) ?? [],
+    [query.data],
+  );
+
+  const text = (filter.query ?? "").trim().toLowerCase();
+  const items = useMemo(
+    () => (text ? loaded.filter((card) => matches(card, text)) : loaded),
+    [loaded, text],
+  );
+
   return {
-    items: query.data?.pages.flatMap((page) => page.items) ?? [],
+    items,
     status: query.status,
     error: query.error,
     hasNextPage: query.hasNextPage,
     isFetchingNextPage: query.isFetchingNextPage,
     fetchNextPage: () => void query.fetchNextPage(),
     refetch: () => void query.refetch(),
+    matchedWithin: text ? loaded.length : 0,
   };
 }
 
 /**
- * Subjects actually present in what has loaded.
+ * Headline, excerpt and the verdict's scope limit.
  *
- * Deliberately derived rather than hard-coded from the enum: while the API does
- * not serve `subject` this returns empty, and the filter panel hides the whole
- * Subject section instead of offering five chips that match nothing. When the
- * backend gains the field the row appears on its own.
- *
- * Returned in the enum's canonical order, not in the order they happen to
- * appear — otherwise the chips reshuffle as the reader scrolls and more pages
- * load, which moves the one they were reaching for.
+ * The qualifier is in here on purpose — it is where a card says "for
+ * pigmentation" or "at 10–20%", which is exactly the kind of thing someone
+ * types into a search box, and it is not repeated anywhere else on the tile.
  */
-export function subjectsPresent(items: FeedCard[]): Subject[] {
-  const seen = new Set<Subject>();
-  for (const item of items) if (item.subject) seen.add(item.subject);
-  return SUBJECTS.filter((subject) => seen.has(subject));
+function matches(card: FeedCard, text: string): boolean {
+  return [card.headline, card.excerpt, card.verdictQualifier ?? ""]
+    .join(" ")
+    .toLowerCase()
+    .includes(text);
 }

@@ -70,6 +70,42 @@ EVIDENCE_RANK: dict[StudyType, int] = {
 }
 
 
+class Subject(StrEnum):
+    """What kind of thing an article assesses.
+
+    The one chromatic axis in the product: colour says *what is being
+    assessed*, never how it scored (see the frontend's ``subject.ts``). Set by
+    a reviewer at publish time and deliberately not inferred — ``product`` is
+    free text, and a guessed subject would put a confident colour on an
+    unchecked classification.
+
+    Nullable everywhere it appears. An unclassified article renders in ink,
+    which is the design's resting state rather than a broken one.
+    """
+
+    SUPPLEMENT = "supplement"
+    DEVICE = "device"
+    PROTOCOL = "protocol"
+    FOOD = "food"
+    TOPICAL = "topical"
+
+
+class ContactKind(StrEnum):
+    """What a "Let us know" submission is asking for."""
+
+    FACT_CHECK = "fact_check"
+    TOPIC = "topic"
+    OTHER = "other"
+
+
+class ContactStatus(StrEnum):
+    """Where a submission has got to in the console's inbox."""
+
+    NEW = "new"
+    ANSWERED = "answered"
+    CLOSED = "closed"
+
+
 class UserRole(StrEnum):
     ADMIN = "admin"
     REVIEWER = "reviewer"

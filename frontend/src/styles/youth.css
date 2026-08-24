@@ -1,0 +1,317 @@
+/* You.th — the product layer over Modernist.
+ *
+ * Source: `You.th.dc.html` in the Claude Design project. The comp defines its
+ * own `--c-*` scale; this file adopts those values under the `--ew-*` names the
+ * components already speak, so the retheme is one file rather than a rename
+ * across two hundred class strings.
+ *
+ * Two things carried over from the previous theme, because they were right and
+ * the new comp does not contradict them:
+ *
+ *   1. **Modernist is light-only.** Its `--color-bg` / `--color-text` are fixed
+ *      hexes. You.th needs a real dark theme, so the product tokens are the
+ *      ones that flip and Modernist's roles are re-pointed at them below.
+ *   2. **A four-step ink ramp, not one ink.** Headline, excerpt, meta and rule
+ *      each carry a different contrast job, and `color-mix()` on a single ink
+ *      cannot hit those ratios predictably across both grounds.
+ *
+ * What is new, and what most changes the feel:
+ *
+ *   - **Warm paper, not grey.** `#f4f1ec` under `#201e1d`, so the page reads as
+ *     stock rather than as a screen.
+ *   - **Radius is back.** Modernist is a zero-radius system; the comp rounds
+ *     tiles at 20px and panels at 22px. The radii live here as tokens rather
+ *     than as literals in components, so the two systems disagree in exactly
+ *     one place — this file — instead of everywhere.
+ *   - **Pills for actions.** Buttons and chips are fully round, which is what
+ *     separates a control from a card at a glance now that cards are round too.
+ *
+ * Everything is wrapped in `@layer base` so it lands after Tailwind's preflight
+ * — otherwise preflight resets `body` and the theme never applies.
+ */
+
+@layer base {
+  :root {
+    /* ── Ground and ink ─────────────────────────────────────────────────── */
+    --ew-bg: #f4f1ec;
+    --ew-surface: #fffefb;
+    /* A third ground, between surface and ink: the resting state of a tile
+       before its picture loads, and the fill behind a source block. The comp
+       calls it `--c-tile`. */
+    --ew-surface-2: #f0ece5;
+    --ew-tile: #e7e3dc;
+
+    --ew-ink: #201e1d;      /* ≈15.6:1 — headlines, body, verdict marks       */
+    --ew-ink-2: #504b48;    /* ≈8.1:1  — excerpts, secondary prose            */
+    --ew-ink-3: #77706a;    /* ≈4.9:1  — meta, qualifiers, study type         */
+    --ew-ink-4: #8b847d;    /* ≈3.7:1  — rules and 14px+ only, never body     */
+
+    --ew-rule: #cfc8bd;
+    --ew-rule-soft: #e0dbd2;
+
+    --ew-accent: #ec3013;     /* ≈3.8:1 — chrome, focus ring, marks           */
+    --ew-accent-ink: #ae1800; /* ≈6.5:1 — the accent at text size             */
+    --ew-accent-hover: #c72510;
+    --ew-accent-wash: #fbf1ee;
+
+    /* The inverted pair: an ink-filled control on paper, and the dark panel on
+       the sign-up page. Named for the relationship rather than for the colour,
+       so they flip with the theme instead of becoming a light-on-light bug. */
+    --ew-invert-bg: #201e1d;
+    --ew-invert-fg: #f4f1ec;
+    --ew-panel: #28241f;
+    --ew-panel-fg: #f4f1ec;
+
+    /* ── Subject hues — the only chromatic axis ─────────────────────────────
+       Colour says what kind of thing is being assessed, never how it scored.
+       Nothing green, nothing amber, and no hue on the verdict axis, so a feed
+       of tiles cannot read as a traffic light. See `subject.ts`. */
+    --ew-cat-supplement: #9b2312;
+    --ew-cat-device: #1b4c72;
+    --ew-cat-protocol: #4a2a6b;
+    --ew-cat-food: #0f5c5c;
+    --ew-cat-topical: #6d4326;
+
+    /* ── Verdict prominence — the comp's `coequal` setting ──────────────────
+       The verdict label and the headline carry equal weight: the label is small
+       and tracked-out caps, the headline is 19px/700. `dominant` read as a
+       scoreboard; `quiet` buried the one thing a reader is here for. */
+    --ew-mark: 14px;
+    --ew-cv-size: 12px;
+    --ew-cv-weight: 600;
+    --ew-cv-track: 0.09em;
+    --ew-cv-case: uppercase;
+    --ew-ch-size: 19px;
+    --ew-ch-weight: 700;
+
+    /* ── Citation chips — the comp's `bracket` setting ──────────────────────
+       A bracketed, boxed handle rather than a superscript: superscripts are a
+       4px tap target and disappear at body size, and this chip is the primary
+       affordance for checking a claim against its paper. */
+    --ew-chip-size: 11.5px;
+    --ew-chip-va: baseline;
+    --ew-chip-border: 1px solid var(--ew-rule-soft);
+    --ew-chip-pad: 1px 5px;
+    --ew-chip-radius: 999px;
+    --ew-chip-open: "[";
+    --ew-chip-close: "]";
+
+    /* Popovers, the filter panel, the toast. Tinted with the ink rather than
+       pure black so the shadow reads as the same material as the rules. */
+    --ew-shadow-pop: 0 10px 26px rgb(20 18 17 / 0.16);
+    --ew-shadow-panel: 0 12px 30px rgb(20 18 17 / 0.14);
+
+    /* Re-point Modernist's roles at the You.th theme, so its focus ring,
+       `::selection` and any component class picked up from `design-system.css`
+       follow the active theme instead of staying stuck on the light palette. */
+    --color-bg: var(--ew-bg);
+    --color-surface: var(--ew-surface);
+    --color-text: var(--ew-ink);
+    --color-accent: var(--ew-accent);
+    --color-divider: var(--ew-rule-soft);
+  }
+
+  html[data-theme="dark"] {
+    --ew-bg: #191716;
+    --ew-surface: #221f1e;
+    --ew-surface-2: #2a2726;
+    --ew-tile: #302c2a;
+
+    --ew-ink: #f2efea;      /* ≈14.9:1 */
+    --ew-ink-2: #c2bcb5;    /* ≈8.6:1  */
+    --ew-ink-3: #98918a;    /* ≈5.1:1  */
+    --ew-ink-4: #7d766f;    /* ≈3.4:1  */
+
+    --ew-rule: #443f3b;
+    --ew-rule-soft: #34302e;
+
+    --ew-accent: #ff5c3d;     /* ≈6.0:1 */
+    --ew-accent-ink: #ff8368; /* ≈8.0:1 */
+    --ew-accent-hover: #ff7457;
+    --ew-accent-wash: #2a1a16;
+
+    --ew-invert-bg: #f2efea;
+    --ew-invert-fg: #191716;
+    --ew-panel: #2a2726;
+    --ew-panel-fg: #f2efea;
+
+    --ew-cat-supplement: #f2775c;
+    --ew-cat-device: #6fa8d6;
+    --ew-cat-protocol: #b18cd9;
+    --ew-cat-food: #4fb3ad;
+    --ew-cat-topical: #c08a63;
+
+    /* A cast shadow is invisible on a near-black ground; on dark the elevation
+       has to come from depth of field instead. */
+    --ew-shadow-pop: 0 10px 26px rgb(0 0 0 / 0.55);
+    --ew-shadow-panel: 0 12px 30px rgb(0 0 0 / 0.5);
+  }
+
+  html {
+    /* Prevents the sticky site header from covering an element scrolled to via
+       its anchor — citation chips jump to `#source-S1` in the source list. */
+    scroll-behavior: smooth;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+  }
+
+  body {
+    margin: 0;
+    background: var(--ew-bg);
+    color: var(--ew-ink);
+    font-family: var(--font-body);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+  a:hover { color: var(--ew-accent-ink); }
+
+  ::selection {
+    background: var(--ew-accent);
+    color: #fff;
+  }
+
+  /* Never the browser default blue — the accent ring is part of the system. */
+  *:focus-visible {
+    outline: 2px solid var(--ew-accent);
+    outline-offset: 2px;
+  }
+
+  /* The wordmark ships as one dark PNG. Inverting it on the dark theme is what
+     the comp does, and it is right here for a reason worth stating: a second
+     light-on-dark file would be a second asset to keep in step with the first,
+     and the mark is pure ink on transparency, so the inversion is exact. */
+  html[data-theme="dark"] .youth-mark { filter: invert(1); }
+
+  /* A native `option` list is drawn by the OS, and on the dark theme it
+     inherits the page's light default unless told otherwise. */
+  html[data-theme="dark"] option {
+    background: var(--ew-surface);
+    color: var(--ew-ink);
+  }
+}
+
+@layer components {
+  /* The citation chip's brackets. A `::before`/`::after` pair rather than
+     literal "[" and "]" in the text, so the handle is what gets copied, read
+     aloud by a screen reader, and matched by find-in-page. */
+  .ew-chip {
+    font-size: var(--ew-chip-size);
+    vertical-align: var(--ew-chip-va);
+    border: var(--ew-chip-border);
+    border-radius: var(--ew-chip-radius);
+    padding: var(--ew-chip-pad);
+  }
+  .ew-chip::before { content: var(--ew-chip-open); }
+  .ew-chip::after { content: var(--ew-chip-close); }
+
+  /* The verdict label and the card headline are a matched pair — their size,
+     weight and case are set together by the prominence tokens, so they move
+     together when the balance is retuned. Splitting them into four utility
+     classes each would let them drift apart. */
+  .ew-verdict-label {
+    font-size: var(--ew-cv-size);
+    font-weight: var(--ew-cv-weight);
+    letter-spacing: var(--ew-cv-track);
+    text-transform: var(--ew-cv-case);
+  }
+  .ew-card-headline {
+    font-size: var(--ew-ch-size);
+    font-weight: var(--ew-ch-weight);
+  }
+
+  /* ── The feed tile's scrim ───────────────────────────────────────────────
+     A three-stop gradient rather than a flat wash, because the text sits at
+     the bottom and the picture has to survive at the top. Written as a class
+     rather than a Tailwind arbitrary value so the stops are legible and can be
+     retuned once for every surface that uses a tile — the feed, the saved
+     shelf and the recommendation row.
+
+     Fixed dark stops, not theme tokens, deliberately: this sits over a
+     photograph whose colours nobody controls, so the only text that stays
+     legible on both themes is white on a dark scrim. */
+  .ew-tile-scrim {
+    background: linear-gradient(
+      to top,
+      rgb(18 16 15 / 0.88),
+      rgb(18 16 15 / 0.48) 54%,
+      rgb(18 16 15 / 0)
+    );
+  }
+
+  /* ── Reveal-on-scroll ────────────────────────────────────────────────────
+     Tiles fade up as they enter the viewport. The class is the *resting*
+     state; `data-shown` is what animates, so a tile that never intersects
+     (because JavaScript failed, or the observer is unsupported) is still
+     visible — the fallback is "no animation", never "no content".
+
+     Honours `prefers-reduced-motion` by skipping the transform entirely. */
+  .ew-reveal {
+    opacity: 0;
+    transform: translateY(22px);
+    transition:
+      opacity 0.55s ease,
+      transform 0.55s cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+  .ew-reveal[data-shown="true"] {
+    opacity: 1;
+    transform: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .ew-reveal {
+      opacity: 1;
+      transform: none;
+      transition: none;
+    }
+  }
+
+  /* ── Reviewer-placed media ──────────────────────────────────────────────
+     A picture or a video the reviewer sized and wrapped in the console. The
+     same three classes render it in the editor and in the published article,
+     which is the only way "what you approve is what publishes" is true of
+     layout and not just of words.
+
+     Why this is CSS and not Tailwind: the width is a number chosen at runtime,
+     so it cannot be a class the JIT compiler has ever seen — and it has to
+     stop applying below 640px, which an inline style cannot express. A custom
+     property set inline, read inside a media query, is what does both.
+
+     The breakpoint is the whole collapse rule. Under 640px every picture is a
+     full-width block: a 40% float in a 320px column leaves about fifteen
+     characters a line beside it, which is not reading. */
+  .ew-media {
+    display: block;
+    margin-block: 1.4rem;
+  }
+
+  @media (min-width: 640px) {
+    .ew-media {
+      width: var(--ew-media-width, 100%);
+      /* Centres a block narrower than the column. A narrow block hugging the
+         left margin reads as a mistake rather than as a decision. */
+      margin-inline: auto;
+    }
+
+    /* The float's top margin is small so its top edge lines up with the first
+       line of the prose it sits beside, rather than starting a line or two
+       down from it. */
+    .ew-media--left,
+    .ew-media--right {
+      margin-block: 0.4rem 1rem;
+    }
+    .ew-media--left {
+      float: left;
+      margin-inline: 0 1.75rem;
+    }
+    .ew-media--right {
+      float: right;
+      margin-inline: 1.75rem 0;
+    }
+  }
+}

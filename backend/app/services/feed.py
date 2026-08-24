@@ -9,13 +9,14 @@ method that forgets it.
 from __future__ import annotations
 
 import base64
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Select, select, tuple_
+from sqlalchemy import Select, and_, case, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.enums import ArticleStatus, Verdict
+from app.domain.enums import ArticleStatus, Subject, Verdict
 from app.domain.models import Article, ArticleSource, Source
 
 
@@ -37,33 +38,86 @@ class FeedService:
         cursor: str | None = None,
         limit: int = 24,
         verdict: Verdict | None = None,
+        subject: Subject | None = None,
+        interests: Sequence[Subject] = (),
     ) -> tuple[list[dict[str, Any]], str | None]:
         """One page of published cards, newest first.
 
         Reads the materialised card columns only — the feed never touches
         article content, which is what keeps it a single index scan
         (``articles_feed_idx``) at any feed size.
+
+        ``interests`` lifts a signed-in reader's subjects to the top **without
+        hiding anything**: the sort gains a leading tier — 0 for a subject they
+        picked, 1 for everything else — and the rest of the feed follows below
+        it. Filtering instead would make an account quietly narrow the world,
+        which is the thing a feed of health claims should least do; it also
+        means an unclassified article (``subject IS NULL``) is still reachable
+        by scrolling rather than invisible to anyone with an interest set.
+
+        The consequence to know: the tiered sort cannot use
+        ``articles_feed_idx``, because the leading key is a CASE expression.
+        That is affordable while the feed is small and is the reason the tier
+        is skipped entirely — same statement as before — for a reader with no
+        interests, which is every anonymous request. If personalised paging
+        ever becomes hot, the fix is a materialised tier column, not a
+        different sort.
         """
-        statement = _published_only(
-            select(
-                Article.slug,
-                Article.card_headline,
-                Article.card_excerpt,
-                Article.card_verdict,
-                Article.verdict_qualifier,
-                Article.published_at,
-                Article.id,
+        # Constant-folded away when nobody has picked a subject, so the
+        # anonymous feed keeps exactly the query (and the index scan) it had.
+        tier = (
+            case((Article.subject.in_(list(interests)), 0), else_=1)
+            if interests
+            else None
+        )
+
+        columns = [
+            Article.slug,
+            Article.card_headline,
+            Article.card_excerpt,
+            Article.card_verdict,
+            Article.verdict_qualifier,
+            Article.card_image,
+            Article.card_image_alt,
+            Article.subject,
+            Article.published_at,
+            Article.id,
+        ]
+        statement = _published_only(select(*columns))
+
+        if tier is not None:
+            statement = statement.add_columns(tier.label("tier"))
+            statement = statement.order_by(
+                tier.asc(), Article.published_at.desc(), Article.id.desc()
             )
-        ).order_by(Article.published_at.desc(), Article.id.desc())
+        else:
+            statement = statement.order_by(
+                Article.published_at.desc(), Article.id.desc()
+            )
 
         if verdict is not None:
             statement = statement.where(Article.card_verdict == verdict)
+        if subject is not None:
+            statement = statement.where(Article.subject == subject)
 
         if cursor:
-            published_at, article_id = _decode_cursor(cursor)
-            statement = statement.where(
-                tuple_(Article.published_at, Article.id) < (published_at, article_id)
+            cursor_tier, published_at, article_id = _decode_cursor(cursor)
+            within_page = tuple_(Article.published_at, Article.id) < (
+                published_at,
+                article_id,
             )
+            if tier is None:
+                statement = statement.where(within_page)
+            else:
+                # Written as an OR rather than a row comparison because the two
+                # keys sort in opposite directions — tier ascending, date
+                # descending — and `(a, b) < (x, y)` can only express one.
+                statement = statement.where(
+                    or_(
+                        tier > cursor_tier,
+                        and_(tier == cursor_tier, within_page),
+                    )
+                )
 
         result = await self._session.execute(statement.limit(limit + 1))
         rows = result.all()
@@ -72,7 +126,9 @@ class FeedService:
         if len(rows) > limit:
             rows = rows[:limit]
             last = rows[-1]
-            next_cursor = _encode_cursor(last.published_at, last.id)
+            next_cursor = _encode_cursor(
+                getattr(last, "tier", 0), last.published_at, last.id
+            )
 
         items = [
             {
@@ -84,11 +140,50 @@ class FeedService:
                 "excerpt": row.card_excerpt or "",
                 "verdict": row.card_verdict,
                 "verdict_qualifier": row.verdict_qualifier,
+                "image": row.card_image,
+                "image_alt": row.card_image_alt,
+                "subject": row.subject,
                 "published_at": row.published_at,
             }
             for row in rows
         ]
         return items, next_cursor
+
+    async def facets(self) -> dict[str, Any]:
+        """How many published articles sit under each subject and each verdict.
+
+        Two grouped counts in one round trip, for the browse drawer. The counts
+        exist because a category row with no number is a door a reader has to
+        open to find out it is empty — and this feed fills slowly by design, so
+        empty categories are the normal case rather than an edge one.
+
+        Counted over the whole published set, not over the loaded page: a
+        client-side tally of what has been fetched so far would climb as the
+        reader scrolls, which reads as the numbers being wrong.
+
+        Unclassified articles are counted in ``total`` and in no subject. That
+        is deliberate — the subject counts must not sum to the total, because
+        "everything" genuinely holds more than the five categories do.
+        """
+        subject_rows = await self._session.execute(
+            _published_only(select(Article.subject, func.count()))
+            .where(Article.subject.is_not(None))
+            .group_by(Article.subject)
+        )
+        verdict_rows = await self._session.execute(
+            _published_only(select(Article.card_verdict, func.count()))
+            .where(Article.card_verdict.is_not(None))
+            .group_by(Article.card_verdict)
+        )
+        total = await self._session.execute(
+            _published_only(select(func.count()).select_from(Article))
+        )
+
+        return {
+            "total": total.scalar_one(),
+            "subjects": {str(subject): count for subject, count in subject_rows.all()},
+            "verdicts": {str(verdict): count for verdict, count in verdict_rows.all()},
+        }
 
     async def article(self, slug: str) -> dict[str, Any]:
         """Full article with citations and resolved sources.
@@ -155,6 +250,7 @@ class FeedService:
             "slug": article.slug,
             "headline": article.headline,
             "summary": article.summary,
+            "subject": article.subject,
             "verdict": article.verdict,
             "verdict_qualifier": article.verdict_qualifier,
             "product": article.product,
@@ -179,21 +275,25 @@ def _handle_sort_key(handle: str) -> int:
     return int(digits) if digits.isdigit() else 0
 
 
-def _encode_cursor(published_at: datetime, article_id: str) -> str:
-    """Keyset cursor.
+def _encode_cursor(tier: int, published_at: datetime, article_id: str) -> str:
+    """Keyset cursor: the full sort key, tier first.
 
     Keyset rather than offset because the feed grows at the head: an offset
     would skip or duplicate cards whenever something publishes mid-scroll.
+
+    The tier is always encoded, even on the anonymous feed where it is always
+    zero, so a reader who signs in or out mid-scroll hands back a cursor the
+    other mode can still read.
     """
     return base64.urlsafe_b64encode(
-        f"{published_at.isoformat()}|{article_id}".encode()
+        f"{tier}|{published_at.isoformat()}|{article_id}".encode()
     ).decode()
 
 
-def _decode_cursor(cursor: str) -> tuple[datetime, str]:
+def _decode_cursor(cursor: str) -> tuple[int, datetime, str]:
     try:
         raw = base64.urlsafe_b64decode(cursor.encode()).decode()
-        timestamp, article_id = raw.split("|", 1)
-        return datetime.fromisoformat(timestamp), article_id
+        tier, timestamp, article_id = raw.split("|", 2)
+        return int(tier), datetime.fromisoformat(timestamp), article_id
     except (ValueError, UnicodeDecodeError) as exc:
         raise ValueError("malformed cursor") from exc

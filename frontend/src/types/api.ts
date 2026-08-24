@@ -33,10 +33,10 @@ export type ArticleStatus =
  * What kind of thing is being assessed. Drives the one chromatic axis in the
  * design (see `features/evidence/subject.ts`).
  *
- * PROPOSED — the server does not send this yet. It is optional on every model
- * below and every consumer degrades to ink when it is absent, so the field can
- * land without a coordinated release. Shipping it needs an editor-set enum on
- * the article model: it cannot be derived from `product`, which is free text.
+ * Set by a reviewer, never inferred — it cannot be derived from `product`,
+ * which is free text, and a guessed subject would put a confident colour on an
+ * unchecked classification. Still optional everywhere: an unclassified article
+ * renders in ink, which is the design's resting state rather than a gap.
  */
 export type Subject = "supplement" | "device" | "protocol" | "food" | "topical";
 
@@ -69,14 +69,40 @@ export interface FeedCard {
   excerpt: string;
   verdict: Verdict;
   verdictQualifier: string | null;
+  /**
+   * The article's own first picture, derived at publish time — never a
+   * separately-uploaded thumbnail, so a tile cannot show something the article
+   * does not. Null is the normal case, and the tile falls back to type.
+   */
+  image: string | null;
+  imageAlt: string | null;
   publishedAt: string;
-  /** Proposed; see {@link Subject}. Absent today. */
-  subject?: Subject | null;
+  subject: Subject | null;
+}
+
+/** A feed card plus the folder it sits on. Only ever from `/readers/saved`. */
+export interface SavedCard extends FeedCard {
+  folderId: string;
 }
 
 export interface FeedPage {
   items: FeedCard[];
   nextCursor: string | null;
+}
+
+/**
+ * Published counts per subject and per verdict, for the browse drawer.
+ *
+ * Both maps are **sparse** — a key is absent when nothing is published under
+ * it — so read them with a `?? 0`, never by assuming the enum is populated.
+ * They also do not sum to `total`: an unclassified article is counted in the
+ * total and in no subject, which is why "Everything" is genuinely larger than
+ * the five categories added up.
+ */
+export interface FeedFacets {
+  total: number;
+  subjects: Partial<Record<Subject, number>>;
+  verdicts: Partial<Record<Verdict, number>>;
 }
 
 export interface Source {
@@ -114,6 +140,7 @@ export interface Article {
   sources: Source[];
   citations: Citation[];
   evidenceGrade: StudyType;
+  subject: Subject | null;
   publishedAt: string;
   /**
    * A cited source has been retracted since publication. The article stays up
@@ -122,8 +149,6 @@ export interface Article {
    */
   retractionNotice: boolean;
   disclaimer: string;
-  /** Proposed; see {@link Subject}. Absent today. */
-  subject?: Subject | null;
 }
 
 // --- console ---------------------------------------------------------------
@@ -139,8 +164,7 @@ export interface QueueItem {
   validationBadge: string;
   hasWeakEvidence: boolean;
   createdAt: string;
-  /** Proposed; see {@link Subject}. Absent today. */
-  subject?: Subject | null;
+  subject: Subject | null;
 }
 
 export interface ReviewSource extends Source {
@@ -178,6 +202,13 @@ export interface ValidationReport {
 
 export interface ArticleDetail {
   id: string;
+  /**
+   * Where the article lives on the public feed once published. Sent for every
+   * draft — the slug is assigned at persist time — so the console gates the
+   * "view on the feed" link on `status`, not on this being set.
+   */
+  slug: string;
+  subject: Subject | null;
   status: ArticleStatus;
   topic: string;
   product: string;
@@ -299,4 +330,51 @@ export interface PipelineRun {
 export interface RunPage {
   items: PipelineRun[];
   nextCursor: string | null;
+}
+
+// --- reader accounts -------------------------------------------------------
+//
+// The public side's own auth surface. A reader is not a `Reviewer` with fewer
+// permissions — it is a different table, a different token, and a type that
+// carries no role at all, so no component can branch on one and be handed the
+// other.
+
+export interface Reader {
+  id: string;
+  email: string;
+  displayName: string;
+  /** Subjects lifted to the top of this reader's feed. Never a filter. */
+  interests: Subject[];
+  newsletter: boolean;
+}
+
+export interface Folder {
+  id: string;
+  name: string;
+  /** Articles on this shelf. Server-counted, so the tab label cannot drift. */
+  count: number;
+}
+
+export interface SavedPage {
+  folders: Folder[];
+  items: SavedCard[];
+}
+
+/**
+ * `{ slug: folderId }` for everything the signed-in reader has saved.
+ *
+ * Fetched once alongside the feed rather than per tile, and deliberately not
+ * folded into the feed response: the feed is public, identical for everyone
+ * and cacheable, and a per-reader field in it would make it none of those.
+ */
+export type SavedIndex = Record<string, string>;
+
+export type ContactKind = "fact_check" | "topic" | "other";
+
+export interface ContactSubmission {
+  kind: ContactKind;
+  name?: string | null;
+  email: string;
+  link?: string | null;
+  note: string;
 }

@@ -102,7 +102,7 @@ export function RequireAuth({ children }: { children: ReactNode }) {
   }
   if (status === "anonymous") {
     // Remember where they were headed so login can return them there.
-    return <Navigate to="/console/login" state={{ from: location }} replace />;
+    return <Navigate to="/review/login" state={{ from: location }} replace />;
   }
   return <>{children}</>;
 }

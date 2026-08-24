@@ -21,12 +21,37 @@ export class ApiError extends Error {
   }
 }
 
-/** Console auth token. Injected rather than read from storage here, so this
- *  module stays free of browser globals — see the module docstring. */
-let authToken: string | null = null;
+/**
+ * The two bearer tokens, and why they are two.
+ *
+ * A reviewer and a reader are different accounts in different tables, and the
+ * backend mints their tokens with different `typ` claims — presenting one to
+ * the other's surface is rejected before any lookup happens. Keeping a single
+ * `authToken` here would mean a reviewer signing in on their own laptop
+ * silently replaced their reader session, and every subsequent feed request
+ * would carry a token the public API refuses to personalise with.
+ *
+ * Which one is sent is decided by the path, not by the caller: `/console/*` is
+ * the reviewer surface and everything else is public. A caller choosing per
+ * request is a caller that can choose wrong, and the wrong choice here leaks a
+ * console token to an endpoint that has no business seeing one.
+ *
+ * Both are injected rather than read from storage here, so this module stays
+ * free of browser globals — see the module docstring.
+ */
+let reviewerToken: string | null = null;
+let readerToken: string | null = null;
 
 export function setAuthToken(token: string | null): void {
-  authToken = token;
+  reviewerToken = token;
+}
+
+export function setReaderToken(token: string | null): void {
+  readerToken = token;
+}
+
+function tokenFor(path: string): string | null {
+  return path.startsWith("/console") ? reviewerToken : readerToken;
 }
 
 export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -37,7 +62,8 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
   // generated per request and only the browser knows it; setting the header
   // here strips the boundary and the server sees a body it cannot parse.
   if (typeof init.body === "string") headers.set("Content-Type", "application/json");
-  if (authToken) headers.set("Authorization", `Bearer ${authToken}`);
+  const token = tokenFor(path);
+  if (token) headers.set("Authorization", `Bearer ${token}`);
 
   const response = await fetch(`${API_BASE}${path}`, { ...init, headers });
 
@@ -54,8 +80,12 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
   return (await response.json()) as T;
 }
 
-/** Build a query string, dropping null/undefined. */
-export function qs(params: Record<string, string | number | null | undefined>): string {
+/** Build a query string, dropping null/undefined. `false` is kept — it is an
+ *  answer, and dropping it would silently mean "use the default", which for
+ *  `personalise` is the opposite of what was asked. */
+export function qs(
+  params: Record<string, string | number | boolean | null | undefined>,
+): string {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     if (value !== null && value !== undefined) search.set(key, String(value));

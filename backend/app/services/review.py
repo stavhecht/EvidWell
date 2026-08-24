@@ -18,7 +18,7 @@ from typing import Any
 from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.enums import ArticleStatus, StudyType
+from app.domain.enums import ArticleStatus, StudyType, Subject
 from app.domain.models import Article, ArticleSource, Source
 from app.evidence.grading import is_weak_evidence
 from app.services.card import derive_card
@@ -119,6 +119,10 @@ class ReviewService:
         article.card_headline = card.headline
         article.card_excerpt = card.excerpt
         article.card_verdict = card.verdict
+        # Derived here rather than uploaded separately, so the feed tile cannot
+        # show a picture that is not in the article the reader lands on.
+        article.card_image = card.image
+        article.card_image_alt = card.image_alt
         article.status = ArticleStatus.PUBLISHED
         article.reviewed_by = reviewer_id
         article.reviewed_at = now
@@ -126,6 +130,36 @@ class ReviewService:
 
         await self._session.flush()
         logger.info("article %s published by reviewer %s", article_id, reviewer_id)
+
+    async def set_subject(
+        self, article_id: str, subject: Subject | None, reviewer_id: str
+    ) -> None:
+        """Classify what kind of thing this article assesses.
+
+        Editable after publication, unlike the body: the subject is metadata a
+        reviewer may get wrong or refine later, and correcting it changes a
+        colour and a browse listing rather than a word the reader was shown.
+        Set it to ``None`` to un-classify — an unclassified article renders in
+        ink, which is the design's resting state, so blank is a real answer
+        rather than a missing one.
+
+        Deliberately not derived from ``product``: that is free text, and a
+        guessed subject would put a confident colour on an unchecked
+        classification.
+        """
+        article = await self._get(article_id)
+        if article.status in (ArticleStatus.REJECTED, ArticleStatus.DRAFT_FAILED):
+            raise ReviewError(
+                f"cannot classify an article in state '{article.status}'"
+            )
+        article.subject = subject
+        await self._session.flush()
+        logger.info(
+            "article %s classified as %s by reviewer %s",
+            article_id,
+            subject or "unclassified",
+            reviewer_id,
+        )
 
     #: States a draft can be rejected from.
     #:
@@ -231,6 +265,7 @@ class ReviewService:
                 "evidence_grade": article.evidence_grade,
                 "validation_badge": _badge(article.validation_report),
                 "has_weak_evidence": is_weak_evidence(StudyType(article.evidence_grade)),
+                "subject": article.subject,
                 "created_at": article.created_at,
             }
             for article in articles
@@ -285,6 +320,13 @@ class ReviewService:
 
         return {
             "id": article.id,
+            # Carried so the console can link a just-published draft straight
+            # to where it landed on the public feed. Present before publication
+            # too — the slug is assigned at persist time — but only a published
+            # article resolves at /a/{slug}, which is why the console gates the
+            # link on status rather than on the field being set.
+            "slug": article.slug,
+            "subject": article.subject,
             "status": article.status,
             "topic": article.topic,
             "product": article.product,

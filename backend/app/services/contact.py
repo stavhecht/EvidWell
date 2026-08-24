@@ -1,0 +1,121 @@
+"""The "Let us know" inbox.
+
+Public writes, reviewer-only reads. Two rules worth stating because both are
+easy to soften later:
+
+* **A submission is never acted on automatically.** It does not create a
+  pipeline run and it does not become a topic. A reviewer reads it and decides,
+  which is the same principle as invariant #1 applied at the other end of the
+  pipeline: nothing reaches generation because a stranger asked for it.
+* **Nothing here is ever shown publicly.** No "recently requested" list, no
+  counts. The rows carry an email address and free text written by anyone with
+  the URL.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import UTC, datetime
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.domain.enums import ContactKind, ContactStatus
+from app.domain.models import ContactRequest
+
+logger = logging.getLogger(__name__)
+
+#: Enough for a paragraph and a link, short enough that the column cannot be
+#: used as free storage.
+MAX_NOTE_CHARS = 4000
+MAX_LINK_CHARS = 2000
+
+
+class ContactError(RuntimeError):
+    """An illegal contact operation. Surfaces as HTTP 409."""
+
+
+class ContactService:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def submit(
+        self,
+        *,
+        kind: ContactKind,
+        email: str,
+        note: str,
+        name: str | None = None,
+        link: str | None = None,
+    ) -> ContactRequest:
+        """Record a submission. Always lands as ``new``."""
+        cleaned_note = note.strip()
+        if not cleaned_note:
+            raise ContactError("tell us what this is about")
+        if len(cleaned_note) > MAX_NOTE_CHARS:
+            raise ContactError(
+                f"that note is longer than the {MAX_NOTE_CHARS} characters we can take"
+            )
+        if link and len(link) > MAX_LINK_CHARS:
+            raise ContactError("that link is too long")
+
+        request = ContactRequest(
+            kind=kind,
+            email=email.strip().lower(),
+            note=cleaned_note,
+            name=(name or "").strip() or None,
+            link=(link or "").strip() or None,
+            status=ContactStatus.NEW,
+        )
+        self._session.add(request)
+        await self._session.flush()
+        logger.info("contact request %s received (%s)", request.id, kind)
+        return request
+
+    async def inbox(
+        self, status: ContactStatus | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Newest first. Unpaginated on purpose — this is a small inbox, and a
+        cursor here would be scaffolding for traffic that does not exist."""
+        statement = select(ContactRequest).order_by(ContactRequest.created_at.desc())
+        if status is not None:
+            statement = statement.where(ContactRequest.status == status)
+
+        rows = await self._session.execute(statement.limit(limit))
+        return [
+            {
+                "id": row.id,
+                "kind": row.kind,
+                "name": row.name,
+                "email": row.email,
+                "link": row.link,
+                "note": row.note,
+                "status": row.status,
+                "handled_at": row.handled_at,
+                "created_at": row.created_at,
+            }
+            for row in rows.scalars()
+        ]
+
+    async def set_status(
+        self, request_id: str, status: ContactStatus, reviewer_id: str
+    ) -> None:
+        """Mark a request answered or closed, or put it back in the queue.
+
+        ``handled_by`` and ``handled_at`` move with the status because the
+        database CHECK requires it: a row that claims a human dealt with it has
+        to name the human. Reopening clears both for the same reason.
+        """
+        request = await self._session.get(ContactRequest, request_id)
+        if request is None:
+            raise ContactError("no such request")
+
+        request.status = status
+        if status is ContactStatus.NEW:
+            request.handled_by = None
+            request.handled_at = None
+        else:
+            request.handled_by = reviewer_id
+            request.handled_at = datetime.now(UTC)
+        await self._session.flush()

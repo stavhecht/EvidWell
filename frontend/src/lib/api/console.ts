@@ -6,6 +6,7 @@ import { apiFetch, qs, setAuthToken } from "./client";
 import type {
   ArticleDetail,
   ArticleStatus,
+  Subject,
   MediaUpload,
   QueueItem,
   Reviewer,
@@ -53,7 +54,7 @@ export async function fetchMe(): Promise<Reviewer> {
  * tab. Those drafts can never be approved, but they are how a prompt bug
  * becomes visible — hiding them makes the grounding check look like silence.
  *
- * STUB.
+ *
  */
 export async function fetchQueue(params: {
   status?: ArticleStatus;
@@ -63,7 +64,7 @@ export async function fetchQueue(params: {
   return apiFetch(`/console/articles${qs(params)}`);
 }
 
-/** Draft + sources + validation report, in one request. STUB. */
+/** Draft + sources + validation report, in one request. */
 export async function fetchArticleDetail(id: string): Promise<ArticleDetail> {
   return apiFetch<ArticleDetail>(`/console/articles/${id}`);
 }
@@ -80,6 +81,23 @@ export async function saveContent(id: string, content: TipTapDoc): Promise<void>
   return apiFetch<void>(`/console/articles/${id}/content`, {
     method: "PATCH",
     body: JSON.stringify({ content }),
+  });
+}
+
+/**
+ * Classify what kind of thing the article assesses.
+ *
+ * `null` clears it, and that is a real answer rather than a missing one — an
+ * unclassified article renders in ink, which is the design's resting state.
+ *
+ * Separate from the content autosave, and allowed after publication, because
+ * this drives a colour and a browse listing rather than a word the reader was
+ * shown: getting it wrong should be correctable without touching the article.
+ */
+export async function setSubject(id: string, subject: Subject | null): Promise<void> {
+  return apiFetch<void>(`/console/articles/${id}/subject`, {
+    method: "PATCH",
+    body: JSON.stringify({ subject }),
   });
 }
 

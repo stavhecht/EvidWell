@@ -12,9 +12,10 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import text
 
-from app.api.deps import SessionDep
-from app.api.public.schemas import ArticleOut, FeedPageOut
-from app.domain.enums import Verdict
+from app.api.deps import OptionalReaderDep, SessionDep
+from app.api.public.schemas import ArticleOut, FeedFacetsOut, FeedPageOut
+from app.domain.enums import Subject, Verdict
+from app.domain.models import Reader
 from app.services.feed import ArticleNotFound, FeedService
 
 router = APIRouter(tags=["public"])
@@ -23,22 +24,56 @@ router = APIRouter(tags=["public"])
 @router.get("/feed", response_model=FeedPageOut)
 async def get_feed(
     session: SessionDep,
+    reader: OptionalReaderDep,
     cursor: Annotated[str | None, Query(description="Opaque cursor from next_cursor")] = None,
     limit: Annotated[int, Query(ge=1, le=50)] = 24,
     verdict: Annotated[Verdict | None, Query(description="Filter by verdict")] = None,
+    subject: Annotated[Subject | None, Query(description="Filter by subject")] = None,
+    personalise: Annotated[
+        bool,
+        Query(
+            alias="personalise",
+            description="Lift the signed-in reader's interests to the top",
+        ),
+    ] = True,
 ) -> FeedPageOut:
     """Cursor-paginated feed of published article cards.
 
     ``limit`` defaults to 24 so the masonry layout can fill several columns on
     a wide viewport without a second round trip on first paint.
+
+    Works signed out, and that is the normal case — the token is optional and a
+    stale one degrades to the anonymous feed rather than to a 401 (see
+    ``optional_reader``). A signed-in reader's interests reorder the page; they
+    never narrow it, so the two feeds hold the same articles in a different
+    order. ``personalise=false`` is how the reader asks for the plain
+    chronological feed without signing out.
     """
+    interests: list[Subject] = []
+    if reader is not None and personalise:
+        row = await session.get(Reader, reader.id)
+        if row is not None:
+            interests = list(row.interests)
+
     try:
-        items, next_cursor = await FeedService(session).page(cursor, limit, verdict)
+        items, next_cursor = await FeedService(session).page(
+            cursor, limit, verdict, subject, interests
+        )
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Malformed cursor"
         ) from None
     return FeedPageOut(items=items, next_cursor=next_cursor)
+
+
+@router.get("/feed/facets", response_model=FeedFacetsOut)
+async def get_feed_facets(session: SessionDep) -> FeedFacetsOut:
+    """Published counts per subject and per verdict, for the browse drawer.
+
+    Declared **above** ``/articles/{slug}`` for no routing reason — it is a
+    different prefix — but kept next to the feed it describes.
+    """
+    return FeedFacetsOut(**await FeedService(session).facets())
 
 
 @router.get("/articles/{slug}", response_model=ArticleOut)

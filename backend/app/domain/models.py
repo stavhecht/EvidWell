@@ -23,6 +23,7 @@ from sqlalchemy import (
     Enum,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     String,
     Text,
@@ -33,7 +34,16 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.config import get_settings
-from app.domain.enums import ArticleStatus, RunStatus, StudyType, UserRole, Verdict
+from app.domain.enums import (
+    ArticleStatus,
+    ContactKind,
+    ContactStatus,
+    RunStatus,
+    StudyType,
+    Subject,
+    UserRole,
+    Verdict,
+)
 
 #: Read once at import. Must match the applied migration's ``vector(N)``;
 #: ``Settings.validate_embedding_dim`` checks it against the live provider at
@@ -192,6 +202,14 @@ class Article(Base):
     card_headline: Mapped[str | None] = mapped_column(Text)
     card_excerpt: Mapped[str | None] = mapped_column(Text)
     card_verdict: Mapped[Verdict | None] = mapped_column(pg_enum(Verdict, "verdict"))
+    #: The first image in the approved body, materialised at publish time by
+    #: the same rule as the other card columns: derived, never a separate
+    #: upload. NULL is the normal case — the feed draws a typographic tile.
+    card_image: Mapped[str | None] = mapped_column(Text)
+    card_image_alt: Mapped[str | None] = mapped_column(Text)
+
+    #: Set by a reviewer, not by the pipeline. See ``Subject``.
+    subject: Mapped[Subject | None] = mapped_column(pg_enum(Subject, "subject"))
 
     evidence_grade: Mapped[StudyType] = mapped_column(pg_enum(StudyType, "study_type"))
     validation_report: Mapped[dict | None] = mapped_column(NullableJSONB)
@@ -314,3 +332,117 @@ class PipelineStageRun(Base):
     cache_write_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class Reader(Base):
+    """A public reader's account.
+
+    Separate from :class:`User` on purpose — see the note in
+    ``migrations/0002_readers_and_subjects.sql``. ``users`` is the reviewer
+    roster and ``articles.reviewed_by`` is a foreign key into it, so a row
+    there is a claim about who is answerable for a published article. Readers
+    sign themselves up; a reader id can never satisfy ``require_reviewer``
+    because it is not in ``users`` at all.
+    """
+
+    __tablename__ = "readers"
+
+    id: Mapped[str] = mapped_column(UUID_PK, primary_key=True, server_default=GEN_UUID)
+    email: Mapped[str] = mapped_column(Text, nullable=False)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    #: Which subjects to lift to the top of this reader's feed. Ordering, not
+    #: filtering: everything else still appears below.
+    interests: Mapped[list[Subject]] = mapped_column(
+        ARRAY(pg_enum(Subject, "subject")), server_default=text("'{}'")
+    )
+    newsletter: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ReaderFolder(Base):
+    """A named shelf. Every reader gets one called "Saved" at signup."""
+
+    __tablename__ = "reader_folders"
+
+    id: Mapped[str] = mapped_column(UUID_PK, primary_key=True, server_default=GEN_UUID)
+    reader_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("readers.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ReaderSave(Base):
+    """One article on one reader's shelf.
+
+    ``(reader_id, article_id)`` is the primary key, so moving an article
+    between folders is an update of ``folder_id`` rather than a second row —
+    the same article cannot accumulate a copy per folder. The composite foreign
+    key on ``(folder_id, reader_id)`` is what makes "you can only save into
+    your own folder" a database fact rather than a check every handler has to
+    remember.
+    """
+
+    __tablename__ = "reader_saves"
+
+    reader_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("readers.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    article_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("articles.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    folder_id: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["folder_id", "reader_id"],
+            ["reader_folders.id", "reader_folders.reader_id"],
+            ondelete="CASCADE",
+        ),
+    )
+
+
+class ContactRequest(Base):
+    """A "Let us know" submission: a claim to check, or a topic to cover.
+
+    Written unauthenticated from the public site, read only in the console.
+    No foreign key to ``readers`` — a request is worth having from someone who
+    never signs up, and the email on the row is how we reply either way.
+    """
+
+    __tablename__ = "contact_requests"
+
+    id: Mapped[str] = mapped_column(UUID_PK, primary_key=True, server_default=GEN_UUID)
+    kind: Mapped[ContactKind] = mapped_column(pg_enum(ContactKind, "contact_kind"))
+    name: Mapped[str | None] = mapped_column(Text)
+    email: Mapped[str] = mapped_column(Text, nullable=False)
+    link: Mapped[str | None] = mapped_column(Text)
+    note: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[ContactStatus] = mapped_column(pg_enum(ContactStatus, "contact_status"))
+    handled_by: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id")
+    )
+    handled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
