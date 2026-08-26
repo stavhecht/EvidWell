@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from app.domain.contracts import (
     CachedCandidate,
     ExtractionOutput,
+    Illustration,
     RankedSource,
     SynthesisInput,
     SynthesisOutput,
@@ -39,12 +40,25 @@ class StageName(StrEnum):
     """Ordered. ``ordinal`` in pipeline_stage_runs is this enum's position.
 
     One-to-one with the states of the future Step Functions machine.
+
+    That first sentence is true of rows written from now on. ``ILLUSTRATE`` was
+    inserted at position 4, so runs recorded before it existed carry
+    ``validate`` at ordinal 4 and ``persist`` at 5 rather than 5 and 6. Nothing
+    joins the number to the name — the column only orders a single run's stages
+    for display — so the old rows are correct about the pipeline they ran on.
+    Do not backfill them into a claim about a pipeline that did not exist yet.
+
+    **PERSIST must stay last.** Its write commits together with the run's
+    completion row (``orchestrator._finish_run``); a stage after it reopens the
+    window where an article exists whose run still says ``running``, which the
+    stale sweep then requeues and writes a second time.
     """
 
     EXTRACT = "extract"
     RETRIEVE = "retrieve"
     RANK = "rank"
     SYNTHESIZE = "synthesize"
+    ILLUSTRATE = "illustrate"
     VALIDATE = "validate"
     PERSIST = "persist"
 
@@ -98,6 +112,14 @@ class PipelineContext(BaseModel):
     #: that was never in the prompt.
     synthesis_input: SynthesisInput | None = None
     draft: SynthesisOutput | None = None
+
+    # ILLUSTRATE
+    #: The two generated frames, or None — which is an ordinary outcome and not
+    #: a failure. PersistStage prepends ``lead`` to the document as an image
+    #: node like any other; ``cover`` never enters the document and reaches the
+    #: feed only through ``articles.generated_imagery`` and the pairing rule in
+    #: ``services/card.py``.
+    illustration: Illustration | None = None
 
     # VALIDATE
     validation: ValidationReport | None = None

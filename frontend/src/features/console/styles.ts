@@ -168,6 +168,19 @@ export const BACK_TO_QUEUE =
   "font-body text-micro font-semibold uppercase leading-none tracking-[0.11em] text-ink-3 hover:text-ink";
 
 /**
+ * The right slot of the top bar. Deliberately not `PRIMARY`.
+ *
+ * Solid accent is the only fill in the console and `controls.ts` reserves it
+ * for the one button that publishes. A filled button up here would compete
+ * with Approve from the place a reviewer's hand rests *before* they have read
+ * anything — which is the same argument that keeps Approve itself out of this
+ * bar. A hairline box in the queue's own micro-caps: visible, pressable,
+ * unmistakably not the decision.
+ */
+export const TOP_BAR_ACTION =
+  "whitespace-nowrap border border-rule px-2.5 py-1.5 font-body text-micro font-semibold uppercase leading-none tracking-[0.11em] text-ink-2 transition-colors hover:border-ink hover:text-ink disabled:cursor-not-allowed disabled:opacity-45";
+
+/**
  * Editor left, evidence right. Side by side is the requirement — the reviewer
  * cross-checks one against the other continuously — and the page scrolls with
  * the evidence column pinned rather than two panes scrolling independently, so
@@ -451,3 +464,66 @@ export const MEDIA_ERROR =
 export function saveIndicator(failed: boolean): string {
   return `font-body text-micro ${failed ? "font-semibold text-accent-ink" : "text-ink-3"}`;
 }
+
+/* ── the feed-tile preview ──────────────────────────────────────────────── */
+/*
+ * The console's first overlay, and the reason it earns one: the reviewer's
+ * question is "how will this look on the feed", and a tile alone in a sidebar
+ * cannot answer it. Scale is comparative — a headline that clamps at three
+ * lines, a picture that reads at 190px, a verdict kicker that holds its own —
+ * and all of that is only legible beside other tiles. So the overlay clears
+ * the review screen and rebuilds a few cells of the real feed around it.
+ */
+
+/** Full-bleed scrim. The panel scrolls inside it, never the page behind. */
+export const PREVIEW_OVERLAY =
+  "fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-[rgb(18_16_15/0.62)] p-4 sm:p-8";
+
+export const PREVIEW_PANEL =
+  "relative my-auto w-full max-w-[860px] rounded-panel bg-ground p-5 shadow-panel sm:p-7";
+
+export const PREVIEW_HEAD =
+  "flex flex-wrap items-baseline justify-between gap-3 border-b-2 border-rule pb-3";
+export const PREVIEW_TITLE =
+  "font-heading text-[19px] font-bold leading-tight tracking-[-0.015em] text-ink";
+export const PREVIEW_CLOSE =
+  "font-body text-micro font-semibold uppercase leading-none tracking-[0.11em] text-ink-3 transition-colors hover:text-ink";
+
+/**
+ * Redraw beside Close, at the head of the panel.
+ *
+ * The tile's own regenerate lives here rather than in the editor's toolbar
+ * because this is the only screen where its effect is visible, and it wears
+ * `TOP_BAR_ACTION` — the same hairline box the review bar's actions use, and
+ * pointedly not the accent fill `controls.ts` reserves for Approve. A filled
+ * button inside a preview would be the loudest thing on a screen whose whole
+ * job is to show the reviewer something quietly.
+ */
+export const PREVIEW_ACTIONS = "flex items-baseline gap-3";
+
+/**
+ * The feed's own measure: `MasonryFeed` runs `columnWidth={190}` at
+ * `columnGutter={14}`. Written as literals because the masonry's numbers are
+ * the original and a shared constant would be a second place to keep them —
+ * but they must agree, since a tile previewed at 260px clamps its headline
+ * differently from the one that ships, and that difference is the whole point
+ * of looking.
+ */
+export const PREVIEW_GRID =
+  "mt-4 grid grid-cols-[repeat(auto-fill,190px)] justify-center gap-[14px]";
+
+/**
+ * The reviewer's own tile, marked so it is findable among the neighbours.
+ *
+ * Outlined, never filled — the same call `WEAK_EVIDENCE_FLAG` makes. Solid
+ * accent is reserved for the button that publishes, and while a label cannot
+ * literally be clicked instead of Approve, spending the console's one fill on
+ * decoration is how that reservation stops meaning anything.
+ */
+export const PREVIEW_MINE = "relative outline outline-2 outline-offset-[3px] outline-accent";
+export const PREVIEW_MINE_TAG =
+  "absolute -top-[9px] left-2 z-10 border border-accent bg-ground px-1.5 py-0.5 font-body text-[8.5px] font-bold uppercase leading-none tracking-[0.11em] text-accent-ink";
+
+export const PREVIEW_NOTE =
+  "mt-4 border-t border-rule-soft pt-3 font-body text-micro leading-[1.55] text-ink-3";
+export const PREVIEW_MESSAGE = "mt-4 font-body text-micro text-ink-3";

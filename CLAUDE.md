@@ -93,10 +93,15 @@ the LLM generates under. If a stage's shape isn't in that file, it isn't defined
 (sentence counts, claim caps) are validators there rather than a global word count, so thin
 evidence yields a short article instead of padding.
 
-**The pipeline is six ordered stages** — extract → retrieve → rank → synthesize → validate →
-persist — in `pipeline/steps/`, driven by `pipeline/orchestrator.py`. Each stage is
-`(input, ctx) -> output` and maps 1:1 onto a future Step Functions state, so keep stages free
-of transport concerns. The orchestrator writes `pipeline_runs` / `pipeline_stage_runs` through
+**The pipeline is seven ordered stages** — extract → retrieve → rank → synthesize →
+illustrate → validate → persist — in `pipeline/steps/`, driven by `pipeline/orchestrator.py`.
+Each stage is `(input, ctx) -> output` and maps 1:1 onto a future Step Functions state, so keep
+stages free of transport concerns. `ILLUSTRATE` sits where it does for a reason at both ends:
+it needs `ctx.draft`, so it must follow SYNTHESIZE, and **PERSIST must stay last** because its
+write commits atomically with the run-completion row (see below). `pipeline_stage_runs.ordinal`
+comes from list position, so runs recorded before illustrate existed carry `validate` at 4 and
+`persist` at 5 rather than 5 and 6 — correct about the pipeline they ran on, deliberately not
+backfilled. The orchestrator writes `pipeline_runs` / `pipeline_stage_runs` through
 a **separate session factory**, so bookkeeping survives a rolled-back article write.
 
 **The orchestrator owns every transaction boundary — do not commit in a stage or in the
@@ -267,6 +272,11 @@ only one side is updated.
 
 Embeddings are **outside** the ledger on purpose (~1% of a run, and widening
 `EmbeddingProvider` changes its return type and every caller). Say "not measured", not "free".
+**Generated images are outside it for a stronger reason**: an image is billed per render, and
+this table prices four token columns. `IllustrateStage` therefore never calls `record_usage` —
+a model id written against four zeros is exactly the "unpriced model reads as free" mistake
+`pricing.py` exists to refuse. Count, seed, latency and model go into `metrics` instead, and a
+run's `estimatedCostUsd` excludes image spend.
 
 The two pre-existing runs were backfilled from the old `metrics` JSONB, and their stage rows sum
 to ~328 fewer input tokens than the run rollup: extraction's *input* count was never in
@@ -300,6 +310,17 @@ instead. Nothing public links to it. That is chrome and discoverability, *not* a
 a URL is not a secret, and what actually keeps readers out is `RequireAuth` plus the
 router-level bearer check on every `/api/console/*` route. Public routes must never import
 from `features/console`, and the desk must never render public chrome.
+
+**The desk's "Show draft" preview imports the other way, on purpose.** `FeedPreview.tsx`
+renders the *real* `features/feed/ArticleCard` among real published tiles at the feed's own
+190px measure (`MasonryFeed`'s `columnWidth`), fed by `GET /console/articles/{id}/card` — which
+runs the *same* `derive_card()` `approve()` runs. Both halves are deliberate: a console-local
+tile clone, or a TypeScript port of `derive_card`, would be a second definition free to drift,
+and a preview that drifts from what publishes is worse than none because it is reassuring
+rather than useful. Console → feed is the permitted direction; the reverse is what the boundary
+forbids. Every tile in the overlay is `inert` — `ArticleCard` renders a live Save button and
+links to `/a/:slug`, which 404s until publication. The button flushes autosave before opening,
+for the same reason Approve does.
 
 **Two accounts, two tables, two tokens.** `users` is the reviewer roster and
 `articles.reviewed_by` is a foreign key into it, so a row there is a claim about who is
@@ -340,6 +361,118 @@ tile cannot show a picture the article does not contain. `youtube` nodes are exc
 purpose: a video thumbnail lives on a third-party host, and deriving one would put a YouTube
 request on every feed render — the same tracking the article page's click-to-load facade
 exists to avoid. `NULL` is the normal case and the feed draws a typographic tile.
+
+**The one picture not literally in the body is the generated cover, and a pairing rule is what
+keeps the rule above true.** `ILLUSTRATE` draws two frames from one prompt with one seed — a
+landscape `lead`, written into `original_content` as an ordinary image node, and a portrait
+`cover` for the feed tile, which lives only in `articles.generated_imagery` (the tile shapes in
+`tileRatio()` are all 1:1 or taller, so `object-cover` on a landscape lead throws its sides
+away). `derive_card` reaches for the cover **only while `lead.src` is still the document's first
+image**. Replace that picture, delete it, or put another above it and the pairing breaks and the
+card falls back to ordinary derivation. It fails toward "no cover", never "wrong cover".
+
+Be precise about what the pairing buys, because two stronger claims are **false**. The frames
+are *not* one photograph at two aspect ratios: measured 2026-08-24, the same prompt and seed at
+two sizes give visibly different compositions, and the provider `auto` resolves to (`nscale`)
+ignores the seed entirely, so even two identical requests differ. And they are no longer even
+guaranteed to come from one *generation* — `POST /console/articles/{id}/illustration` takes a
+`frames` list, so a reviewer can redraw either alone. What the rule still guarantees is the part
+worth having: the tile's picture was drawn for this article under the same locked claim-free
+prompt builder, and is discarded the moment the article stops carrying its partner. Neither
+frame asserts anything, so neither can assert what the other does not — which is exactly why
+redrawing one and not the other is safe. If they ever need to be provably the same photograph,
+render portrait once and crop the landscape with Pillow — which also halves the bill. That
+predicate is also where the cover gets its `MEDIA_SRC_RE` check: it is not in the document, so
+`assert_media_is_ours` — which walks the document — never sees it.
+
+**Because either frame can be redrawn alone, provenance lives on the frame, not the pair.**
+`GeneratedImage` carries its own `prompt`, `negative_prompt`, `model` and `seed`; `Illustration`
+is just `lead` + `cover`. They were shared fields while drawing either meant drawing both, and
+after a one-frame redraw a shared prompt would be a true record of one picture and a false one
+of the other — which is worse than no record, because it still answers when asked. Rows written
+before the move keep their top-level fields; `Illustration`'s `model_validator` pushes them down
+onto both frames on read, so nothing is lost and nothing has to be migrated. A frame's own value
+always wins. Two consequences worth knowing: `IllustrateStage` reads `illustration.lead.prompt`
+for its metrics (identical to the cover's on that path, one call and one seed), and the console's
+spend budget counts **renders, not presses** — `REGENERATE_BUDGET` is 24 per ten minutes, the
+same ceiling as the 12 two-render presses it replaced. A one-frame redraw on an article with no
+imagery at all is a **409**, not a quiet upgrade to both: there is no other frame to keep, and
+billing two renders to someone who asked for one is the mistake the budget exists to prevent.
+
+**Image generation never fails a run, and that is the deliberate opposite of the throttle
+rule.** A picture is decorative; an article without one is publishable and already renders as a
+typographic tile. `IllustrateStage` catches every image failure, records a `cause`
+(`not_configured` / `disabled` / `provider_error` / `unexpected`) in `metrics.illustrate`, and
+returns the context untouched. Compare `retrieval/throttle.py`, which must fail hard because
+recall lost to a 429 reads as a correct, cautious answer. The rule is *fail on the degradations
+nobody can see* — a missing picture is visible on the reviewer's very next screen.
+
+**The image prompt is assembled here, never by a model, and the verdict never reaches it.**
+A picture of someone looking healthier beside a supplement is an efficacy claim no citation
+backs, made in the one register readers do not read critically. The headline is excluded for the
+same reason: it is a *claim sentence*, and an image model handed a claim tries to depict it.
+
+**A person may be in the frame, on the one path where the subject is an activity.** The line is
+depicting the subject versus depicting a *result*: a protocol **is** something someone does, so
+a body mid-stretch on a mat or a forearm mid-lift is a photograph of what the article is about.
+A body beside a jar, a bowl or a tube is the other case — nothing in frame is doing anything, so
+the only thing the person can be communicating is an outcome. So people are gated on the motif
+(`_PEOPLE_MOTIFS`, currently `PROTOCOL` alone) rather than switched on globally, and adding a key
+there is a decision about claims, not styling. Two guards go with it. **Only a confident signal
+opens the gate** — a reviewer's `subject`, or a motif matched against `product` itself; a motif
+inferred from the *topic* does not, because topics name outcomes and "magnesium for sleep"
+matches `sleep`. And `EXCLUSIONS_WITH_PEOPLE` replaces the body ban rather than dropping it: the
+clinic, text, branding and before-and-after clauses are **identical** in both, because none of
+them was ever about whether a person was present. What is newly forbidden is the body being
+*displayed* — a physique, a transformation, eye contact with the camera — which is the form the
+efficacy claim takes when a person makes it.
+
+**`imagery/prompt.py` splits on one line: treatment locked, composition free.** `TREATMENT`
+(palette, matte surfaces, register) is fixed and applies to every render, both paths — that is
+what makes twenty articles read as one publication, and it is also what stops the people renders
+from becoming stock fitness photography. Framing, arrangement, light and surface are chosen by
+the **seed** from a per-path vocabulary (`_FRAMINGS`/`_ARRANGEMENTS`/`_SURFACES` for objects,
+`_PEOPLE_FRAMINGS`/`_POSES`/`_PEOPLE_SETTINGS` for a person, `_LIGHTS` shared), giving 500
+combinations either way. Do not add a composition clause to `TREATMENT`; that is exactly how this
+module once produced the same beige photograph for every article, with three words of eighty
+varying — and the genre word (`Still life` / `Unposed documentary photograph`) was moved out to
+`_Path.genre` for that reason, being composition hiding in the treatment string.
+
+**The strides are a mixed radix, not coprime numbers.** Each is the product of the axis lengths
+*before* it (`_STRIDES` is derived from `_AXIS_RADIX`, so it cannot drift when someone adds a
+sixth framing), which makes the four axes exact digits of `seed % 500` — every combination once
+per 500 consecutive seeds. The previous `(1, 7, 53, 401)` was chosen for coprimality between the
+strides, which buys nothing: stride 7 against a 5-option axis gives
+`(seed % 5, seed // 7 % 5) == (r % 5, r // 7)` for `seed = 35q + r`, so 10 framing×arrangement
+pairs came up exactly twice as often as the other 15 (χ² 49073 on 16 dof over 400k seeds; 511 on
+499 after). The quantity that matters is each stride against the product of the preceding axis
+lengths — which is also why both paths must keep the same option counts, checked at import.
+
+**The seed selects the prompt, not the sampler, and that distinction is the whole design.** The
+provider ignores the seed it is sent (measured — see `seed_for_run`), so randomising harder
+cannot help: those identical renders already came from different noise. The prompt was the
+narrow thing. `seed_for_run` therefore gives an article a stable composition across retries and
+`fresh_seed` makes Regenerate genuinely recompose, both by our own selection.
+
+Three traps when editing. `subject` is `None` on every pipeline call (reviewer-set; the article
+row does not exist yet), so `infer_motif_subject` — a keyword map over product, then topic and
+ingredients — picks the motif. **That is not a classification**: it chooses which objects get
+photographed, is never shown to a reader, and never writes `articles.subject`, which stays
+reviewer-set because a wrong subject is a false statement on the page while a wrong motif is a
+slightly odd still life. **Its arguments are in trust order and it stops at the first field that
+matches**, which is load-bearing rather than tidy: it used to join product + topic + ingredients
+into one haystack, so a vague word in a low-trust field outranked a precise one in a high-trust
+field. `SUPPLEMENT` is checked last and `PROTOCOL` holds `sleep`, `exercise`, `training` and
+`therapy` — which is how articles name their *outcome* — so "Magnesium glycinate" / "magnesium
+for sleep quality", "Melatonin" / "melatonin for sleep" and "Whey protein" / "protein for muscle
+after exercise" all drew a towel and a timer. Since topics routinely name an outcome that was
+the common path for supplements, not an edge case. Within-list order cannot fix it; only the
+field tiering can. **`negative_prompt` is close to a no-op on FLUX.1-schnell** — it is
+guidance-distilled at `guidance_scale=0.0`, so the exclusions ride in the *positive* prompt and
+must stay there; the tests fail if they are "tidied" into the negative channel. And the
+exclusions are deliberately narrower than they look — *branded* packaging, and no ban on
+numbers — because several motifs name a jar, a tube or a timer, and a blanket ban contradicted
+them on every render.
 
 ## Invariants — do not route around these
 
@@ -433,7 +566,21 @@ generated by a separate model call, so card and article cannot contradict each o
   is from its first bytes (never the filename or Content-Type) and **SVG is refused** — it is
   a script host, and this directory is served from the app's own origin. A document may only
   reference media the store wrote; that is checked on autosave *and* again in
-  `ReviewService.approve()`. Do not relax either check to make a paste work.
+  `ReviewService.approve()`. Do not relax either check to make a paste work. The pipeline
+  writes here too now, through the same `store_image` and under the same checks —
+  `media.py::image_node` builds the node and `tests/test_media.py` pins that
+  `assert_media_is_ours` accepts it, because a writer and a checker that disagree produce an
+  article whose *first* autosave is refused. Note `store_image` itself has **no size gate**:
+  the upload route enforces `MEDIA_MAX_BYTES`, and a generated image never passes through it,
+  so `services/illustration.py` is the only ceiling on that path.
+- **`IMAGE_GEN_KEY` must be a fine-grained HF token with "Make calls to Inference Providers".**
+  A plain read token authenticates and then 403s on the first render, which reads nothing like
+  a permissions problem until you see the message. No key at all is a supported state, not a
+  broken one — `imagery/factory.py` returns `None`, the API still boots, runs still succeed,
+  and drafts come out text-only. Two dependencies come with this (`huggingface-hub`, `pillow`);
+  both were already present *transitively* via `voyageai`, so an undeclared version works in
+  every local venv and fails only in `docker compose up backend`, which installs from
+  `pyproject.toml`. Same trap as `python-multipart`.
 
 ## Deliberately out of scope
 
@@ -445,8 +592,8 @@ so the FK direction is already settled.
 **What has and has not met a real response** (checked 2026-08-21; keep this honest, it is what
 tells you which code to trust):
 
-- **Exercised.** PubMed and OpenAlex parsing, and the full six-stage pipeline — two runs on
-  2026-08-20 produced 92 cached sources and two articles.
+- **Exercised.** PubMed and OpenAlex parsing, and the full pipeline as it then was (six stages,
+  before `illustrate`) — two runs on 2026-08-20 produced 92 cached sources and two articles.
 - **Exercised, contrary to what this file said until 2026-08-21: Voyage.** All 92 rows carry
   `sources.embedding_model = 'voyage-4'` with populated 1024-d vectors, created inside those
   two runs. That string is written from `VoyageEmbeddingProvider.model_id` and from nowhere
@@ -464,6 +611,14 @@ tells you which code to trust):
 - **Not exercised.** Anthropic: the client and its token accounting are written against
   documented response shapes only. Europe PMC and Semantic Scholar are wired but have not been
   enabled in a run (`ENABLED_PROVIDERS=pubmed`).
+- **Not exercised, and blocked rather than untried (checked 2026-08-24): FLUX.1-schnell.** A
+  real call was made and routed correctly — HF's router reached `nscale` — and came back
+  `403 Forbidden: This authentication method does not have sufficient permissions to call
+  Inference Providers`. So the request shape, the routing and the error path are confirmed
+  against a live endpoint; **no image has been decoded, encoded to WebP, or stored from a real
+  response.** `_encode_webp` and the dimension read-back are the two pieces that have only ever
+  seen a Pillow image made by the test suite. The fix is a token permission, not code — see the
+  config trap above.
 
 That data corrected the classifier twice (DESIGN.md §4) and left one thing open.
 

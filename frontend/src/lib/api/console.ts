@@ -6,6 +6,9 @@ import { apiFetch, qs, setAuthToken } from "./client";
 import type {
   ArticleDetail,
   ArticleStatus,
+  CardPreview,
+  GeneratedImagery,
+  IllustrationFrame,
   Subject,
   MediaUpload,
   QueueItem,
@@ -19,6 +22,8 @@ export const consoleKeys = {
   /** Prefix of every tab's queue — invalidate this when a run lands a draft. */
   queues: ["console", "queue"] as const,
   article: (id: string) => ["console", "article", id] as const,
+  /** The derived feed tile. Never reused across an edit — see `fetchCardPreview`. */
+  card: (id: string) => ["console", "card", id] as const,
   runs: ["console", "runs"] as const,
   me: ["console", "me"] as const,
 };
@@ -139,6 +144,54 @@ export async function uploadMedia(file: File): Promise<MediaUpload> {
   const form = new FormData();
   form.append("file", file);
   return apiFetch<MediaUpload>("/console/media", { method: "POST", body: form });
+}
+
+/**
+ * The feed tile this draft would publish as.
+ *
+ * Server-derived by the same `derive_card()` the publish path runs, so the
+ * preview cannot drift from what lands on the feed. That is the whole reason
+ * this is a request rather than a function in this file: a TypeScript port of
+ * the derivation rules would be a second implementation, free to disagree with
+ * the first — and the preview would then be reassuring rather than useful.
+ *
+ * Fetched on demand rather than folded into `fetchArticleDetail`, because the
+ * two have opposite caching lives: a draft is loaded once per review session,
+ * while a tile has to be right at the moment somebody looks at it. Flush
+ * autosave before calling, the way approving does.
+ */
+export async function fetchCardPreview(id: string): Promise<CardPreview> {
+  return apiFetch<CardPreview>(`/console/articles/${id}/card`);
+}
+
+/**
+ * Draw this article's pictures again, with a new seed.
+ *
+ * `frames` picks which — both by default, or just the article's own `lead` or
+ * just the feed tile's `cover`. They are seen in different places and judged
+ * separately, so a reviewer who likes one and not the other should not have to
+ * replace both to fix one.
+ *
+ * The one console action that bills an external provider per press, so the
+ * server keeps a spend budget in front of it and answers 429 with a
+ * `Retry-After` when it is spent. The budget counts renders, so asking for one
+ * frame costs half of asking for two.
+ *
+ * Returns both frames and writes neither into the document: the caller swaps
+ * the editor's image node to `lead.src` and lets autosave persist it, so the
+ * new path goes through the server's media check like any other edit. A
+ * one-frame redraw on an article with no imagery at all answers 409 rather
+ * than quietly drawing both — the reviewer asked for one render and would
+ * otherwise be billed for two.
+ */
+export async function regenerateIllustration(
+  id: string,
+  frames: IllustrationFrame[] = ["lead", "cover"],
+): Promise<GeneratedImagery> {
+  return apiFetch<GeneratedImagery>(`/console/articles/${id}/illustration`, {
+    method: "POST",
+    body: JSON.stringify({ frames }),
+  });
 }
 
 /** Enqueue a topic. Returns 202 — generation takes minutes. STUB. */

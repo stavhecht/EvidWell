@@ -22,6 +22,7 @@ from app.security.auth import (
     decode_token_subject,
 )
 from app.security.login_throttle import InMemoryLoginThrottle, LoginThrottle
+from app.security.spend_throttle import InMemorySpendThrottle, SpendThrottle
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -93,6 +94,23 @@ def get_contact_throttle() -> LoginThrottle:
 
 
 ContactThrottleDep = Annotated[LoginThrottle, Depends(get_contact_throttle)]
+
+#: And a fourth counter, of a different kind, for regenerating article imagery.
+#:
+#: Not a ``LoginThrottle`` instance, because it is not counting the same thing.
+#: The three above count *failures* on unauthenticated endpoints and are keyed
+#: by IP and address; this one counts *successes* on an authenticated one and
+#: is keyed by reviewer id. What it protects is the project's inference credit
+#: rather than the process — regenerate is the only console action that bills
+#: an external provider per press. See ``security/spend_throttle.py``.
+_illustration_throttle: SpendThrottle = InMemorySpendThrottle()
+
+
+def get_illustration_throttle() -> SpendThrottle:
+    return _illustration_throttle
+
+
+IllustrationThrottleDep = Annotated[SpendThrottle, Depends(get_illustration_throttle)]
 
 
 def client_ip(request: Request) -> str:

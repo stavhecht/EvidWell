@@ -39,6 +39,14 @@ A fifth, structural rather than ethical: **the feed card is derived, never gener
 from the article body. There is no separate card generation call, so card and article cannot
 contradict each other.
 
+The generated cover (§3.4c) is the one thing on a card that is not literally in the body, and
+it is held to the same statement by a pairing rule rather than exempted from it: `derive_card`
+uses the portrait frame **only while the document's first image is still the landscape one it
+belongs to**. The tile's picture was drawn for the article the reviewer is publishing, or the
+card falls back to the body — it is never an independently chosen image. Note how narrow the
+claim is: the two frames are two renders of one subject, not one photograph cropped twice, and
+a reviewer may redraw either alone, so they need not even come from one generation (§3.4c).
+
 **Where to check each one:**
 
 | Invariant | Implementation | Test |
@@ -47,7 +55,7 @@ contradict each other.
 | #2 grounded | `evidence/validation.py::validate_draft` | `test_invariants.py` — hallucinated handle, unresolvable source, uncited beat |
 | #3 evidence caps verdict | `evidence/grading.py::max_verdict_for_claims` | `test_invariants.py` — including that an *uncited* strong source cannot raise the ceiling — and `test_evidence_quorum.py` for the two-source rule and per-claim scoping |
 | #4 immutable draft | DB trigger `articles_original_content_immutable` | `test_db_invariants.py` |
-| card derived | `services/card.py::derive_card` | `test_content.py` — card verdict always equals article verdict |
+| card derived | `services/card.py::derive_card` | `test_content.py` — card verdict always equals article verdict; the generated cover is dropped when the lead image is replaced, removed, or displaced |
 
 ---
 
@@ -79,13 +87,13 @@ contradict each other.
         ┌───────────┴────────────────────────────────────┐
         │  Pipeline worker (local process)               │
         │  extract → retrieve → rank → synthesize        │
-        │          → validate → persist                  │
+        │          → illustrate → validate → persist     │
         └───────────┬────────────────────────────────────┘
                     │
      ┌──────────────┴───────────────┐
      │ PubMed · Europe PMC ·        │   Claude (extraction, synthesis)
      │ Semantic Scholar · OpenAlex  │   Voyage (embeddings)
-     └──────────────────────────────┘
+     └──────────────────────────────┘   Hugging Face (illustration)
 ```
 
 Two surfaces, one backend, one database. They share nothing but the `articles` table, the API
@@ -358,12 +366,19 @@ only appears in the SQL this document and `services/card.py` both name as the me
 is the worst place for it to first surface — enforcement that is documented but not actually in
 force reads exactly like enforcement that works.
 
-### 3.4b Reviewer media: uploaded, never linked
+### 3.4b Article media: uploaded or generated, never linked
 
-A reviewer can add a picture from their own machine and a YouTube video to a draft. Both are
-block-level TipTap nodes beside the beat paragraphs, so neither disturbs the three beats —
-those are addressed by `attrs.beat`, and a picture above beat 1 does not change which
+A picture reaches a draft two ways: a reviewer adds one from their own machine, or the
+pipeline's `illustrate` stage draws one (§3.4c). A reviewer can also embed a YouTube video.
+All are block-level TipTap nodes beside the beat paragraphs, so none disturbs the three beats
+— those are addressed by `attrs.beat`, and a picture above beat 1 does not change which
 paragraph the feed card is derived from.
+
+The two sources of a picture are not two code paths. A generated image goes through the same
+`store_image`, produces the same content-addressed `src`, is built into a node by
+`media.py::image_node`, and is re-checked by the same `assert_media_is_ours` on every autosave
+and again at approve. Once it is in the document it is an ordinary picture: the reviewer can
+resize it, re-wrap it, replace it or delete it with the controls that already exist.
 
 Two rules, enforced in `services/media.py` and re-checked at approve:
 
@@ -418,6 +433,173 @@ that element is the one in the editor's flow, so it is the one that has to float
 `attrs` option on `addNodeView()` rather than styling the component's own root. Dragging the
 corner writes the width straight to that element's custom property and commits a single
 attribute on release, so one gesture costs one undo step and one autosave rather than sixty.
+
+### 3.4c Generated illustration: two frames, one locked prompt builder, no claim
+
+Every draft gets two pictures from `black-forest-labs/FLUX.1-schnell`, drawn in stage 5 by
+`pipeline/steps/illustrate.py` and stored through the ordinary media store. A landscape **lead**
+goes into `original_content` as a normal image node; a portrait **cover** lives only in
+`articles.generated_imagery` and is what the feed tile shows. Two frames rather than one because
+every shape `tileRatio()` produces is 1:1 or taller, so `object-cover` fits a landscape picture
+to a tile by discarding its sides. §1's fifth rule survives through the pairing predicate
+described there.
+
+**The two frames are not the same photograph, and the docs said otherwise until it was
+measured.** A seed initialises latent noise shaped like the frame, so one seed at two sizes is
+two compositions — and the provider `auto` currently resolves to (`nscale`, reached through HF's
+OpenAI-shaped images endpoint, which has no seed field) ignores seeding altogether: two
+identical requests came back different on 2026-08-24. What survives is the useful half. Both
+frames were drawn for one article under the same locked prompt builder, which forbids either
+from asserting anything — so there is no composition the tile can promise and the article
+withhold. The stronger guarantee is available if it is ever wanted: render portrait once and
+crop the landscape with Pillow. It halves the cost, and the centred-subject-in-negative-space
+style makes the crop safe. It was not taken because each frame composed for its own shape looks
+better, and the weaker guarantee is sufficient for the rule it has to keep.
+
+**Either frame can be redrawn on its own**, and the same argument is what licenses it. A
+reviewer can like the picture in the prose and not the one on the tile; the two are seen in
+different places and judged separately, so `POST /console/articles/{id}/illustration` takes a
+`frames` list and draws only what was asked for, keeping the rest from the article's current
+record. Nothing is written back until every requested frame has been drawn and stored — a cover
+saved beside a lead that then failed is the one state `derive_card` cannot reason about.
+
+The cost of that freedom is that provenance had to move off the pair and onto the frames.
+`GeneratedImage` carries its own `prompt`, `negative_prompt`, `model` and `seed`; `Illustration`
+is now just `lead` + `cover`. After a one-frame redraw the two genuinely come from two prompts,
+and a single shared field would be a true record of one picture and a false record of the other
+— which is worse than none, because it still answers when asked. Rows written before the split
+keep their top-level fields and a `model_validator` pushes them down onto both frames on read,
+so no migration is needed and no history is discarded; a frame's own value always wins.
+
+**A generated picture must not become a claim.** This is the design constraint, and it drives
+everything about `imagery/prompt.py`. An illustration of someone visibly healthier beside a
+supplement asserts efficacy no citation backs; a clinic or a lab bench borrows authority the
+article has not earned; a before-and-after pair states a result outright. None needs a caption
+to be read as an argument, and an image is the register readers scrutinise least. So the prompt
+is assembled here from fixed parts rather than written by a model, and the exclusions are
+hard-coded.
+
+Three consequences. **No second model call writes the prompt**: asking an LLM for a nice image
+prompt reintroduces the ungrounded generation this pipeline exists to prevent, one layer down
+and unvalidated. **The verdict never reaches it, and neither does the headline**, which is where
+the verdict usually is — an illustration that looks hopeful for `supported` and bleak for `weak`
+is a scoreboard drawn in pictures, composed before a human approved the verdict. And **the
+exclusions ride in the positive prompt**: FLUX.1-schnell is guidance-distilled and runs at
+`guidance_scale=0.0`, where a CFG-style `negative_prompt` has nothing to act on. It is sent
+anyway, for the providers and checkpoints where it bites, but it is not what enforces any of
+this — the positive prompt is.
+
+**Locked does not mean identical, and the first version got that wrong.** It fixed the motif,
+the camera angle, the arrangement and the light, leaving the subject noun as the only variable —
+three words in eighty. On real renders that produced a feed where every article was white pills
+on warm beige: the prompt described a space so narrow that different sampler noise still landed
+in the same picture. The fix is not more randomness at the sampler, and cannot be — the provider
+ignores `seed` entirely, so those renders already came from different noise.
+
+So the prompt now separates **treatment from composition**. `TREATMENT` — palette, matte
+surfaces, register — is fixed and applies to every render; framing, arrangement, light and
+surface are selected from four tuples by the seed. Exactly 500 combinations, all of them the
+same magazine. Locking the treatment is what makes a feed read as one publication; locking the
+composition as well is what made it read as one photograph.
+
+**The strides are a mixed radix**, each the product of the axis lengths before it, so the four
+axes are exact digits of `seed % 500` and every combination appears once per 500 consecutive
+seeds. They were coprime odd numbers `(1, 7, 53, 401)` on the theory that coprimality *between
+the strides* buys independence *between the axes*. It does not, and the failure is arithmetic
+rather than statistical: with stride 7 against a 5-option axis, writing `seed = 35q + r` gives
+`(seed % 5, seed // 7 % 5) == (r % 5, r // 7)` — 35 values of `r` landing on 25 pairs, so 10
+framing×arrangement combinations came up exactly twice as often as the other 15. Measured over
+400k random seeds: χ² 49073 on 16 degrees of freedom, commonest pair 23008 against 11272 for the
+rarest; 511 on 499 under the radix. The quantity that matters is each stride against the product
+of the *preceding axis lengths*, not the strides against each other. `_STRIDES` is therefore
+derived from `_AXIS_RADIX` rather than written out, so it cannot fall out of step when someone
+adds a sixth framing.
+
+That also gives the seed real work. It selects *our* prompt rather than the provider's noise, so
+a retried run composes the same photograph and Regenerate composes a different one — the
+property `seed_for_run` was written for and could not deliver while it depended on the provider
+honouring it.
+
+**A person may appear, on the one path where the subject is an activity.** The distinction is
+depicting the subject versus depicting a result. A protocol *is* something someone does, so a
+body mid-stretch on a mat or a forearm mid-lift photographs what the article is about and
+asserts nothing beyond "this is the thing we looked at". A body beside a supplement jar, a bowl
+of food or a tube of cream is the case the rule above describes: nothing in frame is doing
+anything, so the only thing the person can be there to communicate is an outcome.
+
+So people are gated on the motif — `_PEOPLE_MOTIFS`, currently `PROTOCOL` alone — rather than
+switched on globally, and every other subject renders the still life unchanged. `DEVICE` is the
+one with a real argument on both sides (a hand on a massager is use; a person glowing beside a
+red-light panel is efficacy) and is deliberately left out until someone wants to make it. Two
+guards come with the gate, both because being wrong here costs far more than a plain still life:
+
+- **Only a confident signal opens it** — a reviewer's explicit `subject`, or a motif matched
+  against `product` itself. A motif inferred from the *topic* does not, because topics name
+  outcomes and `sleep` is a protocol word: "magnesium for sleep" would otherwise have put a
+  body in a supplement article, which is precisely the refused picture. Uncertainty falls back
+  to objects, which is always safe.
+- **`EXCLUSIONS_WITH_PEOPLE` replaces the body ban rather than dropping it.** Read the two side
+  by side: the clinic, text, branding and before-and-after clauses are identical, because none
+  of them was ever about whether a person was in frame. What changes is that "no body" becomes a
+  much narrower ban on the body being *displayed* — a physique, a transformation, eye contact
+  with the camera. Those are the forms in which a person states a result, and they are what the
+  blanket rule was actually buying.
+
+The people path carries its own composition vocabulary (`_PEOPLE_FRAMINGS`, `_POSES`,
+`_PEOPLE_SETTINGS`; `_LIGHTS` is shared) because the still-life words do not transfer — a
+flat-lay of a human being is a mortuary photograph — but the same option counts, so the mixed
+radix and the 500 combinations hold on both. `TREATMENT` is shared unchanged, and that is what
+keeps a yoga photograph in the same magazine as the pill still lifes instead of drifting into
+stock fitness photography. The genre word moved out of `TREATMENT` to `_Path.genre` in the
+process: `editorial still-life photograph` was a composition clause hiding in the treatment
+string, and it flatly contradicted a motif with a person in it.
+
+The motif is inferred from the article's text when no reviewer has classified the draft, which
+is every pipeline call. **This is not a classification and must never become one**: it decides
+which objects are photographed, is never displayed, and never writes `articles.subject`. The
+asymmetry is what licenses it — a wrong subject is a confident false statement on the page, a
+wrong motif is a slightly odd still life.
+
+**Precedence between the hints is by field, not by position in the table.** `infer_motif_subject`
+takes product, then topic and ingredients, and stops at the first field that matches anything.
+Searching them concatenated — which is what it did — lets a vague word in a low-trust field
+outrank a precise one in a high-trust field: `SUPPLEMENT` is checked last and `PROTOCOL` holds
+`sleep`, `exercise` and `training`, which is how articles name their *outcome*. "Magnesium
+glycinate" / "magnesium for sleep quality" and "Whey protein" / "protein for muscle after
+exercise" both resolved to `PROTOCOL` and drew a towel and a timer. Topics routinely name an
+outcome, so that was the ordinary path for supplements, and no reordering within the table could
+have fixed it. It is also the tier the people gate above reads: only `product` is trusted enough
+to put a body in frame.
+
+**Failure is never fatal.** A picture is decorative and an article without one is publishable —
+the feed already draws a typographic tile, which is the resting state of the design rather than
+a degraded one. `IllustrateStage` catches everything and records a `cause` in
+`pipeline_stage_runs.metrics`. This is the deliberate inverse of §4's throttle rule, and the
+difference is visibility: recall lost to a 429 produces a more cautious verdict that reads as a
+correct answer, whereas a missing picture is on the reviewer's next screen. Fail on the
+degradations nobody can see.
+
+**Cost is out of the ledger**, with embeddings and for a stronger reason: an image is billed per
+render and `pipeline_stage_runs` prices four token columns. `record_usage` is never called here.
+
+A reviewer who dislikes a picture has two moves, both ordinary: edit or delete it in the editor
+like any other image, or redraw it with a fresh seed through
+`POST /console/articles/{id}/illustration`. Three controls sit on that one route, each placed
+where its effect is visible. **Regenerate picture** and **…and the tile** are in the editor
+toolbar, beside Image, because that is where the article's own picture is. **Redraw tile** is in
+the *Show draft* overlay, because the tile is only visible there — a button that spends money
+and changes nothing on screen is a button reviewers press twice. The overlay offers it only when
+the tile is actually showing a generated cover; with the pairing broken by a reviewer's own
+picture, a redraw would succeed, bill a render and change nothing.
+
+That route is the only console action that bills an external provider per press, so it sits
+behind `security/spend_throttle.py` — a per-reviewer budget that rejects with `Retry-After`
+rather than sleeping, checked before the render for the same reason the login throttle is
+checked before the Argon2 hash. **It counts renders, not presses** (24 per ten minutes), so a
+one-frame redraw costs half a two-frame one; charging the cheaper action at the expensive
+action's rate is the wrong incentive on the one control that exists to stop needless spending.
+The route also uses the article's `subject` when one is set, which the pipeline cannot:
+`subject` is reviewer-set and the article row does not exist when `illustrate` runs.
 
 ### 3.5 Embeddings: Voyage, behind an interface
 

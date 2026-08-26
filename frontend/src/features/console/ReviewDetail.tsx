@@ -25,7 +25,7 @@
  * it where a reviewer's hand rests *before* they have read anything.
  */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
 
@@ -39,6 +39,7 @@ import {
 import { VerdictMark } from "@/features/evidence/VerdictMark";
 import { VERDICT_LABELS } from "@/features/evidence/labels";
 import { ArticleEditor } from "./ArticleEditor";
+import { FeedPreview } from "./FeedPreview";
 import { SubjectPicker } from "./SubjectPicker";
 import { SourcesPanel, ValidationSummary } from "./SourcesPanel";
 import { SECTION_LABEL } from "./controls";
@@ -64,6 +65,7 @@ import {
   REVIEW_TOP_BAR,
   SIDEBAR_SOURCES,
   STATUS_DIVIDER,
+  TOP_BAR_ACTION,
 } from "./styles";
 import { ROUTE_ERROR_MESSAGE, ROUTE_MESSAGE } from "@/features/shell/styles";
 import { useAutosave } from "./useAutosave";
@@ -78,6 +80,31 @@ export function ReviewDetail() {
   const [focusedHandle, setFocusedHandle] = useState<string | null>(null);
   const [rejectReason, setRejectReason] = useState("");
   const [reasonMissing, setReasonMissing] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const previewTrigger = useRef<HTMLElement | null>(null);
+
+  /**
+   * Preview exactly what the reviewer is looking at.
+   *
+   * The flush is the same one `approve` does, for the same reason: the server
+   * derives the tile from `edited_content`, so an unflushed edit would be
+   * previewed as though it had not been made. Its result is deliberately not
+   * checked, unlike in `goBack` — leaving loses work, previewing loses nothing,
+   * and a failed save already blocks Approve and says so in the editor.
+   */
+  async function openPreview() {
+    previewTrigger.current = document.activeElement as HTMLElement | null;
+    await autosave.flush();
+    void queryClient.invalidateQueries({ queryKey: consoleKeys.card(id) });
+    setPreviewOpen(true);
+  }
+
+  function closePreview() {
+    setPreviewOpen(false);
+    // Back to the button that opened it, or the reviewer's place on the page
+    // is wherever the browser decides after the dialog leaves the tree.
+    previewTrigger.current?.focus();
+  }
 
   const { data: article, status } = useQuery({
     queryKey: consoleKeys.article(id),
@@ -164,7 +191,18 @@ export function ReviewDetail() {
         {/* Identity and sign-out live in `ReviewHeader` now that the desk
             has its own chrome — two sign-out buttons on one screen is one
             more than a reviewer needs. */}
+        <button
+          onClick={() => void openPreview()}
+          title="See the feed tile this draft would publish as"
+          className={TOP_BAR_ACTION}
+        >
+          Show draft
+        </button>
       </div>
+
+      {previewOpen ? (
+        <FeedPreview articleId={id} onClose={closePreview} />
+      ) : null}
 
       <div className={REVIEW_COLUMNS}>
         <section className={REVIEW_BODY_COLUMN}>
@@ -199,6 +237,7 @@ export function ReviewDetail() {
             <ArticleEditor
               content={article.editedContent ?? article.originalContent}
               autosave={autosave}
+              articleId={article.id}
               onCitationClick={setFocusedHandle}
             />
           </div>

@@ -12,7 +12,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -137,12 +137,68 @@ class Settings(BaseSettings):
     #: limit in the error, so raising it is a config change, not a code one.
     media_max_bytes: int = 8 * 1024 * 1024
 
+    # --- article imagery (generated) ---
+    #: 'huggingface' | 'none'. Set to 'none' to draft text-only articles
+    #: without touching the provider at all.
+    image_provider: str = "huggingface"
+    #: The Hugging Face token, from IMAGE_GEN_KEY. It needs the "Make calls to
+    #: Inference Providers" permission — a plain read token authenticates and
+    #: then 403s on the first render. **An empty key is not a startup error**:
+    #: ``imagery/factory.py`` returns no client and drafts come out text-only,
+    #: because a picture is decorative and the API must still boot for review,
+    #: publishing and the public feed.
+    image_gen_key: str = ""
+    image_model: str = "black-forest-labs/FLUX.1-schnell"
+    #: Which inference provider serves the model. 'auto' picks the fastest
+    #: available and fails over; name one (nscale, fal-ai, replicate, together)
+    #: for consistent latency and billing.
+    image_inference_provider: str = "auto"
+    #: Generous: two renders run back to back and a cold provider can take a
+    #: while to answer the first one.
+    image_timeout_seconds: float = 120.0
+    #: FLUX.1-schnell is distilled for 1-4 steps at guidance 0.0 — these are the
+    #: model card's numbers, not tuning knobs. Raising steps costs credits and
+    #: buys nothing on a *schnell* checkpoint.
+    image_steps: int = 4
+    image_guidance_scale: float = 0.0
+    #: The article's lead image: landscape, for a 760px prose column.
+    image_lead_width: int = 1216
+    image_lead_height: int = 832
+    #: The feed tile's cover: portrait. 3:4 on purpose — ``tileRatio()`` in
+    #: ``frontend/src/features/feed/ArticleCard.tsx`` hashes a slug into 3/4,
+    #: 1/1, 4/5 or 2/3, and 3:4 sits nearest the middle of that spread, so
+    #: ``object-cover`` takes a modest centre crop on every tile rather than a
+    #: severe one on half of them.
+    image_cover_width: int = 864
+    image_cover_height: int = 1152
+
     @field_validator("cors_origins", "enabled_providers", mode="before")
     @classmethod
     def _split_csv(cls, value: object) -> object:
         """Allow comma-separated env values as well as JSON lists."""
         if isinstance(value, str) and not value.strip().startswith("["):
             return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator(
+        "image_lead_width",
+        "image_lead_height",
+        "image_cover_width",
+        "image_cover_height",
+    )
+    @classmethod
+    def _dimension_is_a_multiple_of_16(cls, value: int, info: ValidationInfo) -> int:
+        """Diffusion latents are 1/8 scale over a patch grid; 16 is the safe step.
+
+        Providers disagree about what to do with a size that does not divide:
+        some 400, some silently round and return an image that is not the shape
+        that was asked for — which reaches the feed as a tile cropped wrong,
+        with nothing anywhere saying why. Refusing at startup names the number.
+        """
+        if value <= 0 or value % 16:
+            raise ValueError(
+                f"{info.field_name} must be a positive multiple of 16, got {value}"
+            )
         return value
 
     @model_validator(mode="after")

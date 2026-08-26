@@ -182,6 +182,35 @@ def store_image(data: bytes, *, root: Path) -> StoredImage:
     )
 
 
+def image_node(src: str, alt: str) -> dict[str, Any]:
+    """The document node for a stored image, at full column width.
+
+    Lives here rather than in ``tiptap.py`` for two reasons. This module owns
+    ``MEDIA_SRC_RE``, ``MEDIA_ALIGNMENTS`` and the width bounds, so the node it
+    builds is exactly the shape it validates a few lines below — the two cannot
+    drift apart while they are in one file. And ``media.py`` imports
+    ``tiptap.py``, so the dependency in the other direction would be a cycle.
+
+    Used by the pipeline to place a generated lead image; a reviewer's uploads
+    are built client-side by ``useMediaInsert.ts`` to the same shape. Both are
+    then re-checked by ``assert_media_is_ours``, which is the point: nothing is
+    trusted because of where it came from.
+    """
+    return {
+        "type": "image",
+        "attrs": {
+            "src": src,
+            "alt": alt,
+            # Explicit rather than omitted. Absent is valid — every article
+            # written before media could be laid out has neither attribute —
+            # but a node this system writes should say what it means, and the
+            # editor's controls read these two to render their initial state.
+            "width": MEDIA_MAX_WIDTH,
+            "align": "none",
+        },
+    }
+
+
 def assert_media_is_ours(doc: dict[str, Any]) -> None:
     """Every media node points at something we control, laid out how we allow.
 

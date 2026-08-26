@@ -1,8 +1,9 @@
 /**
  * The review queue.
  *
- * Pending review is oldest-first, deliberately: newest-first lets a
- * slow-moving queue strand old drafts behind fresher ones forever.
+ * Every tab is newest-first: the reviewer is usually here for the draft that
+ * just finished. Old drafts stranding behind fresher ones is a real cost, but
+ * each row states its own age ("queued 3 days ago"), so it stays visible.
  *
  * The "Failed validation" tab is not an error log. Those drafts can never be
  * approved, but a run of them is the signal that the synthesis prompt has
@@ -102,7 +103,7 @@ export function ReviewQueue() {
         <div>
           <h1 className={QUEUE_TITLE}>Review queue</h1>
           <p className={QUEUE_STANDFIRST}>
-            Oldest first. Nothing publishes without an approval recorded against a
+            Newest first. Nothing publishes without an approval recorded against a
             named reviewer.
           </p>
         </div>
@@ -140,10 +141,10 @@ export function ReviewQueue() {
         </p>
       ) : (
         <ul className={QUEUE_LIST}>
-          {/* Above the queue, against its oldest-first order: these are the
-              newest thing here, and the reviewer who just submitted a topic is
-              looking for exactly this row. They are also the only rows whose
-              state changes while being looked at. */}
+          {/* Above the queue, continuing its newest-first order: these have not
+              finished, so they are newer than every row below, and the reviewer
+              who just submitted a topic is looking for exactly this row. They
+              are also the only rows whose state changes while being looked at. */}
           {generating.map((run) => (
             <PendingRunRow key={run.id} run={run} />
           ))}

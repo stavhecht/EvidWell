@@ -57,11 +57,20 @@ class MalformedBodyError(ValueError):
     """
 
 
-def body_text_to_doc(body: ArticleBody) -> dict[str, Any]:
+def body_text_to_doc(
+    body: ArticleBody, *, lead_image: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Parse the three beats into a TipTap document.
 
     Beats are tagged ``attrs.beat`` 1–3 so the editor and the card deriver can
     address them without positional guessing.
+
+    ``lead_image`` — built by ``services/media.py::image_node`` — is prepended
+    as a sibling of the beat paragraphs, which is the same place a reviewer's
+    own image block sits (DESIGN.md §3.4b). Prepending is safe precisely
+    *because* beats are addressed by ``attrs.beat``: ``beat_text`` still finds
+    beat 1 for the card excerpt, and the walks below skip a node with no
+    ``content`` without producing an empty paragraph.
 
     Raises:
         MalformedBodyError: unbalanced brackets, or a marker that isn't
@@ -72,13 +81,13 @@ def body_text_to_doc(body: ArticleBody) -> dict[str, Any]:
         body.beat_2_evidence,
         body.beat_3_bottom_line,
     ]
-    return {
-        "type": "doc",
-        "content": [
-            _paragraph(text, beat_number)
-            for beat_number, text in enumerate(beats, start=1)
-        ],
-    }
+    blocks: list[dict[str, Any]] = [
+        _paragraph(text, beat_number)
+        for beat_number, text in enumerate(beats, start=1)
+    ]
+    if lead_image is not None:
+        blocks.insert(0, lead_image)
+    return {"type": "doc", "content": blocks}
 
 
 def _paragraph(text: str, beat: int) -> dict[str, Any]:

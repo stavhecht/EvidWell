@@ -19,6 +19,7 @@ from app.domain.enums import ArticleStatus
 from app.domain.models import Article, ArticleSource
 from app.evidence.validation import summarise_failures, validate_draft
 from app.pipeline.stages import PipelineContext, StageError, StageName
+from app.services.media import image_node
 from app.services.tiptap import MalformedBodyError, body_text_to_doc
 
 logger = logging.getLogger(__name__)
@@ -88,7 +89,19 @@ class PersistStage:
         # A body we cannot render is a draft problem, not a system problem —
         # record it as a validation failure rather than raising.
         try:
-            content = body_text_to_doc(ctx.draft.body)
+            content = body_text_to_doc(
+                ctx.draft.body,
+                # Above beat 1, inside `original_content`, as an ordinary image
+                # node. So the picture is part of the immutable draft the
+                # reviewer is shown, and removing it is an edit like any other
+                # rather than a setting somewhere. Beats stay addressable —
+                # `beat_text` reads `attrs.beat`, never position.
+                lead_image=(
+                    image_node(ctx.illustration.lead.src, ctx.illustration.lead.alt)
+                    if ctx.illustration is not None
+                    else None
+                ),
+            )
         except MalformedBodyError as exc:
             content = {"type": "doc", "content": []}
             report = report.model_copy(
@@ -121,6 +134,15 @@ class PersistStage:
             # it — human edits go to edited_content.
             original_content=content,
             edited_content=None,
+            # Both frames plus the prompt, model and seed that made them. The
+            # cover is not in the document, so this column is the only record
+            # of it — and the only place `derive_card` can find it at publish
+            # time. NULL whenever ILLUSTRATE produced nothing, which is normal.
+            generated_imagery=(
+                ctx.illustration.model_dump(mode="json")
+                if ctx.illustration is not None
+                else None
+            ),
             evidence_grade=report.best_evidence_grade,
             validation_report=report.model_dump(mode="json"),
             pipeline_run_id=ctx.run_id,
@@ -169,6 +191,7 @@ class PersistStage:
                 "status": str(article_status),
                 "source_links": len(seen),
                 "cited_sources": len(cited),
+                "illustrated": ctx.illustration is not None,
             },
         )
 

@@ -208,6 +208,24 @@ class Article(Base):
     card_image: Mapped[str | None] = mapped_column(Text)
     card_image_alt: Mapped[str | None] = mapped_column(Text)
 
+    #: Both frames of the pipeline's generated illustration, plus the prompt,
+    #: model and seed that produced them — see ``domain/contracts.Illustration``.
+    #: NULL is normal: every article written before this existed, every run with
+    #: no image key, and every run whose generation failed.
+    #:
+    #: ``lead`` is *also* in ``original_content`` as an ordinary image node, so
+    #: it is edited and checked like any other picture. ``cover`` is not in the
+    #: document at all — it is the portrait framing for the feed tile, and this
+    #: column is the only record of it. ``services/card.py`` will only use it
+    #: while ``lead.src`` is still the document's first image; that pairing is
+    #: what keeps the tile a reframing of the article's own picture rather than
+    #: an independent one.
+    #:
+    #: ``NullableJSONB``, not bare ``JSONB``. It matters here specifically:
+    #: ``derive_card`` tests this value for truthiness, and the JSON literal
+    #: ``null`` a bare column would store is a dict-shaped truthy value in SQL.
+    generated_imagery: Mapped[dict | None] = mapped_column(NullableJSONB)
+
     #: Set by a reviewer, not by the pipeline. See ``Subject``.
     subject: Mapped[Subject | None] = mapped_column(pg_enum(Subject, "subject"))
 

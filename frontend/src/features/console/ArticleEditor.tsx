@@ -34,17 +34,21 @@ import {
 } from "./styles";
 import type { Autosave } from "./useAutosave";
 import { ACCEPTED_IMAGE_TYPES, useMediaInsert, type MediaInsert } from "./useMediaInsert";
+import { useIllustration, type Illustration } from "./useIllustration";
 import type { TipTapDoc } from "@/types/api";
 
 interface Props {
   content: TipTapDoc;
   autosave: Autosave;
+  /** Which draft this is. Only the regenerate control needs it. */
+  articleId: string;
   /** Clicking a citation chip scrolls the sources panel to that handle. */
   onCitationClick?: (handle: string) => void;
 }
 
-export function ArticleEditor({ content, autosave, onCitationClick }: Props) {
+export function ArticleEditor({ content, autosave, articleId, onCitationClick }: Props) {
   const media = useMediaInsert();
+  const illustration = useIllustration(articleId);
 
   const editor = useEditor({
     extensions: [
@@ -108,11 +112,16 @@ export function ArticleEditor({ content, autosave, onCitationClick }: Props) {
 
   return (
     <div>
-      <Toolbar editor={editor} media={media} />
+      <Toolbar editor={editor} media={media} illustration={illustration} />
       <EditorContent editor={editor} className={EDITOR_SURFACE} />
       {media.error ? (
         <p role="alert" className={MEDIA_ERROR}>
           {media.error}
+        </p>
+      ) : null}
+      {illustration.error ? (
+        <p role="alert" className={MEDIA_ERROR}>
+          {illustration.error}
         </p>
       ) : null}
       <div className={EDITOR_STATUS_ROW}>
@@ -159,7 +168,15 @@ function uploadImagesFrom(transfer: DataTransfer | null, media: MediaInsert): bo
  * nothing that can contradict the evidence, so there is no handle to orphan and
  * no claim to overstate.
  */
-function Toolbar({ editor, media }: { editor: Editor | null; media: MediaInsert }) {
+function Toolbar({
+  editor,
+  media,
+  illustration,
+}: {
+  editor: Editor | null;
+  media: MediaInsert;
+  illustration: Illustration;
+}) {
   const filePicker = useRef<HTMLInputElement>(null);
   if (!editor) return null;
 
@@ -210,6 +227,39 @@ function Toolbar({ editor, media }: { editor: Editor | null; media: MediaInsert 
         className={toolbarButton(false)}
       >
         Video
+      </button>
+
+      {/*
+        Beside Image because they produce the same thing by another route. These
+        are the only controls on this screen that spend money per press — a GPU
+        render each on a hosted provider — which is why the server keeps a
+        budget in front of them and answers 429 with the wait.
+
+        Two buttons rather than one because an article has two pictures and they
+        are judged in different places. This pair redraws the picture in the
+        prose, which is the one visible from here; the tile's own is redrawn
+        from Show draft, where a reviewer can see what changed. "…and the tile"
+        stays because it is the only way to get a pair drawn from one seed, and
+        because it is one press rather than two when neither picture is right.
+      */}
+      <button
+        type="button"
+        onClick={() => void illustration.regenerate("picture", editor)}
+        disabled={illustration.working !== null || media.uploading}
+        title="Draw the article's own picture again, with a new seed. One render."
+        className={toolbarButton(false)}
+      >
+        {illustration.working === "picture" ? "Generating…" : "Regenerate picture"}
+      </button>
+
+      <button
+        type="button"
+        onClick={() => void illustration.regenerate("both", editor)}
+        disabled={illustration.working !== null || media.uploading}
+        title="Draw the article's picture and the feed tile's, from one new seed. Two renders."
+        className={toolbarButton(false)}
+      >
+        {illustration.working === "both" ? "Generating…" : "…and the tile"}
       </button>
 
       {/*

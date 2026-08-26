@@ -16,6 +16,13 @@ dependencies = [
     "anthropic>=0.69",
     "ollama>=0.4",
     "voyageai>=0.3",
+    # Article imagery. Text-to-image is not available on Hugging Face's
+    # OpenAI-compatible /v1 endpoint (chat only) and the raw HTTP shape differs
+    # per inference provider, so the SDK is the supported path — same reason the
+    # three above are here rather than hand-rolled over httpx. Pillow is what
+    # `text_to_image` returns; `imagery/huggingface.py` re-encodes it to WebP.
+    "huggingface-hub>=0.35",
+    "pillow>=11.0",
     "pyjwt>=2.10",
     "argon2-cffi>=23.1",
     # Starlette parses multipart bodies through this; without it the console's

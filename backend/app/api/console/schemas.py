@@ -9,13 +9,15 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from app.api.public.schemas import FeedCardOut
 from app.api.schemas_base import CamelModel
 from app.domain.enums import (
     ArticleStatus,
     ContactKind,
     ContactStatus,
+    ImageFrame,
     RunStatus,
     StudyType,
     Subject,
@@ -207,6 +209,87 @@ class RejectRequest(CamelModel):
     #: Required. Rejection reasons are the best available signal for improving
     #: the synthesis prompt, so the API refuses to discard one.
     reason: str = Field(min_length=1, max_length=2000)
+
+
+class CardPreviewOut(FeedCardOut):
+    """The feed tile this draft would publish as.
+
+    Extends the *public* contract rather than restating it, and the import
+    direction is the safe one: the console sees everything the public surface
+    does plus the draft behind it, so a console schema reading a public one
+    carries no information the wrong way.
+
+    Restating the nine fields was the alternative, and it is exactly what this
+    endpoint exists to prevent. The preview is rendered by the public feed's
+    own ``ArticleCard``, so a shape of its own would be a second definition of
+    a tile, free to drift from the one that ships.
+    """
+
+    #: True when the picture is the pipeline's portrait cover rather than the
+    #: document's own first image. The reviewer is then looking at a different
+    #: crop from the picture in the editor beside them, and a tile that
+    #: silently differs from the article reads as a bug rather than a framing.
+    image_is_generated_cover: bool = False
+
+
+class RegenerateIllustrationRequest(CamelModel):
+    """Which of the article's two pictures to draw again.
+
+    Both, unless a reviewer asked for one. A reviewer who likes the article's
+    picture and not the tile should not have to pay for two renders to fix one,
+    and — more to the point — should not have to accept a new picture in the
+    prose to get a new one on the feed.
+
+    The whole body is optional on the route, so a client that posts nothing
+    still gets the pair it always got.
+    """
+
+    frames: list[ImageFrame] = Field(
+        default_factory=lambda: [ImageFrame.LEAD, ImageFrame.COVER],
+        min_length=1,
+        max_length=2,
+    )
+
+    @field_validator("frames")
+    @classmethod
+    def _distinct(cls, value: list[ImageFrame]) -> list[ImageFrame]:
+        """``["lead", "lead"]`` is one render, not two.
+
+        Rejected rather than silently deduped: it is only ever a client bug,
+        and this is the endpoint where a client bug is measured in money.
+        """
+        if len(set(value)) != len(value):
+            raise ValueError("each frame may be named at most once")
+        return value
+
+
+class GeneratedFrameOut(CamelModel):
+    """One frame of a regenerated illustration."""
+
+    src: str
+    alt: str
+
+
+class IllustrationOut(CamelModel):
+    """The article's frames after a regenerate — always both, redrawn or not.
+
+    Both, because the client's job is to make the document agree with the row,
+    and it cannot do that from a partial answer. A response carrying only what
+    changed would put the decision "is this lead still the one on the article"
+    in the browser, where the pairing rule is not enforced.
+
+    The route deliberately does not rewrite the document itself — see
+    ``ReviewService.set_illustration``. The client puts ``lead`` into the image
+    node and lets autosave persist it, so the new ``src`` passes through
+    ``assert_media_is_ours`` like any other edit.
+    """
+
+    lead: GeneratedFrameOut
+    cover: GeneratedFrameOut
+    #: Which frames this call actually drew. The client already knows what it
+    #: asked for; this is what the *server* did, and it is what a reviewer sees
+    #: quoted back to them when only half the picture changed.
+    redrawn: list[ImageFrame]
 
 
 # --- pipeline --------------------------------------------------------------

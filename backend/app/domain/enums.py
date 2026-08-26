@@ -90,6 +90,23 @@ class Subject(StrEnum):
     TOPICAL = "topical"
 
 
+class ImageFrame(StrEnum):
+    """Which of an article's two generated pictures.
+
+    They are two frames of one still life at two aspect ratios, and they live
+    in two different places: ``LEAD`` is an ordinary image node inside the
+    document, ``COVER`` exists only on ``articles.generated_imagery`` and
+    reaches the reader through the feed tile.
+
+    Named as a pair because they are drawn as one by default and can be redrawn
+    one at a time — a reviewer who likes the article's picture and not the tile
+    should not have to pay for both to fix one.
+    """
+
+    LEAD = "lead"
+    COVER = "cover"
+
+
 class ContactKind(StrEnum):
     """What a "Let us know" submission is asking for."""
 

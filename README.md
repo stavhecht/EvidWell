@@ -41,7 +41,7 @@ backend/
       embeddings/  swappable provider (Ollama default, Voyage/OpenAI hosted)
     retrieval/     scholarly providers, query building, cache, pgvector re-rank
     evidence/      study-type grading, verdict caps, citation validation
-    pipeline/      six stages, orchestrator, local worker
+    pipeline/      seven stages, orchestrator, local worker
     api/           public/ (unauthenticated) and console/ (JWT)
     services/      review, card derivation, TipTap conversion
   migrations/      0001_initial.sql — the schema source of truth
@@ -182,7 +182,7 @@ Honest accounting of what has and has not been exercised.
 | OpenAlex | 19 papers cached (inverted-index abstracts reconstructed) |
 | Extraction + synthesis | two runs completed, ~10.5k in / ~460 out tokens each — **provider unrecorded**, see below |
 | Voyage embeddings | 92 / 92 abstracts embedded at 1024-d, `embedding_model = voyage-4` |
-| Full six-stage pipeline | two runs `succeeded`: one `pending_review`, one `validation_failed` |
+| Full pipeline, as it then was (six stages, before `illustrate`) | two runs `succeeded`: one `pending_review`, one `validation_failed` |
 
 The first real run behaved as designed rather than as hoped: the
 `validation_failed` article was caught by invariant #2 for a grouped citation

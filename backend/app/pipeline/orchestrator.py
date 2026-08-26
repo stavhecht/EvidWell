@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import Settings
 from app.domain.enums import RunStatus
 from app.domain.models import PipelineRun, PipelineStageRun
+from app.imagery.factory import build_image_client
 from app.llm.base import TokenUsage
 from app.llm.embeddings.factory import build_embedding_provider
 from app.llm.factory import build_generative_clients
@@ -33,6 +34,7 @@ from app.pipeline.stages import (
     StageUsage,
 )
 from app.pipeline.steps.extract import ExtractStage
+from app.pipeline.steps.illustrate import IllustrateStage, IllustrationConfig
 from app.pipeline.steps.persist import PersistStage, ValidateStage
 from app.pipeline.steps.rank import RankStage
 from app.pipeline.steps.retrieve import RetrieveStage
@@ -439,7 +441,7 @@ class PipelineOrchestrator:
 
 
 def build_default_pipeline(session: AsyncSession, settings: Settings) -> list[Stage]:
-    """Assemble the six stages with their dependencies.
+    """Assemble the seven stages with their dependencies.
 
     The single place where concrete clients (Ollama or Claude, an embedding
     provider, PubMed) are bound to the Protocols the stages depend on — so
@@ -470,6 +472,27 @@ def build_default_pipeline(session: AsyncSession, settings: Settings) -> list[St
         ),
         RankStage(reranker, rerank_config),
         SynthesizeStage(synthesis_client),
+        # After SYNTHESIZE because it illustrates the draft, and before PERSIST
+        # because PERSIST has to stay last: its write commits together with the
+        # run's completion row (see ``run``), which is what stops a killed
+        # worker leaving an article whose run still says ``running``.
+        #
+        # Constructed even when there is no client. A stage that vanished from
+        # the list would renumber every later stage's ordinal, and its absence
+        # would be a run with no picture and no row anywhere saying why —
+        # ``build_image_client`` returning None becomes a recorded ``cause``
+        # rather than a silence.
+        IllustrateStage(
+            build_image_client(settings),
+            IllustrationConfig(
+                media_root=settings.media_root,
+                max_bytes=settings.media_max_bytes,
+                lead_size=(settings.image_lead_width, settings.image_lead_height),
+                cover_size=(settings.image_cover_width, settings.image_cover_height),
+                enabled=settings.image_provider.strip().lower()
+                not in ("", "none", "off"),
+            ),
+        ),
         ValidateStage(session),
         PersistStage(session),
     ]

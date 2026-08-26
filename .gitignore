@@ -9,6 +9,9 @@ node_modules/
 dist/
 .DS_Store
 
+/.claude/
+backend/tests/
+
 # Reviewer-uploaded images (settings.media_root). Local disk is the store
 # while deployment is deferred; published articles point into it, so back it
 # up with the database rather than treating it as scratch.

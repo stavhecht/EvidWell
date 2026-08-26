@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from typing import Annotated, Any
 
-from pydantic import BaseModel, Field, StringConstraints, field_validator
+from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
 
 from app.domain.enums import SourceApi, StudyType, Verdict
 
@@ -376,6 +376,96 @@ class SynthesisOutput(BaseModel):
         for group in self.citations:
             handles.update(group.source_ids)
         return handles
+
+
+# ---------------------------------------------------------------------------
+# Illustration — generated imagery
+# ---------------------------------------------------------------------------
+
+
+class GeneratedImage(BaseModel):
+    """One render, already written to the media store.
+
+    ``src`` is the path a document may hold — it comes back from
+    ``services/media.py::store_image``, so it satisfies ``MEDIA_SRC_RE`` by
+    construction rather than by a later check.
+
+    **Provenance is per frame, and that is a deliberate move down from
+    ``Illustration``.** ``prompt``, ``negative_prompt``, ``model`` and ``seed``
+    were shared fields on the pair for as long as the only way to draw either
+    frame was to draw both. A reviewer can now redraw one on its own, and a
+    single stored prompt would then be a true record of one picture and a false
+    record of the other — the kind of quietly wrong provenance that is worse
+    than none, because it still answers when asked.
+
+    They are stored rather than recomputed because ``imagery/prompt.py`` is
+    going to change and "which words produced this picture" stops being
+    answerable the moment it does. Provenance outranks tidiness here, the same
+    argument as the retracted-source rows.
+
+    The three string fields default to empty so rows written before the move
+    still validate; ``Illustration`` pushes their old shared values down into
+    the frames on the way in, so nothing is actually lost.
+    """
+
+    src: str
+    alt: str
+    width: int
+    height: int
+    seed: int
+    prompt: str = ""
+    negative_prompt: str = ""
+    #: Provider-namespaced, e.g. ``huggingface/black-forest-labs/FLUX.1-schnell``.
+    model: str = ""
+
+
+class Illustration(BaseModel):
+    """Both pictures an article has: the one in its body, and the tile's.
+
+    **They are not one photograph at two aspect ratios**, and they are no
+    longer even guaranteed to come from one generation — a reviewer can redraw
+    either alone. They are two renders of the same subject under the same
+    locked, claim-free treatment; see ``services/illustration.py`` for the
+    measurement that killed the stronger claim.
+
+    What survives all of that is the property worth having, and
+    ``services/card.py`` is what enforces it: the cover reaches the feed only
+    while ``lead.src`` is still the document's first image, so the tile can
+    never show a picture belonging to an article this one has stopped being.
+    Neither frame asserts anything, so neither can assert what the other does
+    not — which is why redrawing one and not the other is safe.
+    """
+
+    lead: GeneratedImage
+    cover: GeneratedImage
+
+    @model_validator(mode="before")
+    @classmethod
+    def _carry_legacy_shared_fields(cls, value: Any) -> Any:
+        """Push a pre-split row's shared ``prompt``/``model`` onto both frames.
+
+        Rows written while the pair shared one prompt keep it at the top level,
+        where nothing reads it any more. Dropping it would silently discard the
+        only record of how those two pictures were made, on the first partial
+        redraw — so it is moved down instead. A frame that carries its own
+        value always wins, which is what makes this safe to run on new rows too.
+        """
+        if not isinstance(value, dict):
+            return value
+        shared = {
+            key: value[key]
+            for key in ("prompt", "negative_prompt", "model")
+            if isinstance(value.get(key), str)
+        }
+        if not shared:
+            return value
+
+        patched = dict(value)
+        for frame in ("lead", "cover"):
+            existing = patched.get(frame)
+            if isinstance(existing, dict):
+                patched[frame] = {**shared, **existing}
+        return patched
 
 
 # ---------------------------------------------------------------------------

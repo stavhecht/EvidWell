@@ -85,6 +85,58 @@ export interface SavedCard extends FeedCard {
   folderId: string;
 }
 
+/**
+ * The feed tile a draft *would* publish as. Console-only.
+ *
+ * Extends {@link FeedCard} rather than restating it, because the point of the
+ * preview is that it renders through the same `ArticleCard` the public feed
+ * uses. A shape of its own would let the two drift, and the drift is exactly
+ * what the preview exists to catch.
+ *
+ * Derived server-side by the same `derive_card()` the publish path runs — see
+ * `fetchCardPreview`.
+ */
+export interface CardPreview extends FeedCard {
+  /**
+   * True when the picture is the portrait cover the pipeline generated rather
+   * than the article's own first image. The tile a reviewer is looking at is
+   * then a different crop from the picture in the editor beside it, which
+   * reads as a bug unless it is said out loud.
+   */
+  imageIsGeneratedCover: boolean;
+}
+
+/** One frame of a generated illustration. */
+export interface GeneratedFrame {
+  src: string;
+  alt: string;
+}
+
+/**
+ * Which of an article's two pictures. They live in different places and are
+ * judged separately, so they can be redrawn separately.
+ */
+export type IllustrationFrame = "lead" | "cover";
+
+/**
+ * Both frames after a regenerate — always both, whether or not both were drawn.
+ *
+ * `lead` goes into the document — the client swaps the editor's image node and
+ * lets autosave persist it, so the new `src` passes the server's media check
+ * like any other edit. `cover` is already recorded on the article and reaches
+ * the feed tile only while `lead` is still the document's first picture.
+ *
+ * The server answers with both even for a one-frame redraw, because the client's
+ * job is to make the document agree with the article row and it cannot do that
+ * from a partial answer.
+ */
+export interface GeneratedImagery {
+  lead: GeneratedFrame;
+  cover: GeneratedFrame;
+  /** Which frames this call actually drew, as the server reports them. */
+  redrawn: IllustrationFrame[];
+}
+
 export interface FeedPage {
   items: FeedCard[];
   nextCursor: string | null;
