@@ -71,9 +71,23 @@ import {
   queueTab,
 } from "./styles";
 
+/**
+ * Tab copy is reviewer-facing wording, not the status name. `validation_failed`
+ * stays the status everywhere else — it is the API contract, the enum in the
+ * database and what the invariant #2 tests grep for; only the label a reviewer
+ * reads is softened here. "Failed validation" described the machinery rather
+ * than the draft, and read as something broken in the system rather than a
+ * judgment about the article.
+ *
+ * The label narrows the tab's meaning: `verdict_exceeds_grade` is only one of
+ * five codes that land here, and the other four (a hallucinated handle, an
+ * unresolvable source, an uncited beat or section) are about missing citations
+ * rather than weak ones. The per-draft message in `ValidationSummary` still
+ * names which it was, so the specific reason is one click away.
+ */
 const TABS: { status: ArticleStatus; label: string }[] = [
   { status: "pending_review", label: "Pending review" },
-  { status: "validation_failed", label: "Failed validation" },
+  { status: "validation_failed", label: "Evidence too weak" },
   { status: "published", label: "Published" },
   { status: "rejected", label: "Rejected" },
 ];
@@ -294,6 +308,16 @@ function runNote(run: PipelineRun): string {
 }
 
 /**
+ * The reject reason a queue-row discard sends.
+ *
+ * `RejectRequest.reason` is `min_length=1`, and the queue no longer asks — so
+ * this says where the rejection came from rather than inventing a reason nobody
+ * gave. Anything that reads reasons for prompt-fixing signal can skip it on
+ * sight, which a blank string would not allow.
+ */
+const QUEUE_DISCARD_REASON = "Discarded from the queue without a reason.";
+
+/**
  * One queue row, with its discard action.
  *
  * The action sits *beside* the link rather than inside it — a button nested in
@@ -304,6 +328,12 @@ function runNote(run: PipelineRun): string {
  * fixing the synthesis prompt. Rejected rows stay readable under the Rejected
  * tab. It is offered on validation_failed too, because otherwise those drafts
  * have no action at all and pile up in a tab nobody can clear.
+ *
+ * It does not ask for a reason. The queue is where a reviewer clears rows they
+ * have already judged from the row itself, and a modal prompt per row turned
+ * that into a typing exercise — the reasons it collected were placeholders, not
+ * signal. The reason a rejection *is* worth writing down gets typed on the
+ * review screen, next to the draft it is about.
  */
 function QueueRow({ item, tab }: { item: QueueItem; tab: ArticleStatus }) {
   const queryClient = useQueryClient();
@@ -312,7 +342,7 @@ function QueueRow({ item, tab }: { item: QueueItem; tab: ArticleStatus }) {
   const discardable = tab === "pending_review" || tab === "validation_failed";
 
   const discard = useMutation({
-    mutationFn: (reason: string) => rejectArticle(item.id, reason),
+    mutationFn: () => rejectArticle(item.id, QUEUE_DISCARD_REASON),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["console"] }),
     onError: () => setError("Could not discard this draft."),
   });
@@ -348,10 +378,7 @@ function QueueRow({ item, tab }: { item: QueueItem; tab: ArticleStatus }) {
           <button
             onClick={() => {
               setError(null);
-              const reason = window.prompt(
-                `Reason for discarding “${item.headline}” (required)`,
-              );
-              if (reason?.trim()) discard.mutate(reason.trim());
+              discard.mutate();
             }}
             disabled={discard.isPending}
             title="Moves this draft to Rejected. The reason is kept."

@@ -12,7 +12,7 @@ here:
 * **Structured output is a decoding grammar, not a validating schema.** The
   ``format`` argument takes a JSON Schema and constrains generation to it, so
   the response is syntactically valid JSON of the right shape. It does *not*
-  enforce the Pydantic validators — ``ArticleBody``'s three-sentence ceiling,
+  enforce the Pydantic validators — ``ArticleBody``'s per-beat sentence caps,
   the 12-word headline, the one-clause qualifier — because those live in
   Python, not in the schema. There is no ``messages.parse()`` equivalent here:
   the SDK hands back a string and validation is ours to do. A small local model
@@ -72,14 +72,20 @@ EXTRACTION_MODEL = "llama3.1:8b"
 SYNTHESIS_MODEL = "llama3.1:8b"
 
 # Context windows, set explicitly because the server default (4K) silently
-# truncates. Synthesis carries ~8 abstracts plus the system prompt.
+# truncates. Synthesis carries up to `retrieval_top_k` abstracts per claim,
+# deduplicated across claims, plus the system prompt — sized here for the
+# current top-k of 12 rather than the 8 it was built for.
+#
+# Note the cost: a 32K window on an 8B model is several GB of KV cache. If local
+# runs get slow or the server OOMs, drop `retrieval_top_k` to 10 and this to
+# 24_576 — the hosted path is unaffected either way.
 EXTRACTION_NUM_CTX = 8_192
-SYNTHESIS_NUM_CTX = 16_384
+SYNTHESIS_NUM_CTX = 32_768
 
 # Output caps. Unlike the hosted models these count visible output only —
 # there is no thinking budget folded in — so they are sized to the response.
 EXTRACTION_MAX_TOKENS = 2_000
-SYNTHESIS_MAX_TOKENS = 4_000
+SYNTHESIS_MAX_TOKENS = 8_000
 
 # Local models accept sampling parameters (the Opus 5 restriction noted in
 # anthropic_client.py does not apply here). Extraction is mechanical, so it is

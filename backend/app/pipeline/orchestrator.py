@@ -485,13 +485,13 @@ def build_default_pipeline(session: AsyncSession, settings: Settings) -> list[St
         IllustrateStage(
             build_image_client(settings),
             IllustrationConfig(
-                media_root=settings.media_root,
                 max_bytes=settings.media_max_bytes,
                 lead_size=(settings.image_lead_width, settings.image_lead_height),
                 cover_size=(settings.image_cover_width, settings.image_cover_height),
                 enabled=settings.image_provider.strip().lower()
                 not in ("", "none", "off"),
             ),
+            session,
         ),
         ValidateStage(session),
         PersistStage(session),

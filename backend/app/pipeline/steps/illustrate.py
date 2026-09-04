@@ -26,11 +26,19 @@ four zeros is exactly the "unpriced model reads as free" mistake
 ``metrics`` instead. Say "not measured", not "free" — the standing embeddings
 already have.
 
-**It writes files, not rows.** Nothing it does sits inside the pipeline
-transaction, so the orchestrator's rollback cannot un-write it. That is already
-the accepted position: the store is content-addressed and orphan collection is
-deferred (``services/media.py``), so a file from a run that later failed is the
-same orphan as an image a reviewer dropped from a draft.
+**It writes rows, not files** — ``media_objects``, through the session it is
+constructed with. It used to write files, and the difference is worth stating
+because it removed a wart rather than adding one: image bytes now sit inside
+the pipeline transaction, so they land with the orchestrator's stage commit and
+are rolled back with a failed stage, instead of surviving on disk as orphans
+from a run that never finished. The stage still does not commit — that rule is
+the orchestrator's and is not relaxed here.
+
+One orphan case remains and is deliberate. A lead that stores followed by a
+cover that fails leaves the lead's row to be committed by a stage that then
+reports no picture at all. That is the same orphan the store has always
+tolerated: rows are content-addressed and immutable, so the cost is bytes, and
+collection is deferred (``services/media.py``).
 """
 
 from __future__ import annotations
@@ -38,8 +46,9 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.imagery.base import ImageClient, ImageError
 from app.pipeline.stages import PipelineContext, StageError, StageName
@@ -50,14 +59,16 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class IllustrationConfig:
-    """Where the pictures go and how big they are.
+    """How big the pictures are and whether to draw them.
 
     A narrow config rather than the whole ``Settings`` object, the same shape
     as ``RerankConfig``: a stage handed Settings can reach anything, and a
     stage that can reach anything eventually does.
+
+    No longer says *where* they go — there is one store and the stage reaches
+    it through the session, the same way it reaches everything else it writes.
     """
 
-    media_root: Path
     max_bytes: int
     lead_size: tuple[int, int]
     cover_size: tuple[int, int]
@@ -72,9 +83,17 @@ class IllustrateStage:
 
     name = StageName.ILLUSTRATE
 
-    def __init__(self, client: ImageClient | None, config: IllustrationConfig) -> None:
+    def __init__(
+        self,
+        client: ImageClient | None,
+        config: IllustrationConfig,
+        session: AsyncSession,
+    ) -> None:
         self._client = client
         self._config = config
+        # The pipeline session, as ValidateStage and PersistStage take it —
+        # image bytes are rows now, and they belong in the run's transaction.
+        self._session = session
 
     async def run(self, ctx: PipelineContext) -> PipelineContext:
         """Generate both frames and attach them to the context.
@@ -105,7 +124,7 @@ class IllustrateStage:
                 ingredients=" ".join(ctx.extraction.ingredients),
                 lead_size=self._config.lead_size,
                 cover_size=self._config.cover_size,
-                media_root=self._config.media_root,
+                session=self._session,
                 max_bytes=self._config.max_bytes,
                 seed=seed,
             )

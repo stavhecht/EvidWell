@@ -25,6 +25,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Integer,
+    LargeBinary,
     String,
     Text,
     func,
@@ -461,6 +462,33 @@ class ContactRequest(Base):
         UUID(as_uuid=False), ForeignKey("users.id")
     )
     handled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class MediaObject(Base):
+    """Image bytes, keyed by their own SHA-256.
+
+    The store behind ``services/media.py``. Deliberately unrelated to
+    ``articles``: an image is referenced by URL from inside a document, and the
+    same bytes may be embedded by several drafts or by none. See
+    ``migrations/0004_media_objects.sql`` for why a column on ``articles``
+    cannot work — the short version is that ILLUSTRATE stores pictures two
+    stages before the article row exists.
+
+    ``digest`` is the primary key rather than a surrogate, which is what makes
+    storing the same image twice a no-op rather than a duplicate.
+    """
+
+    __tablename__ = "media_objects"
+
+    digest: Mapped[str] = mapped_column(Text, primary_key=True)
+    #: One of png/jpg/gif/webp, decided by sniffing ``data``'s leading bytes.
+    #: The content type served is derived from this via ``media.CONTENT_TYPES``
+    #: rather than stored, so there is one definition of that mapping.
+    extension: Mapped[str] = mapped_column(Text, nullable=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

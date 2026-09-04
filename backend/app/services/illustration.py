@@ -53,7 +53,8 @@ import hashlib
 import logging
 import secrets
 from collections.abc import Collection, Iterable
-from pathlib import Path
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.contracts import GeneratedImage, Illustration
 from app.domain.enums import ImageFrame, Subject
@@ -123,7 +124,7 @@ async def generate_illustration(
     ingredients: str = "",
     lead_size: tuple[int, int],
     cover_size: tuple[int, int],
-    media_root: Path,
+    session: AsyncSession,
     max_bytes: int,
     seed: int,
     frames: Collection[ImageFrame] = BOTH_FRAMES,
@@ -132,6 +133,11 @@ async def generate_illustration(
     """Render the requested frames, store them, and describe what was made.
 
     Args:
+        session: where the bytes go — ``media_objects``, via
+            ``services/media.py``. **Not committed here.** In the pipeline that
+            is the orchestrator's stage commit, and in the console it is the
+            request session; either way the images land with the row that
+            points at them or not at all, which the disk store could not offer.
         subject: ``None`` on every pipeline call — it is reviewer-set and the
             article does not exist yet. The regenerate route passes the real
             one, which is why pressing it after classifying a draft is worth
@@ -191,7 +197,7 @@ async def generate_illustration(
             size=size,
             seed=seed,
             alt=alt,
-            media_root=media_root,
+            session=session,
             max_bytes=max_bytes,
             frame=frame,
         )
@@ -216,7 +222,7 @@ async def _render_and_store(
     size: tuple[int, int],
     seed: int,
     alt: str,
-    media_root: Path,
+    session: AsyncSession,
     max_bytes: int,
     frame: ImageFrame,
 ) -> GeneratedImage:
@@ -231,7 +237,7 @@ async def _render_and_store(
         )
     )
     _assert_fits(rendered, max_bytes=max_bytes, frame=frame)
-    stored = _store(rendered, media_root=media_root, frame=frame)
+    stored = await _store(rendered, session=session, frame=frame)
 
     logger.info(
         "illustration %s: %dx%d, %d bytes, seed %d -> %s",
@@ -273,8 +279,10 @@ def _assert_fits(rendered: RenderedImage, *, max_bytes: int, frame: ImageFrame) 
         )
 
 
-def _store(rendered: RenderedImage, *, media_root: Path, frame: ImageFrame) -> StoredImage:
-    """Write the bytes and check the path is one a document may hold.
+async def _store(
+    rendered: RenderedImage, *, session: AsyncSession, frame: ImageFrame
+) -> StoredImage:
+    """Store the bytes and check the path is one a document may hold.
 
     Both failures here mean a bug rather than a bad provider response, and both
     are converted to ``ImageError`` rather than raised: a broken encoder should
@@ -284,7 +292,7 @@ def _store(rendered: RenderedImage, *, media_root: Path, frame: ImageFrame) -> S
     reviewer never made.
     """
     try:
-        stored = store_image(rendered.data, root=media_root)
+        stored = await store_image(rendered.data, session=session)
     except UnsupportedMediaError as exc:
         raise ImageError(
             f"the {frame.value} render is not a format the media store accepts: {exc}"

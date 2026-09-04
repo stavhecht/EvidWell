@@ -39,7 +39,10 @@ from app.domain.enums import Verdict
 #: fail a run that is otherwise working exactly as intended — it degrades to a
 #: shorter phrasing instead.
 HEADLINE_MAX_WORDS = 12
-MAX_BEAT_SENTENCES = 3
+#: Beat 1's own ceiling, which is the only one this module interpolates into.
+#: Named for the beat rather than for beats in general because the three no
+#: longer share a number — beats 2 and 3 allow 5. See ``ArticleBody``.
+MAX_CLAIM_BEAT_SENTENCES = 4
 
 #: Fixed text. No interpolation, so these need no length guard and cannot drift
 #: with the input.
@@ -125,7 +128,7 @@ def _claim_beat(product: str, target_claims: list[str]) -> str:
     candidates.append("This product is marketed with health claims.")
 
     return _first_that_fits(
-        candidates, fits=lambda text: count_sentences(text) <= MAX_BEAT_SENTENCES
+        candidates, fits=lambda text: count_sentences(text) <= MAX_CLAIM_BEAT_SENTENCES
     )
 
 

@@ -151,6 +151,19 @@ export function ReviewDetail() {
   // no available action at all. They remain unapprovable.
   const canDiscard = canApprove || article.status === "validation_failed";
   const blockedByUnsaved = autosave.state === "error";
+  /**
+   * A draft the search came up empty on is not publishable from here.
+   *
+   * `no_evidence` is a real verdict and the article is a well-formed one — it
+   * takes the ordinary path and passes validation on its merits — so nothing
+   * downstream refuses it. That is what makes the button the place to stop it:
+   * the reviewer is the only one who can tell "we searched and the literature
+   * is silent" from "this query never had a chance", and the second is by far
+   * the more common way a run ends with an empty source list. Reject is still
+   * available, and the reason it takes is what the query gets fixed from.
+   */
+  const foundNothing =
+    article.verdict === "no_evidence" || article.sources.length === 0;
   const restsOnWeakEvidence = article.sources.some((s) => s.wasCited && s.isWeakEvidence);
 
   /**
@@ -208,8 +221,11 @@ export function ReviewDetail() {
         <section className={REVIEW_BODY_COLUMN}>
           <div className={DRAFT_STATUS_ROW}>
             <span className={SECTION_LABEL}>
+              {/* Matches the queue tab's wording — a reviewer arrives here by
+                  clicking that tab, and two names for one state reads as two
+                  states. See the note on `TABS` in ReviewQueue.tsx. */}
               {article.status === "validation_failed"
-                ? "Draft · failed validation"
+                ? "Draft · evidence too weak"
                 : article.status === "pending_review"
                   ? "Draft · pending review"
                   : `Draft · ${article.status.replace(/_/g, " ")}`}
@@ -268,13 +284,17 @@ export function ReviewDetail() {
                 setActionError(null);
                 approve.mutate();
               }}
-              disabled={!canApprove || approve.isPending || blockedByUnsaved}
+              disabled={
+                !canApprove || approve.isPending || blockedByUnsaved || foundNothing
+              }
               title={
                 !canApprove
                   ? "Only drafts pending review can be published"
-                  : blockedByUnsaved
-                    ? "Unsaved edits — resolve the save error first"
-                    : "Publish this article to the public feed"
+                  : foundNothing
+                    ? "No evidence was found for this draft — it cannot be published"
+                    : blockedByUnsaved
+                      ? "Unsaved edits — resolve the save error first"
+                      : "Publish this article to the public feed"
               }
               className={APPROVE_BUTTON}
             >
@@ -285,7 +305,13 @@ export function ReviewDetail() {
                 the only path to `published` in the system, and it puts the
                 article in front of every reader — worth saying in words. */}
             <p className={DECISION_NOTE}>
-              {article.status === "published" ? (
+              {foundNothing && article.status !== "published" ? (
+                <>
+                  Retrieval returned no usable sources, so there is nothing here
+                  for a reader to check. Reject it with a reason — that reason is
+                  what the query gets fixed from.
+                </>
+              ) : article.status === "published" ? (
                 <>
                   Live at{" "}
                   <a

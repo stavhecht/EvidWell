@@ -13,13 +13,16 @@ pip install -e ".[dev]"
 python -m scripts.migrate                # applies migrations via asyncpg; no psql needed
                                          # 0002 adds readers, folders, the contact inbox,
                                          # articles.subject and articles.card_image
+                                         # 0004 adds media_objects — image bytes move off disk
 python -m scripts.migrate --status
 python -m scripts.seed_admin --email you@example.com --name "Your Name"
 
-# maintenance (both dry by default; --apply to write)
+# maintenance (all dry by default; --apply to write)
 python -m scripts.reclassify_sources          # after any classifier change
 python -m scripts.check_retractions           # re-check cited sources
 python -m scripts.check_retractions --scope all
+python -m scripts.import_media                # one-time, after 0004: var/media -> media_objects
+python -m scripts.reembed_sources             # after any EMBEDDING_PROVIDER / model change
 
 # run
 uvicorn app.main:app --reload            # API :8000, OpenAPI at /docs
@@ -37,17 +40,29 @@ npm run typecheck
 npm run build          # tsc -b && vite build
 ```
 
-There is also a container path — `docker compose up backend` builds
-[backend/Dockerfile](backend/Dockerfile) and serves the API on :8000 against the `db` service.
-Two things it deliberately does not do, so don't expect them:
+There is also a whole-stack container path — `docker compose up` runs db → migrate (one-shot)
+→ api + worker + web on :8000 and :5173, and needs no `backend/.env`, because every setting in
+`config.py` has a working local default. Four things about it:
 
-- **It cannot migrate or seed.** `scripts/` is in [.dockerignore](backend/.dockerignore), so
-  `python -m scripts.migrate` has no entry point inside the image even though `migrations/` is
-  copied in. Run migrate and seed from the host venv; the container starts happily against an
-  unmigrated database and fails at the first query.
-- **It does not run the worker.** Compose defines the API only, so `docker compose up backend`
-  gives you a service that accepts `POST /pipeline/runs` and never executes them. Run
-  `python -m app.pipeline.runner` on the host alongside it.
+- **`migrate` and `seed` get their entry point from a bind mount, not the image.** `scripts/`
+  stays in [.dockerignore](backend/.dockerignore) — it is maintenance tooling, not part of what
+  deploys — and compose mounts `./backend/scripts` read-only instead. So the image did not
+  widen. Everything else `depends_on` migrate completing, which is what stops the API booting
+  against an unmigrated database and failing at the first query.
+  **`./backend/migrations` is mounted too**, over the copy the Dockerfile bakes in, because
+  otherwise a newly written `.sql` file needs a rebuild before `docker compose run --rm
+  migrate` can see it — and the failure mode is the bad kind: migrate prints "Database is up
+  to date" and exits 0, having silently not applied the file you just wrote.
+- **`seed` is behind a profile** because `seed_admin` prompts for a password:
+  `docker compose run --rm seed --email you@example.com --name "Your Name"`.
+- **Ollama stays on the host.** A container on macOS has no Metal access, so a containerised
+  `llama3.1:8b` would be CPU-only. `OLLAMA_BASE_URL` is overridden to
+  `http://host.docker.internal:11434` — verified reachable from the backend container against a
+  host `ollama serve` bound to its default loopback.
+- **Source is mounted read-only over the image copy**, so an edit needs a `restart`, not a
+  rebuild — only a `pyproject.toml` change needs `--build`. Both watchers are forced to polling
+  (`WATCHFILES_FORCE_POLLING`, `VITE_DEV_POLL`): Docker Desktop's bind mounts do not deliver
+  inotify events on macOS, so an event-based watcher looks healthy and silently never reloads.
 
 Two declared checks do not currently pass, so don't read a failure as something you broke:
 
@@ -218,9 +233,21 @@ are accepted and collapse into one citation node; ranges (`[S1-S8]`) are not, in
 bracketed that is not a marker is a parse failure — checked by stripping valid markers and
 looking for leftover brackets, because the old "not a valid marker" pattern missed unterminated
 runs like `[S1, S5` and let them through as literal text. Validation walks the tree rather than regexing prose.
-Reviewers can add two more block nodes — `image` and `youtube` (DESIGN.md §3.4b). Both are
-siblings of the beat paragraphs, and beats stay addressable because `beat_text()` uses
-`attrs.beat`, never position.
+
+**The pipeline writes three block types and reviewers can add two more.** `paragraph` and
+`heading` (always level 2, one per `ArticleBody` section — DESIGN.md §6) come out of
+`body_text_to_doc`, plus the `image` node PERSIST hands it; a reviewer adds `image` and
+`youtube` (§3.4b). Only the three beat paragraphs carry `attrs.beat`. Section paragraphs and
+reviewer-added ones deliberately do not, which is what keeps `beat_text()` correct however much
+sits between the beats — it addresses by `attrs.beat`, never by position.
+
+**A new block type has to be declared in the console editor's `StarterKit`, or it is silently
+destroyed.** TipTap drops nodes its schema does not know: with `heading: false` the editor
+parsed a sectioned draft, discarded every heading, and the first autosave wrote an
+`edited_content` with the article flattened — nothing about the saved document otherwise wrong.
+This is the same failure `BeatAttribute.ts` exists to prevent for `attrs.beat`. The public
+renderer needs a case for it too (`ArticleContent.tsx`), or it falls through and renders as a
+paragraph.
 
 **A retracted paper is refused, not downgraded — and `retraction_checked_at IS NULL` means
 nobody asked, not "clean".** Three mechanisms, and mixing them up is how this breaks:
@@ -484,6 +511,10 @@ matters when editing:
    seems to need another publish path, that is a design conversation, not a fix.
 2. Citation validation runs after synthesis, before persistence. A failing draft is written as
    `validation_failed` and never enters the review queue — do not soften it to a warning.
+   Its cited-prose rule covers beat 2 **and every section**; beats 1 and 3 are the only
+   exemptions, and they are exempt because they carry no findings. When the body grows a new
+   place prose can live, that place belongs in `check_beats_are_cited` — otherwise lengthening
+   the article silently widens a three-sentence allowance into most of the page.
 3. Evidence grade **and quantity** cap verdict confidence (`evidence/grading.py`). Exceeding
    the cap is a validation failure, not a style note. Two rules, both **per claim**, with the
    article inheriting its weakest claim's ceiling: the study-type ceiling, and a quorum of
@@ -500,6 +531,27 @@ generated by a separate model call, so card and article cannot contradict each o
 
 ## Config traps
 
+- **`.env` is read from two places, and compose must name both.** `config.py`'s
+  `env_file` is `(".env", "../.env")` *relative to the process's cwd*, so a host venv
+  running from `backend/` picks up `backend/.env` **and the repo-root `.env`** — and this
+  project's keys live at the root. Compose named only `./backend/.env`, which does not
+  exist, so every container booted with none of them. Nothing errored, because every
+  setting has a working default: imagery went `not_configured`, `EMBEDDING_PROVIDER` fell
+  back to `ollama`, and `ENABLED_PROVIDERS` quietly dropped OpenAlex. Both paths are listed
+  now, both optional. **When a value looks wrong in a container, compare it against the
+  file before debugging the code** — and compare it by *hash*, never by printing it.
+- **Editing `.env` does nothing until the containers are recreated.** Docker resolves
+  `env_file` at container **creation**, so `docker compose restart` re-runs the process with
+  the old environment still baked in. After rotating a key this presents as a `401
+  Unauthorized` from a provider against a key you can see is correct in the file — the
+  container is holding the revoked one. `docker compose up -d --force-recreate backend
+  worker`. The same applies to any `.env` edit, not just secrets.
+- **The Anthropic key is identity-linked and needs a workspace id.** Auth itself succeeds
+  (a `count_tokens` probe returns 400, not 401), but the API answers
+  `anthropic-workspace-id is required when authenticating with an identity-linked API key`.
+  `anthropic_client.py:294` constructs `AsyncAnthropic(api_key=…)` with no workspace header,
+  so **`LLM_PROVIDER=anthropic` will fail on the first call** until that is passed. Invisible
+  today only because the provider defaults to `ollama`.
 - **Model calls run locally by default.** `LLM_PROVIDER=ollama` and
   `EMBEDDING_PROVIDER=ollama` (see [.env.example](backend/.env.example)) — free, no key,
   needs `ollama serve` plus `ollama pull llama3.1:8b mxbai-embed-large`. The hosted clients
@@ -514,13 +566,29 @@ generated by a separate model call, so card and article cannot contradict each o
   explicitly on both calls because the server default is 4K and overflow silently drops the
   front of the prompt — for synthesis that means sources vanish while the instruction to cite
   them survives.
-- **`EMBEDDING_DIM` is load-bearing.** The migration templates the vector column width from it.
-  Changing the provider or the dimension after the cache has rows needs a re-embed *and* a
-  migration, not a config edit.
+- **`EMBEDDING_DIM` is load-bearing, and matching widths are a trap, not a safety net.**
+  The migration templates the vector column width from it, so changing the *dimension* needs a
+  migration. Changing only the *provider* does not — and that is the dangerous case:
+  `voyage-4` and `ollama/mxbai-embed-large` are both 1024-d, so the column accepts either and
+  pgvector will compute a cosine distance between them without complaint. The number is noise.
+  A provider switch therefore degrades retrieval **silently**, with `sources.embedding_model`
+  as the only signal. `SourceCache` repairs rows it touches (`had_embedding` compares the
+  recorded model to `embedder.model_id`), so a re-retrieved paper fixes itself; everything
+  else stays stale. Run `python -m scripts.reembed_sources` (dry by default, `--apply` to
+  write) after any provider or model change. This is not hypothetical — the cache ran with
+  288 `voyage-4` rows against 65 `ollama` ones until 2026-09-04.
 - **`claude-opus-5` rejects `temperature` / `top_p` / `top_k`.** Steer behaviour by prompt only.
-  `max_tokens` caps thinking **plus** output, which is why synthesis is sized at 8K for a
-  ~300-word article; `_check_truncation` names that cause explicitly, because a truncated
+  `max_tokens` caps thinking **plus** output, which is why synthesis is sized at 16K for a
+  ~700–950-word article; `_check_truncation` names that cause explicitly, because a truncated
   structured response has no parsed output and otherwise reads as a schema failure.
+- **`retrieval_top_k` and `SYNTHESIS_NUM_CTX` move together.** Top-k is 12 ranked sources *per
+  claim*, deduplicated across claims into the synthesis prompt, and it is the one knob deciding
+  how many sources an article can cite. Raise it and Ollama's context window (32K, sized for
+  it) has to follow: overflow there is **silent** — the front of the prompt is dropped, so
+  sources vanish while the instruction to cite them survives, and the run fails as
+  `hallucinated_handle` with nothing pointing at the real cause. A 32K window on an 8B model is
+  also several GB of KV cache; if local runs crawl, drop to top-k 10 and 24K rather than
+  leaving them mismatched.
 - **`thinking` is passed explicitly on both Anthropic calls, and must stay that way.** Whether
   an omitted `thinking` means "think" varies across the range (Sonnet 5 / Opus 5 do, Opus 4.8 /
   4.7 do not), and the model is config — leaving it implicit lets `EXTRACTION_MODEL` silently
@@ -531,10 +599,21 @@ generated by a separate model call, so card and article cannot contradict each o
 - **The `cache_control` breakpoint is a no-op on extraction.** The minimum cacheable prefix is
   per-model and not monotonic (512 on Opus 5, 1024 on Sonnet 5, 4096 on Haiku 4.5), and a prompt
   under it fails to cache silently — `cache_creation_input_tokens: 0`, no error. Measured with
-  `messages.count_tokens`: extraction is **306 tokens** and caches on nothing; synthesis is
-  **1285**, so it caches on Sonnet 5 with ~260 tokens of headroom. Trimming the synthesis system
-  prompt would break caching without saying so. Confirm against `usage.cache_read_input_tokens`
-  on a real call rather than assuming.
+  `messages.count_tokens`: extraction is **306 tokens** and caches on nothing; synthesis was
+  **1285**, caching on Sonnet 5 with only ~260 tokens of headroom. The section and specificity
+  rules roughly doubled the synthesis prompt (~1,390 words as of 2026-09-04, not re-counted
+  against `count_tokens`), so that headroom is now comfortable rather than marginal — growing
+  this prompt is safe, and it is *trimming* it that would break caching without saying so.
+  Confirm against `usage.cache_read_input_tokens` on a real call rather than assuming.
+- **Do not compress the synthesis prompt. It was tried, measured, and reverted.** A rewrite to
+  1,302 words from 1,503 kept all 70 rules present — verified by probe, nothing dropped — and
+  still cost output quality on `llama3.1:8b`: inline citations fell from 5.0 to 3.3 handles per
+  article and sections from 3.0 to 2.0, with 43% of runs emitting no sections at all against
+  17% before (n=14 compressed vs n=6, same 12 sources). The redundancy and the stated rationale
+  are load-bearing on a small model, not padding. And the trade is bad even before quality:
+  the system prompt is only ~13% of a synthesis call (the 12 abstracts are the rest), so a 13%
+  trim of it saves **2% of the call**. If this needs revisiting, the lever is `retrieval_top_k`
+  or a larger model, never these words.
 - **Pointing a model setting at something new needs a price-table entry.** Nothing breaks
   without one — the run just reports `estimatedCostUsd: null` forever, which is honest and
   easy to miss. `test_cost_accounting.py` asserts the clients' four default models are all in
@@ -561,18 +640,42 @@ generated by a separate model call, so card and article cannot contradict each o
   becomes the account-enumeration oracle the equal timing exists to prevent. Unlike
   `retrieval/throttle.py` it rejects instead of sleeping — a delay only slows a client that
   chooses to wait, which is the honest user and not the attacker.
-- **`MEDIA_ROOT` holds live article assets, not a cache.** Published articles link into it,
-  so it belongs in the backup set with the database. `services/media.py` decides what a file
-  is from its first bytes (never the filename or Content-Type) and **SVG is refused** — it is
-  a script host, and this directory is served from the app's own origin. A document may only
-  reference media the store wrote; that is checked on autosave *and* again in
-  `ReviewService.approve()`. Do not relax either check to make a paste work. The pipeline
-  writes here too now, through the same `store_image` and under the same checks —
-  `media.py::image_node` builds the node and `tests/test_media.py` pins that
-  `assert_media_is_ours` accepts it, because a writer and a checker that disagree produce an
-  article whose *first* autosave is refused. Note `store_image` itself has **no size gate**:
-  the upload route enforces `MEDIA_MAX_BYTES`, and a generated image never passes through it,
-  so `services/illustration.py` is the only ceiling on that path.
+- **Image bytes live in Postgres, in `media_objects` — there is no `MEDIA_ROOT`.** They were
+  on local disk until that turned out to be the one piece of published state a database backup
+  did not cover: images generated by a host-venv run were served as 404s the moment the stack
+  moved into containers, because the compose volume was its own storage and had never seen
+  `backend/var/media`. Every path in `articles.generated_imagery` pointed at a file the API
+  could not reach. One store, one backup, one restore. `scripts/import_media.py` moved the
+  legacy files (dry by default, `--apply` to write); `backend/var/media` is read by nothing.
+  - **The URL did not change.** `/api/media/<2 hex>/<62 hex>.<ext>` is still what a document
+    holds and what `MEDIA_SRC_RE` matches, so no stored JSON was rewritten. The two-character
+    shard is now decorative — there is no directory — and stays because rewriting stored
+    documents to drop a slash would be a migration with nothing to gain.
+  - **A column on `articles` cannot work**, and `migrations/0004_media_objects.sql` records
+    why: ILLUSTRATE stores pictures at stage 5 and the article row is not created until
+    PERSIST at stage 7, uploads are deliberately not article-scoped, and content addressing
+    dedups across articles. Keyed by digest, related to nothing.
+  - `store_image` is now `async` and takes a **session, not a path**, and **does not commit** —
+    so ILLUSTRATE's pictures land with the orchestrator's stage commit and roll back with a
+    failed stage, instead of surviving on disk as orphans. `prepare_image` is the pure half
+    (sniff, digest, path) and is what `test_media.py` exercises without a database; the INSERT
+    is covered in `test_db_invariants.py`.
+  - `services/media.py` still decides what a file is from its first bytes (never the filename
+    or Content-Type) and **SVG is still refused** — it is a script host, and this is served
+    from the app's own origin. A document may only reference media the store wrote; checked on
+    autosave *and* again in `ReviewService.approve()`. Do not relax either check to make a
+    paste work. `media.py::image_node` builds the node the pipeline writes and
+    `tests/test_media.py` pins that `assert_media_is_ours` accepts it, because a writer and a
+    checker that disagree produce an article whose *first* autosave is refused.
+  - `store_image` still has **no size gate**: the upload route enforces `MEDIA_MAX_BYTES`, and
+    a generated image never passes through it, so `services/illustration.py` is the only
+    ceiling on that path.
+  - Serving is `api/public/media.py`, not `StaticFiles`. It answers **404 for every miss** —
+    malformed path, unknown digest, wrong extension — because a 422 on one and a 404 on
+    another tells a prober which half was wrong. It also fixed a live bug in passing: on a
+    stock Python install `.webp` is absent from the `mimetypes` table, so every generated
+    illustration was served as `application/octet-stream`, and only browser sniffing in
+    `<img>` kept it rendering.
 - **`IMAGE_GEN_KEY` must be a fine-grained HF token with "Make calls to Inference Providers".**
   A plain read token authenticates and then 403s on the first render, which reads nothing like
   a permissions problem until you see the message. No key at all is a supported state, not a
@@ -594,11 +697,19 @@ tells you which code to trust):
 
 - **Exercised.** PubMed and OpenAlex parsing, and the full pipeline as it then was (six stages,
   before `illustrate`) — two runs on 2026-08-20 produced 92 cached sources and two articles.
-- **Exercised, contrary to what this file said until 2026-08-21: Voyage.** All 92 rows carry
-  `sources.embedding_model = 'voyage-4'` with populated 1024-d vectors, created inside those
-  two runs. That string is written from `VoyageEmbeddingProvider.model_id` and from nowhere
-  else; the Ollama provider namespaces its own as `ollama/…`. So a real Voyage call was made,
-  with a real key, and the note claiming otherwise was wrong.
+- **Exercised, contrary to what this file said until 2026-08-21: Voyage.** 288 rows carried
+  `sources.embedding_model = 'voyage-4'` with populated 1024-d vectors. That string is written
+  from `VoyageEmbeddingProvider.model_id` and from nowhere else; the Ollama provider namespaces
+  its own as `ollama/…`. So a real Voyage call was made, with a real key, and the note claiming
+  otherwise was wrong. **Superseded 2026-09-04: embeddings are now Ollama and the cache is one
+  space** — all 353 rows are `ollama/mxbai-embed-large`, re-embedded by
+  `scripts/reembed_sources.py`. Voyage stays fully wired and one setting away
+  (`EMBEDDING_PROVIDER=voyage`), but switching back is a re-embed, not a config edit; see the
+  `EMBEDDING_DIM` trap above.
+- **Exercised 2026-09-04, closing the note below: FLUX.1-schnell.** The 403 was a token
+  permission, as predicted. A fine-grained token with "Make calls to Inference Providers"
+  renders: verified from inside the backend container against the live endpoint, decoded and
+  encoded to WebP. So `_encode_webp` and the dimension read-back have now seen a real response.
 - **Unresolved: which generative provider those runs used.** Both defaults said `ollama` by
   2026-08-20, but the embedding default said `ollama` too and was plainly overridden, so the
   defaults prove nothing about the environment. Each run finished in ~56s including retrieval
@@ -611,14 +722,14 @@ tells you which code to trust):
 - **Not exercised.** Anthropic: the client and its token accounting are written against
   documented response shapes only. Europe PMC and Semantic Scholar are wired but have not been
   enabled in a run (`ENABLED_PROVIDERS=pubmed`).
-- **Not exercised, and blocked rather than untried (checked 2026-08-24): FLUX.1-schnell.** A
-  real call was made and routed correctly — HF's router reached `nscale` — and came back
+- **Resolved 2026-09-04: FLUX.1-schnell.** It was blocked on a token permission, not code —
   `403 Forbidden: This authentication method does not have sufficient permissions to call
-  Inference Providers`. So the request shape, the routing and the error path are confirmed
-  against a live endpoint; **no image has been decoded, encoded to WebP, or stored from a real
-  response.** `_encode_webp` and the dimension read-back are the two pieces that have only ever
-  seen a Pillow image made by the test suite. The fix is a token permission, not code — see the
-  config trap above.
+  Inference Providers` against a correctly routed call (HF's router reached `nscale`). A
+  fine-grained token with "Make calls to Inference Providers" renders. Recorded here because
+  the 403's *sibling* is the one to recognise next time: a **401 `Invalid username or
+  password`** from the same endpoint is not a permission problem at all — it is a revoked key
+  still baked into a running container, because Docker resolves `env_file` at container
+  creation and `restart` does not re-read it. See the config trap above.
 
 That data corrected the classifier twice (DESIGN.md §4) and left one thing open.
 

@@ -1,11 +1,11 @@
-"""Reviewer-uploaded media: what the store accepts, and what a document may cite.
+"""Article media: what the store accepts, and what a document may cite.
 
 Two rules, which are one rule seen from either end:
 
 * **Bytes enter the store only if their content says they are an image.** The
   client's ``Content-Type`` and filename are read and discarded — both are
-  attacker-controlled strings, and this store writes into a directory that is
-  served straight back over HTTP. The first bytes of the file decide.
+  attacker-controlled strings, and what this store holds is served straight
+  back over HTTP. The first bytes of the file decide.
 * **A document may reference only media this store wrote**, plus a YouTube
   video id. A remote ``https://`` image, a ``javascript:`` URL, a hand-typed
   iframe src: all refused, at save time and again at approve time.
@@ -15,30 +15,44 @@ document; one served from our own origin and embedded in a published article is
 stored XSS against every reader of that article. PNG, JPEG, GIF and WebP cannot
 carry script, which is the whole reason the list is those four.
 
-Storage is content-addressed — the filename is the SHA-256 of the bytes. The
-same image uploaded twice is one file, two uploads can never collide, and no
-fragment of a client-supplied string reaches the filesystem, so there is
-nothing to traverse with.
+Storage is content-addressed — the key is the SHA-256 of the bytes. The same
+image stored twice is one row, two writers can never collide, and no fragment
+of a client-supplied string reaches the key.
 
-Local disk is the store for now, and the seam is deliberately narrow:
-``store_image()`` returns the path a document should hold, so the S3 version is
-this module and nothing else (DESIGN.md §11 — deployment is deferred).
-Orphan collection is deferred too: an image dropped from a draft leaves its
-file behind. The files are small, immutable and content-addressed, which makes
-a sweep over ``articles.original_content``/``edited_content`` a job that can be
-written correctly later rather than one that has to be got right now.
+**The bytes live in Postgres**, in ``media_objects``, keyed by that digest. They
+were on local disk until they turned out to be the one piece of published state
+that a database backup did not cover and a container did not carry — a run on
+the host wrote files a containerised API then served as 404s, with the paths in
+``articles.generated_imagery`` pointing at each one. One store, one backup, one
+restore. See ``migrations/0004_media_objects.sql`` for why the table is keyed by
+digest rather than hung off ``articles``.
+
+The module is split so the part worth testing hardest needs no database:
+``prepare_image()`` is pure — it sniffs, digests, and builds the path a document
+will hold — and ``store_image()`` is that plus one INSERT. The seam is still
+narrow enough that an S3 version is this module and nothing else (DESIGN.md §11
+— deployment is deferred).
+
+Orphan collection is deferred, as it was on disk: an image dropped from a draft
+leaves its row behind. Rows are immutable and content-addressed, which makes a
+sweep over ``articles.original_content``/``edited_content`` a job that can be
+written correctly later — and an easier one now that it is a DELETE with no
+filesystem to keep in step.
 """
 
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.domain.models import MediaObject
 from app.services.tiptap import iter_nodes
 
 #: Where stored media is served from. Under ``/api`` on purpose: the frontend
@@ -128,28 +142,47 @@ def sniff_image(data: bytes) -> str | None:
     return None
 
 
-def ensure_media_root(root: Path) -> Path:
-    """Create the store directory and return it resolved.
-
-    Called at app startup: ``StaticFiles`` refuses to mount a directory that
-    does not exist, and a fresh clone has never uploaded anything.
-    """
-    resolved = root.expanduser().resolve()
-    resolved.mkdir(parents=True, exist_ok=True)
-    return resolved
-
-
 @dataclass(frozen=True, slots=True)
 class StoredImage:
-    """A file now in the store. ``src`` is what the document holds."""
+    """An image now in the store. ``src`` is what the document holds."""
 
     src: str
     content_type: str
     size: int
 
 
-def store_image(data: bytes, *, root: Path) -> StoredImage:
-    """Write image bytes to the store and return the path a document may hold.
+@dataclass(frozen=True, slots=True)
+class PreparedImage:
+    """Everything derived from the bytes, before anything is written.
+
+    Split out from ``store_image`` so the decisions worth testing hardest — is
+    this really an image, what is it keyed by, what path will a document hold —
+    are a pure function with no database in reach. The tests that pin them run
+    on every ``pytest`` rather than only when Postgres is up, which matters:
+    seven suites already skip silently without one.
+    """
+
+    digest: str
+    extension: str
+    data: bytes
+
+    @property
+    def src(self) -> str:
+        """The path a document holds, and the one ``MEDIA_SRC_RE`` matches."""
+        return f"{MEDIA_URL_PREFIX}/{self.digest[:2]}/{self.digest[2:]}.{self.extension}"
+
+    @property
+    def content_type(self) -> str:
+        return CONTENT_TYPES[self.extension]
+
+    def stored(self) -> StoredImage:
+        return StoredImage(
+            src=self.src, content_type=self.content_type, size=len(self.data)
+        )
+
+
+def prepare_image(data: bytes) -> PreparedImage:
+    """Sniff, digest, and work out the path — touching nothing.
 
     Raises:
         UnsupportedMediaError: the bytes are not PNG, JPEG, GIF or WebP.
@@ -160,26 +193,75 @@ def store_image(data: bytes, *, root: Path) -> StoredImage:
             "not a PNG, JPEG, GIF or WebP image (the file's own contents were "
             "checked, not its name)"
         )
-
-    digest = hashlib.sha256(data).hexdigest()
-    relative = f"{digest[:2]}/{digest[2:]}.{extension}"
-    target = root / relative
-
-    if not target.exists():
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # Write beside the target and rename. Two reviewers uploading the same
-        # image at once is the normal case for content addressing, and a
-        # half-written file at a path an article already points at is a broken
-        # published image. os.replace is atomic within a filesystem.
-        scratch = target.with_name(f"{target.name}.{uuid4().hex}.part")
-        scratch.write_bytes(data)
-        os.replace(scratch, target)
-
-    return StoredImage(
-        src=f"{MEDIA_URL_PREFIX}/{relative}",
-        content_type=CONTENT_TYPES[extension],
-        size=len(data),
+    return PreparedImage(
+        digest=hashlib.sha256(data).hexdigest(), extension=extension, data=data
     )
+
+
+async def store_image(data: bytes, *, session: AsyncSession) -> StoredImage:
+    """Put image bytes in the store and return the path a document may hold.
+
+    **Does not commit.** The caller owns the transaction — which for the
+    pipeline means the orchestrator, whose rule that no stage commits is not
+    relaxed for this one. The consequence is that ILLUSTRATE now writes rows
+    rather than files, so its pictures land with the stage commit and vanish
+    with the stage rollback. That is strictly better than the disk behaviour it
+    replaces, where a failed run left its images behind as orphans.
+
+    Storing the same image twice is a no-op, not a duplicate and not an error:
+    the digest is the primary key, and ``ON CONFLICT DO NOTHING`` is exact here
+    in a way it is not for ``SourceCache`` — one key, one inference clause,
+    none of the partial-index ambiguity that made that upsert a resolve-first.
+
+    The insert is wrapped in a ``SAVEPOINT`` for the same reason the source
+    cache's retry is: the pipeline session is long-lived, and letting an
+    IntegrityError poison it would discard everything the run has done so far
+    over a decorative picture.
+
+    Raises:
+        UnsupportedMediaError: the bytes are not PNG, JPEG, GIF or WebP.
+    """
+    prepared = prepare_image(data)
+
+    statement = (
+        pg_insert(MediaObject)
+        .values(
+            digest=prepared.digest, extension=prepared.extension, data=prepared.data
+        )
+        .on_conflict_do_nothing(index_elements=[MediaObject.digest])
+    )
+    try:
+        async with session.begin_nested():
+            await session.execute(statement)
+    except IntegrityError:
+        # Only reachable if the row violates a CHECK — the digest shape or the
+        # extension — which means this module and the migration disagree about
+        # what it produces. Not a caller error, so it is not UnsupportedMedia.
+        raise
+
+    return prepared.stored()
+
+
+async def load_image(
+    digest: str, extension: str, *, session: AsyncSession
+) -> MediaObject | None:
+    """The row behind one media path, or None if we never stored it.
+
+    ``extension`` is checked against the row rather than trusted, so the same
+    bytes cannot be served under a second path with a different content type —
+    the digest alone decides identity, and a mismatch means the URL was made up
+    rather than issued by this store.
+    """
+    row = await session.get(MediaObject, digest)
+    if row is None or row.extension != extension:
+        return None
+    return row
+
+
+async def media_digests(session: AsyncSession) -> set[str]:
+    """Every digest currently in the store. Used by the import script."""
+    result = await session.execute(select(MediaObject.digest))
+    return set(result.scalars())
 
 
 def image_node(src: str, alt: str) -> dict[str, Any]:

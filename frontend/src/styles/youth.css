@@ -32,6 +32,30 @@
 
 @layer base {
   :root {
+    /* ── Type ───────────────────────────────────────────────────────────────
+       Instrument Serif is the interface face — headings, body, labels and
+       controls all resolve to it, so `font-heading` and `font-body` are the
+       same family here and the distinction survives only as intent.
+
+       Modernist's own values are overridden rather than edited: `design-system
+       .css` is vendored and read-only, so the retype lives in this file the
+       same way the palette does.
+
+       `--font-heading-weight` drops to 400 because Instrument Serif ships one
+       weight. Left at 800 every bare `h1`–`h4` would be synthetically
+       emboldened by the browser — a smeared outline, not a bolder face.
+
+       `--ew-font-ui` is the two-job exception, and both jobs are the same job:
+       type that has to hold at 10–12px, tracked out and often over a
+       photograph. Article titles and the nav buttons in the site bar, the
+       drawer and the tab bar stay on Archivo. Nothing else may reach for it —
+       a third caller is the beginning of two typefaces sharing the interface,
+       which is the thing this change replaced. */
+    --font-heading: "Instrument Serif", Georgia, "Times New Roman", serif;
+    --font-heading-weight: 400;
+    --font-body: "Instrument Serif", Georgia, "Times New Roman", serif;
+    --ew-font-ui: "Archivo", system-ui, sans-serif;
+
     /* ── Ground and ink ─────────────────────────────────────────────────── */
     --ew-bg: #f4f1ec;
     --ew-surface: #fffefb;
@@ -109,6 +133,45 @@
     --color-text: var(--ew-ink);
     --color-accent: var(--ew-accent);
     --color-divider: var(--ew-rule-soft);
+  }
+
+  /* ── Type scopes ────────────────────────────────────────────────────────
+     The serif above is the *published* face, so it stays on `:root` — anything
+     rendered outside a scope is set the way a reader will see it, which is the
+     safe default for a shared component, an error boundary or a future embed.
+
+     The review desk opts out. It is a work tool rather than a publication: a
+     queue, a form, a sidebar of study types and a set of controls, most of it
+     dense small type in a screen a reviewer reads for an hour at a time. That
+     is the job Modernist picked Archivo for, and it is why these two values
+     are the vendored defaults from `design-system.css` restated rather than a
+     third choice — the desk is not being retyped, it is being left where it
+     was when the public side moved.
+
+     The weight comes back to 800 with the family. It dropped to 400 only
+     because Instrument Serif ships one weight, so leaving it there would set
+     every console heading in Archivo Regular — a retype nobody asked for,
+     arriving as a side effect of the face it no longer uses. */
+  .ew-type-console {
+    --font-heading: "Archivo", system-ui, sans-serif;
+    --font-heading-weight: 800;
+    --font-body: "Archivo", system-ui, sans-serif;
+  }
+
+  /* The exception inside that exception, and it is load-bearing rather than
+     tidy: `FeedPreview` renders the *real* `features/feed/ArticleCard` among
+     real published tiles, and it is nested inside the console scope, so it
+     would inherit Archivo and show the reviewer a tile in a face the feed
+     never uses. A preview that drifts from what publishes is worse than none,
+     because it is reassuring rather than useful — the same reason the overlay
+     renders the live component instead of a console-local clone.
+
+     Restates the `:root` values rather than inheriting them, because
+     inheritance is exactly what the console scope has already interrupted. */
+  .ew-type-feed {
+    --font-heading: "Instrument Serif", Georgia, "Times New Roman", serif;
+    --font-heading-weight: 400;
+    --font-body: "Instrument Serif", Georgia, "Times New Roman", serif;
   }
 
   html[data-theme="dark"] {

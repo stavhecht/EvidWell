@@ -1,5 +1,85 @@
 # Local development only. Production uses managed Postgres (RDS/Neon) — see
 # DESIGN.md §10.
+#
+#   docker compose up            # db -> migrate -> api + worker + web
+#   docker compose up -d db      # still just the database, for the host-venv
+#                                # workflow in the README
+#
+# The one thing that stays on the host is Ollama: a container on macOS has no
+# Metal access, so a containerised llama3.1:8b would be CPU-only and unusably
+# slow. Run `ollama serve` alongside this.
+
+# Shared by every Python service. `<<: *backend` merges these keys wholesale, so
+# a service that needs an extra environment variable has to restate the block
+# rather than add to it — YAML merge does not deep-merge.
+x-backend: &backend
+  build:
+    context: ./backend
+    dockerfile: Dockerfile
+  # Both locations, because `config.py` reads both: its `env_file` is
+  # `(".env", "../.env")` relative to the process's cwd, so a host venv running
+  # from backend/ picks up backend/.env *and the repo-root .env*. Compose only
+  # named backend/.env, so a project whose keys live at the root came up with
+  # none of them — no IMAGE_GEN_KEY (imagery silently "not configured"), no
+  # ANTHROPIC/VOYAGE keys (both providers silently falling back to Ollama), no
+  # ENABLED_PROVIDERS (OpenAlex silently dropped). Every one of those has a
+  # working default, which is exactly why nothing errored and the stack just
+  # quietly did something else. Listing both keeps the container and the host
+  # venv reading the same configuration.
+  #
+  # Both are optional: a fresh clone with neither still boots, because every
+  # setting in app/config.py has a working local default. `environment:` below
+  # still wins for the handful of values that are simply wrong in a container.
+  env_file:
+    - path: ./.env
+      required: false
+    - path: ./backend/.env
+      required: false
+  environment:
+    # Inside Docker the hostname is the service name, not localhost — and not
+    # the 5433 host port, which exists only to dodge a native Homebrew Postgres.
+    DATABASE_URL: postgresql+asyncpg://evidwell:evidwell@db:5432/evidwell
+    # `localhost` in a container is the container. Override OLLAMA_BASE_URL in
+    # your shell if Ollama lives somewhere else.
+    OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    # No MEDIA_ROOT: image bytes are rows in `media_objects`, reached through
+    # DATABASE_URL like everything else. It used to be set here, absolutely,
+    # so the API and the worker resolved it to the same directory — a problem
+    # the database does not have.
+    #
+    # Same bind-mount problem as the web service: watchfiles is inotify-based
+    # and sees nothing through Docker Desktop, so uvicorn --reload would sit
+    # there looking healthy and never reload. Inert in the worker, which does
+    # not watch anything.
+    WATCHFILES_FORCE_POLLING: "true"
+  extra_hosts:
+    # Defined already by Docker Desktop; needed explicitly on Linux.
+    - "host.docker.internal:host-gateway"
+  volumes:
+    # Source is mounted read-only over the copy baked into the image, so an edit
+    # plus `docker compose restart backend` is enough — no rebuild. A rebuild is
+    # only needed when pyproject.toml changes.
+    - ./backend/app:/app/app:ro
+    # scripts/ is in .dockerignore and stays there: it is maintenance tooling,
+    # not part of the deployable image. Mounting it is what gives `migrate` and
+    # `seed` an entry point without widening what ships.
+    - ./backend/scripts:/app/scripts:ro
+    # migrations/ *is* in the image (the Dockerfile copies it), and is mounted
+    # over that copy for the same reason app/ is: otherwise a new .sql file
+    # needs a rebuild before `docker compose run --rm migrate` can see it, and
+    # the failure mode is the worst kind — migrate reports "up to date" and
+    # exits 0, having silently not applied the file you just wrote.
+    - ./backend/migrations:/app/migrations:ro
+    # There is no media mount any more. Image bytes live in `media_objects`,
+    # so they arrive with the database and leave with it — which is what the
+    # old named volume got wrong: it was its own storage, had never seen
+    # ./backend/var/media, and served every path in `articles.generated_imagery`
+    # as a 404 the moment the stack moved into containers. One store, one
+    # backup, one restore. See migrations/0004_media_objects.sql.
+    #
+    # ./backend/var/media may still hold the pre-migration files. Nothing reads
+    # it; `python -m scripts.import_media` moved them and it can be deleted.
+
 services:
   db:
     image: pgvector/pgvector:pg16
@@ -19,24 +99,84 @@ services:
       interval: 5s
       retries: 10
 
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    ports:
-      - "8000:8000"
-    env_file:
-      - ./backend/.env
-    environment:
-      # Inside Docker the hostname is the service name, not localhost.
-      DATABASE_URL: postgresql+asyncpg://evidwell:evidwell@db:5432/evidwell
+  # One-shot. Everything else waits on it completing, so the API can never boot
+  # against an unmigrated database — which it does happily, then fails at the
+  # first query. Re-running is safe; applied files are tracked in
+  # schema_migrations.
+  migrate:
+    <<: *backend
+    command: ["python", "-m", "scripts.migrate"]
+    restart: "no"
     depends_on:
       db:
         condition: service_healthy
+
+  backend:
+    <<: *backend
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /app/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # Without this, POST /pipeline/runs queues work that nothing ever executes.
+  worker:
+    <<: *backend
+    command: ["python", "-m", "app.pipeline.runner"]
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # Not started by `up` — seed_admin prompts for a password (an argument would
+  # land in shell history and in `ps`), so it needs a TTY:
+  #   docker compose run --rm seed --email you@example.com --name "Your Name"
+  seed:
+    <<: *backend
+    profiles: ["seed"]
+    entrypoint: ["python", "-m", "scripts.seed_admin"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  web:
+    image: node:22-alpine
+    working_dir: /app
+    # `npm ci` wipes node_modules, so only install when the volume is empty.
+    command: >
+      sh -c "[ -d node_modules/vite ] || npm ci;
+             npm run dev -- --host 0.0.0.0"
+    environment:
+      # Vite proxies /api so the app stays same-origin in dev; the target is the
+      # service name here, localhost when running on the host.
+      VITE_API_PROXY_TARGET: http://backend:8000
+      # Docker Desktop's bind mounts do not deliver inotify events reliably on
+      # macOS, so HMR needs polling. Costs a little CPU; a dev server that
+      # silently stops reloading costs more.
+      VITE_DEV_POLL: "1"
+    ports:
+      - "5173:5173"
     volumes:
-      # Persist reviewer-uploaded media across container restarts.
-      - evidwell_media:/app/var/media
+      - ./frontend:/app
+      # Shadows the host's node_modules: esbuild and rollup ship platform
+      # binaries, and a darwin-arm64 tree is not runnable on linux.
+      - evidwell_node_modules:/app/node_modules
+    depends_on:
+      - backend
 
 volumes:
   evidwell_pgdata:
-  evidwell_media:
+  evidwell_node_modules:

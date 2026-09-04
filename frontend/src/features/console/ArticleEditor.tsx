@@ -53,10 +53,22 @@ export function ArticleEditor({ content, autosave, articleId, onCitationClick }:
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
-        // The article is three paragraphs of prose. Headings, lists and code
-        // blocks are not part of the format, and offering them invites edits
-        // the public renderer has no way to display.
-        heading: false,
+        // Level 2 only, and it is not optional. The pipeline writes an `h2` for
+        // every `ArticleBody` section, and **TipTap silently drops any node its
+        // schema does not declare** — with `heading: false` the editor would
+        // parse a sectioned draft, discard every heading, and the first
+        // autosave would write an `edited_content` with the article flattened.
+        // Same failure `BeatAttribute` exists to prevent for `attrs.beat`, and
+        // just as invisible: nothing about the saved document is otherwise
+        // wrong.
+        //
+        // Deeper levels stay off because the public renderer draws one heading
+        // style and an h3 under an h2 would render identically — a hierarchy
+        // the reviewer can express and the reader cannot see.
+        heading: { levels: [2] },
+        // Still out: lists, code blocks and quotes are not part of the format,
+        // and offering them invites edits the public renderer has no way to
+        // display.
         codeBlock: false,
         bulletList: false,
         orderedList: false,
@@ -155,7 +167,12 @@ function uploadImagesFrom(transfer: DataTransfer | null, media: MediaInsert): bo
 }
 
 /**
- * Two marks, and the two blocks a reviewer can add.
+ * Two marks, a section heading, and the two blocks a reviewer can add.
+ *
+ * Heading is here because the editor has to be able to *remove* one as well as
+ * render it: a reviewer who merges two sections needs to delete the heading
+ * between them, and a node the schema accepts but no control can toggle is one
+ * the reviewer can only work around.
  *
  * The design comp draws Quote and Insert citation here as well, and both would
  * be controls that break something. Quote is disabled in StarterKit above
@@ -206,6 +223,16 @@ function Toolbar({
           {mark.label}
         </button>
       ))}
+
+      <button
+        type="button"
+        onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}
+        aria-pressed={editor.isActive("heading", { level: 2 })}
+        title="Turn this line into a section heading, or back into prose"
+        className={toolbarButton(editor.isActive("heading", { level: 2 }))}
+      >
+        Heading
+      </button>
 
       <span aria-hidden className={TOOLBAR_DIVIDER} />
 

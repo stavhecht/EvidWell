@@ -144,12 +144,21 @@ async def check_sources_resolve(
 
 
 def check_beats_are_cited(output: SynthesisOutput) -> list[ValidationFailure]:
-    """Check 3 — the evidence beat carries at least one citation.
+    """Check 3 — the evidence beat and every section carry a citation.
 
     An uncited factual sentence is exactly the failure this whole system exists
-    to prevent, so beat 2 (what the research shows) must cite something.
+    to prevent, so beat 2 (what the research shows) must cite something, and so
+    must each section.
 
-    Two deliberate exemptions:
+    **Sections are covered for the same reason beat 2 is, at a scale that makes
+    it matter more.** Before sections existed the widest gap this check left was
+    three interpretive sentences. A section is up to eight, and there may be
+    five of them — so exempting them would quietly turn a three-sentence
+    allowance into most of the article. A section exists to say what the
+    research shows; if it cannot name a source, it is the kind of prose the
+    grounding invariant is for.
+
+    Two deliberate exemptions, both unchanged:
 
     * verdict ``no_evidence`` — an article correctly reporting that nothing was
       found has nothing to cite, and demanding a citation would push the model
@@ -163,15 +172,34 @@ def check_beats_are_cited(output: SynthesisOutput) -> list[ValidationFailure]:
 
     from app.domain.contracts import extract_handles
 
+    failures: list[ValidationFailure] = []
+
     if not extract_handles(output.body.beat_2_evidence):
-        return [
+        failures.append(
             ValidationFailure(
                 code="uncited_beat",
                 message="the evidence beat states findings without citing any source",
                 detail={"beat": "beat_2_evidence"},
             )
-        ]
-    return []
+        )
+
+    for index, section in enumerate(output.body.sections, start=1):
+        # The heading is excluded on purpose: it is a label, and a citation
+        # marker in one would render as a chip in a title. The prose under it
+        # is what makes a statement.
+        if not extract_handles(section.body):
+            failures.append(
+                ValidationFailure(
+                    code="uncited_section",
+                    message=(
+                        f"section {index} ({section.heading!r}) states findings "
+                        "without citing any source"
+                    ),
+                    detail={"section": index, "heading": section.heading},
+                )
+            )
+
+    return failures
 
 
 def check_verdict_within_grade(
@@ -312,6 +340,7 @@ def summarise_failures(report: ValidationReport) -> str:
         "hallucinated_handle": "hallucinated citation",
         "unresolvable_source": "unresolvable source",
         "uncited_beat": "uncited evidence beat",
+        "uncited_section": "uncited section",
         "verdict_exceeds_grade": "verdict exceeds evidence grade",
         "malformed_body": "unparseable body",
     }

@@ -152,7 +152,14 @@ class PersistStage:
         self._session.add(article)
         await self._session.flush()
 
-        cited = ctx.draft.all_cited_handles()
+        # The *body*, not ``all_cited_handles()``. That union includes handles
+        # the model named only in its ``citations`` list, and this flag is what
+        # ``FeedService.article`` filters the public source list on — so a
+        # handle listed but never written about was shown to the reader as a
+        # source the article cites, beside prose that never refers to it. The
+        # union is still right where it is used: hallucination and resolution
+        # checks must see every handle the model emitted anywhere.
+        cited = ctx.draft.body.cited_handles()
         seen: set[tuple[str, str]] = set()
         for claim, ranked in ctx.ranked.items():
             for entry in ranked:

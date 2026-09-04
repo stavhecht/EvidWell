@@ -33,7 +33,7 @@ from app.domain.enums import SourceApi, StudyType, Verdict
 #: **This is the only definition of a marker, and tiptap.py builds on it.** The
 #: parser and the handle extractor disagreeing is worse than either being
 #: strict: handles inside a marker the extractor cannot read are absent from
-#: ``all_cited_handles()``, so ``was_cited`` is false for sources the article
+#: ``ArticleBody.cited_handles()``, so ``was_cited`` is false for sources the article
 #: visibly cites, and ``check_beats_are_cited`` reports an uncited beat that is
 #: cited on the page.
 CITATION_MARKER_PATTERN = r"\[S\d+(?:\s*,\s*S\d+)*\]"
@@ -255,26 +255,90 @@ class SynthesisInput(BaseModel):
         return {s.handle for s in self.sources}
 
 
-class ArticleBody(BaseModel):
-    """The three beats. Each is a ceiling, not a target.
+class ArticleSection(BaseModel):
+    """One titled stretch of the evidence discussion, between beats 2 and 3.
 
-    A beat that would be honest at one sentence must stay one sentence — see
-    DESIGN.md §6. Nothing in this system pads to length.
+    Sections are what let an article run to a three-to-five minute read without
+    becoming three unbroken blocks of prose. They are **optional and have no
+    minimum** — that is the whole point. DESIGN.md §6's rule is that length is a
+    ceiling and never a floor, so a `min_length` here would be a padding
+    instruction: an article resting on one small trial would be obliged to
+    invent two more things to say about it.
+
+    ``body`` may hold blank-line-separated paragraphs; ``tiptap.py`` splits them
+    into sibling paragraph nodes.
+    """
+
+    heading: NonEmptyStr = Field(description="A plain descriptive label, not a claim")
+    body: NonEmptyStr = Field(description="The section's prose, with inline citations")
+
+    @field_validator("heading")
+    @classmethod
+    def _heading_at_most_8_words(cls, value: str) -> str:
+        if len(value.split()) > 8:
+            raise ValueError("a section heading must be at most 8 words")
+        return value
+
+    @field_validator("body")
+    @classmethod
+    def _body_at_most_8_sentences(cls, value: str) -> str:
+        if count_sentences(value) > 8:
+            raise ValueError("a section must be at most 8 sentences")
+        return value
+
+
+class ArticleBody(BaseModel):
+    """Three beats, plus the optional sections that sit between 2 and 3.
+
+    Every bound here is a ceiling, not a target. A beat that would be honest at
+    one sentence must stay one sentence, and an article with one usable trial
+    should carry no sections at all — see DESIGN.md §6. Nothing in this system
+    pads to length.
+
+    The three beats stayed named fields when sections arrived, rather than
+    becoming a list. Three things address them by name: ``derive_card`` reads
+    beat 1 for the feed excerpt, ``check_beats_are_cited`` reads beat 2, and
+    ``PersistStage`` places the generated lead image above beat 1. Reshaping the
+    spine would have rippled into all three and bought nothing the sections do
+    not already give.
     """
 
     beat_1_claim: NonEmptyStr = Field(description="What it claims to do")
     beat_2_evidence: NonEmptyStr = Field(description="What the research actually shows")
+    sections: list[ArticleSection] = Field(
+        default_factory=list,
+        max_length=5,
+        description="Optional titled sections expanding on the evidence",
+    )
     beat_3_bottom_line: NonEmptyStr = Field(description="Bottom line / caveat")
 
-    @field_validator("beat_1_claim", "beat_2_evidence", "beat_3_bottom_line")
+    @field_validator("beat_1_claim")
     @classmethod
-    def _at_most_three_sentences(cls, value: str) -> str:
-        if count_sentences(value) > 3:
-            raise ValueError("each beat must be at most 3 sentences")
+    def _claim_at_most_four_sentences(cls, value: str) -> str:
+        if count_sentences(value) > 4:
+            raise ValueError("the claim beat must be at most 4 sentences")
+        return value
+
+    @field_validator("beat_2_evidence", "beat_3_bottom_line")
+    @classmethod
+    def _at_most_five_sentences(cls, value: str) -> str:
+        if count_sentences(value) > 5:
+            raise ValueError("this beat must be at most 5 sentences")
         return value
 
     def as_text(self) -> str:
-        return "\n\n".join([self.beat_1_claim, self.beat_2_evidence, self.beat_3_bottom_line])
+        """Every word of the body, in reading order.
+
+        Sections are included because ``cited_handles`` is built on this: a
+        section's citations missing from the handle set would make ``was_cited``
+        false for sources the article visibly cites, and would leave the
+        strongest evidence in the article invisible to validation.
+        """
+        parts = [self.beat_1_claim, self.beat_2_evidence]
+        for section in self.sections:
+            parts.extend([section.heading, section.body])
+        parts.append(self.beat_3_bottom_line)
+        return "\n\n".join(parts)
 
     def cited_handles(self) -> set[str]:
         return extract_handles(self.as_text())

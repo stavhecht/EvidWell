@@ -370,9 +370,11 @@ force reads exactly like enforcement that works.
 
 A picture reaches a draft two ways: a reviewer adds one from their own machine, or the
 pipeline's `illustrate` stage draws one (§3.4c). A reviewer can also embed a YouTube video.
-All are block-level TipTap nodes beside the beat paragraphs, so none disturbs the three beats
-— those are addressed by `attrs.beat`, and a picture above beat 1 does not change which
-paragraph the feed card is derived from.
+All are block-level TipTap nodes beside the beat paragraphs, so none disturbs the beats — those
+are addressed by `attrs.beat`, and a picture above beat 1 does not change which paragraph the
+feed card is derived from. The same holds for the section headings and paragraphs the pipeline
+writes between beats 2 and 3 (§6): they carry no `beat` attribute, so however many of them
+there are, `beat_text` still finds the three.
 
 The two sources of a picture are not two code paths. A generated image goes through the same
 `store_image`, produces the same content-addressed `src`, is built into a node by
@@ -423,7 +425,7 @@ The three things that follow from storing data rather than a stylesheet:
   CSS on a published page.
 
 A percentage rather than pixels because the editor's column (~850px) and the article's measure
-(64ch) differ, and a percentage is the only unit that means the same in both. No x/y
+(76ch) differ, and a percentage is the only unit that means the same in both. No x/y
 coordinates: media stay siblings of the beat paragraphs and are placed by being dragged
 between them, which is what keeps `attrs.beat` — and therefore the derived card — meaningful.
 
@@ -1125,7 +1127,7 @@ Raising `UnanchoredQuery` is part of the protocol, not an implementation detail 
 
 Input: product + claims, top-k abstracts each tagged `S1..Sn` with year and study type, and a
 strict system prompt. Output (`SynthesisOutput`): `headline`, `verdict`, `summary`,
-`body` (three beats), `citations[]`.
+`body` (three beats plus 0–5 sections), `citations[]`.
 
 The system prompt enforces, in order of importance: use only the provided sources; attach a
 source id to every factual claim; say plainly when evidence is weak or absent; never use
@@ -1136,8 +1138,12 @@ never give medical advice.
 
 1. Every `S`-handle in `body` and in `citations[]` exists in the prompt's handle set.
 2. Every referenced source resolves to a row with a non-null PMID or DOI.
-3. Every one of the three beats contains at least one citation, unless the verdict is
-   `no evidence`.
+3. Beat 2 and **every section** contain at least one citation, unless the verdict is
+   `no evidence`. Beats 1 and 3 are exempt: beat 1 restates the product's own marketing claim
+   and beat 3 is an interpretive bottom line, so requiring citations there encourages
+   decorative citation, which is worse than none. Sections are *not* exempt — one is up to
+   eight sentences and there may be five, so exempting them would turn a deliberate
+   three-sentence allowance into most of the article.
 4. The verdict does not exceed `max_verdict_for_grade(best_grade_among_cited)`.
 5. Field bounds (§6) hold.
 
@@ -1173,11 +1179,23 @@ the second is a signal that the filters are tighter than the corpus can satisfy.
 
 ## 6. Article format
 
-Primary output is the on-tap article: ~120–250 words, up to ~300 for a rich evidence base.
-Three beats: (1) what it claims → (2) what the research shows → (3) bottom line / caveat.
+Primary output is the on-tap article: a three-to-five minute read, ~700–950 words where the
+evidence supports it. A three-beat spine — (1) what it claims → (2) what the research shows →
+(3) bottom line / caveat — with up to five titled **sections** between beats 2 and 3 working
+through the evidence in detail.
 
-**Length is a ceiling, not a floor.** Thin evidence should produce a short, honest card
-("one small trial suggests X; not enough to conclude"). Nothing in the system pads to length.
+The spine stayed three named fields when sections arrived rather than becoming a list, because
+three things address the beats by name: `derive_card` reads beat 1 for the feed excerpt,
+`check_beats_are_cited` reads beat 2, and `PersistStage` places the generated lead image above
+beat 1. Section paragraphs carry no `attrs.beat` — a section is a sibling of the beats, exactly
+as a reviewer-added paragraph is, and must not answer to `beat_text`.
+
+**Length is a ceiling, not a floor, and this is where that is easiest to lose.** Sections have
+**no minimum**. A `min_length` would be a padding instruction: an article resting on one small
+trial would be obliged to invent two more things to say about it. Thin evidence should still
+produce a short honest article — one or two sources means no sections at all, and the beats
+alone. The prompt states the shape by evidence volume; nothing enforces a floor, and nothing
+should.
 
 Bounds are enforced structurally, per field, not as a global word count:
 
@@ -1185,12 +1203,54 @@ Bounds are enforced structurally, per field, not as a global word count:
 |---|---|---|
 | `headline` | ≤ 12 words | Pydantic validator |
 | `summary` | ≤ 2 sentences | Pydantic validator |
-| `body.beat_1/2/3` | ≤ 3 sentences each | Pydantic validator |
+| `body.beat_1_claim` | ≤ 4 sentences | Pydantic validator |
+| `body.beat_2_evidence` | ≤ 5 sentences | Pydantic validator |
+| `body.beat_3_bottom_line` | ≤ 5 sentences | Pydantic validator |
+| `body.sections` | 0–5 sections | Pydantic `max_length` |
+| `body.sections[].heading` | ≤ 8 words | Pydantic validator |
+| `body.sections[].body` | ≤ 8 sentences | Pydantic validator |
 | `verdict` | one label + optional one-clause qualifier | enum + ≤ 15-word qualifier |
+
+A section's `body` may hold blank-line-separated paragraphs; `tiptap.py` splits them into
+sibling paragraph nodes. Its `heading` renders as an `h2` and is a **label, never a claim** —
+"Dose and duration", not "Magnesium improves sleep" — so a heading cannot assert more than the
+sources support, and citation markers are not allowed in one.
 
 Every article renders with an "informational, not medical advice" disclaimer. It is a
 render-time constant in a shared layout component, not model output — the model cannot forget
 it, reword it, or drop it.
+
+### Register: written for a phone, not a journal
+
+Two rules in the synthesis prompt's Framing section, both aimed at a reader with no medical
+training who is using the app between other things.
+
+**No em dashes or en dashes**, in any field including the headline and section headings. They
+read as academic, and a comma, colon, full stop or bracket always serves. Ranges go in words
+("four to eight weeks").
+
+**Every technical term and acronym is explained the first time it appears**, either in brackets
+straight after it or in one or two short sentences, with the words spelled out before the short
+form is used ("randomised controlled trial (RCT)", then "RCT"). A term needing more than two
+sentences does not belong in the article at all; say the finding in ordinary words instead.
+
+**What made the dash rule stick is worth knowing before editing this file, because the obvious
+approach failed.** The prompt itself contained 18 em dashes while instructing against them, and
+a local model mimics the register it is handed far more reliably than it follows a rule about
+it. Removing them from the prompt took em dashes in output to **0 of 6 runs**. The same lever is
+why `STUDY_TYPE_LABELS` carries a plain-English gloss on every entry rather than a bare label:
+telling the model to explain "meta-analysis" did nothing, because the bare term was printed on
+every source line it read. Do not "tidy" those glosses back to bare labels, and do not
+reintroduce an em dash here.
+
+Measured on `llama3.1:8b`, six runs, the same 12 sources: dashes eliminated outright, and the
+glossed labels lifted inline citations from 3.2 to 5.0 handles per article with section counts
+holding. **The term-explanation rule only half-took**: "RCT" is now usually spelled out, but
+"systematic review" and "meta-analysis" still appear unglossed in most runs. That is the local
+model's instruction-following ceiling, not a missing rule — the prompt is at ~1,500 words and
+additions past this point measurably trade against each other (an earlier four-line addition
+about `summary` halved section output). Reach for a larger `OLLAMA_SYNTHESIS_MODEL` before
+reaching for more prompt.
 
 ---
 
@@ -1466,8 +1526,12 @@ What it deliberately leaves out is as much of the design as what it includes:
   replicas at least make that count visible. It also keeps the `LoginThrottle` caveat (§3.2)
   from getting quietly worse: in-process state means N processes is N× the budget, and one
   replica per container keeps that ratio legible.
-- `MEDIA_ROOT` is a named volume, not a bind mount or container-local storage — §3.4b's point
-  that it holds live article assets rather than a cache, so losing it breaks published pages.
+- **No media volume, of any kind.** Image bytes are rows in `media_objects`, so they arrive
+  with the database and leave with it. This was a named volume, and that is exactly how the
+  problem was found: a volume is its own storage, so images written by a host-venv run were
+  404s inside the container while `articles.generated_imagery` still pointed at every one of
+  them. §3.4b's point was that these are live article assets rather than a cache — the fix for
+  which is to stop having a second place they can be lost from.
 
 **Target, designed for but not provisioned:**
 

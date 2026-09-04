@@ -7,10 +7,17 @@
  *
  * Three things worth knowing before editing:
  *
- * - **The measures are arguments.** `max-w-prose` (760px) on the article and
- *   `max-w-[64ch]` on its prose are not arbitrary — they are what make the body
- *   read as an article rather than as a page. Widening either changes the
- *   voice, not just the layout.
+ * - **The measures are arguments.** `max-w-article` (800px) on the article page
+ *   and 520px on its prose are not arbitrary — they are what make the body read
+ *   as an article rather than as a page. Changing either changes the voice, not
+ *   just the layout.
+ *
+ *   They were 760px and `max-w-[64ch]`, sized for a body of three short beats.
+ *   Articles now carry subheads and several sections, so the column widened —
+ *   but the body reads wider because the *type* grew with it, not because the
+ *   column alone did; see PROSE_MEASURE for the measurement that forced that.
+ *   `max-w-prose` still exists at 760px and still frames the short public
+ *   pages — see `tailwind.config.ts`.
  * - **`shadow-panel` and `shadow-pop` are the only shadows in the system.** Both
  *   belong to things that float over the page. Nothing resting on the page gets
  *   one; the tiles use radius and a scrim instead.
@@ -38,14 +45,20 @@ export const HERO =
 export const HERO_VIDEO = "h-full w-full object-cover saturate-[0.72]";
 
 /**
- * The one Playfair element in the product.
+ * The statement over the hero video.
+ *
+ * This was the product's one Playfair element, and it no longer needs a font of
+ * its own: Instrument Serif is now the interface face, and a display serif at
+ * 60px is what it is drawn for. So the flourish stays and the second file does
+ * not. It is set at 400 because that is the only weight the family ships —
+ * `font-bold` here would ask the browser to smear the outline.
  *
  * Sits at 70% opacity over the footage rather than at full white: the statement
  * is a mood, and type at full strength over moving video reads as a caption
  * demanding to be finished before the picture is looked at.
  */
 export const HERO_STATEMENT =
-  "pointer-events-none absolute left-1/2 top-1/2 w-[min(90%,16ch)] -translate-x-1/2 -translate-y-1/2 text-balance text-center font-display text-[clamp(28px,3.6vw,60px)] font-bold uppercase leading-[1.1] text-[#f4f0ed] opacity-70";
+  "pointer-events-none absolute left-1/2 top-1/2 w-[min(90%,16ch)] -translate-x-1/2 -translate-y-1/2 text-balance text-center font-heading text-[clamp(28px,3.6vw,60px)] uppercase leading-[1.1] text-[#f4f0ed] opacity-70";
 
 export const FEED_BODY = "mx-auto max-w-page px-gutter";
 
@@ -110,8 +123,14 @@ export const TILE_IMAGE = "h-full w-full object-cover";
  */
 export const TILE_TYPESET =
   "flex h-full w-full flex-col justify-end gap-2 p-4";
+/**
+ * An article's title, so `font-ui` — see the type block in `styles/youth.css`.
+ * The tile headline is the smallest type in the product that has to be read
+ * rather than glanced at, and at 11.5–15px over a photograph the serif's
+ * modulation is the first thing to go.
+ */
 export const TILE_TYPESET_HEADLINE =
-  "text-pretty font-heading text-[15px] font-bold leading-[1.2] tracking-[-0.015em] text-ink";
+  "text-pretty font-ui text-[15px] font-bold leading-[1.2] tracking-[-0.015em] text-ink";
 export const TILE_TYPESET_KICKER =
   "font-body text-kicker font-bold uppercase text-ink-3";
 
@@ -123,8 +142,9 @@ export const TILE_KICKER =
   "mb-1 flex items-center gap-1.5 font-body text-[8.5px] font-bold uppercase leading-none tracking-[0.13em] text-[rgb(255_253_250/0.78)]";
 export const TILE_QUALIFIER =
   "mb-1 line-clamp-1 font-body text-[9px] leading-tight text-[rgb(255_253_250/0.66)]";
+/** The same title, over the picture. `font-ui` for the reason above. */
 export const TILE_HEADLINE =
-  "line-clamp-3 text-pretty font-heading text-[11.5px] font-bold leading-[1.28] tracking-[-0.012em] text-[#fffdfa]";
+  "line-clamp-3 text-pretty font-ui text-[11.5px] font-bold leading-[1.28] tracking-[-0.012em] text-[#fffdfa]";
 
 /**
  * The Save control, floated over the tile.
@@ -163,8 +183,8 @@ export const RETRY_BUTTON = `mt-4 ${PILL_BUTTON}`;
 
 /* ── the article page ───────────────────────────────────────────────────── */
 
-export const ARTICLE_PAGE = "mx-auto max-w-prose px-gutter pb-[70px] pt-[34px]";
-export const ARTICLE_ERROR_PAGE = "mx-auto max-w-prose px-gutter py-24";
+export const ARTICLE_PAGE = "mx-auto max-w-article px-gutter pb-[70px] pt-[34px]";
+export const ARTICLE_ERROR_PAGE = "mx-auto max-w-article px-gutter py-24";
 export const ARTICLE_ERROR_TITLE = "font-heading text-headline font-extrabold text-ink";
 export const BACK_TO_FEED_LINK = `mt-4 inline-block ${ACCENT_TEXT_ACTION} uppercase tracking-[0.06em]`;
 
@@ -175,10 +195,12 @@ export function articleKicker(subjectText: string): string {
   return `mb-4 font-body text-micro font-bold uppercase tracking-[0.14em] ${subjectText}`;
 }
 
+/** The article's own title — the one heading that stays on Archivo. */
 export const ARTICLE_TITLE =
-  "text-pretty font-heading text-title font-bold leading-[1.04] tracking-[-0.03em] text-ink";
+  "text-pretty font-ui text-title font-bold leading-[1.04] tracking-[-0.03em] text-ink";
+/** Sized off the body, not fixed: it must stay a step above `text-prose`. */
 export const ARTICLE_LEDE =
-  "mt-5 text-pretty font-body text-[19px] leading-[1.5] text-ink-2";
+  "mt-5 text-pretty font-body text-[23px] leading-[1.45] text-ink-2";
 
 /** The byline strip — pipe-separated facts, not a table. */
 export const ARTICLE_BYLINE =
@@ -212,8 +234,9 @@ export const RETRACTION_BANNER_TEXT = "mt-1.5 block max-w-[64ch] text-ink-2";
 export const SOURCE_RETRACTED =
   "mt-1 font-body text-micro font-semibold uppercase tracking-[0.04em] text-accent-ink";
 
+/** Tracks the prose measure, so it sits under the body rather than beside it. */
 export const ARTICLE_DISCLAIMER =
-  "mt-8 max-w-[64ch] font-body text-[11.5px] leading-[1.5] text-ink-4";
+  "mt-8 max-w-[600px] font-body text-[11.5px] leading-[1.5] text-ink-4";
 
 /* ── save and share ─────────────────────────────────────────────────────── */
 
@@ -244,13 +267,14 @@ export const REC_CARD =
   "block rounded-tile border border-rule-soft bg-surface px-5 pb-[22px] pt-5 transition-colors hover:border-ink";
 export const REC_KICKER =
   "mb-2.5 font-body text-[9.5px] font-bold uppercase tracking-[0.13em] text-ink-3";
+/** An article title again, in the recommendation cards. */
 export const REC_TITLE =
-  "text-pretty font-heading text-[15.5px] font-bold leading-[1.22] tracking-[-0.015em] text-ink";
+  "text-pretty font-ui text-[15.5px] font-bold leading-[1.22] tracking-[-0.015em] text-ink";
 
 /* ── skeletons ──────────────────────────────────────────────────────────── */
 
 export const ARTICLE_SKELETON_PAGE =
-  "mx-auto max-w-prose animate-pulse px-gutter pb-[70px] pt-10";
+  "mx-auto max-w-article animate-pulse px-gutter pb-[70px] pt-10";
 export const SKELETON_KICKER = "h-5 w-40 rounded-full bg-surface-2";
 export const SKELETON_TITLE = "mt-6 h-12 w-4/5 rounded-field bg-surface-2";
 export const SKELETON_LEDE = "mt-4 h-6 w-full rounded-field bg-surface-2";
@@ -261,13 +285,56 @@ export const SKELETON_PARAGRAPH = "h-24 rounded-field bg-surface-2";
 /* ── article prose and citation chips ───────────────────────────────────── */
 
 /**
- * `flow-root` contains the floats a reviewer may have placed. Without it a
+ * The body column: **600px, which is ~89 characters a line** at `text-prose`
+ * (20px Instrument Serif).
+ *
+ * The character count is measured, not estimated, and measuring it is what
+ * decided the size of the type. Instrument Serif averages **5.71px a character
+ * at 17px** — run the font's advance widths over a paragraph of real article
+ * prose and divide. That is ~0.34em, far narrower than a text serif, because it
+ * is a display face doing a body job. Two numbers in this file were wrong
+ * because nobody had run that:
+ *
+ *   - `max-w-[64ch]` rendered as 441px, ~77 characters. `ch` is the width of
+ *     the *wrapper's* zero and the wrapper inherits 15px while the paragraphs
+ *     are larger, so the unit was measuring the wrong font.
+ *   - 520px was then written down as "~82 characters, the top of the
+ *     comfortable range". It was ~91 — already past it.
+ *
+ * So the column could not simply be widened again: at 17px, a 600px column is
+ * 105 characters and a 640px one is 112. The type had to grow with it.
+ * `text-prose` is 20px for that reason, which puts 600px at ~89 characters —
+ * long, and deliberately at the far end rather than the middle. A count that
+ * reads as "comfortable" in a face this condensed renders as a ribbon of text
+ * in a wide box, which is the complaint this replaced.
+ *
+ * Anyone retuning this: the relationship is `chars ≈ 2.98 × width ÷ size`. Move
+ * one and the other has to follow, or the measure silently goes long.
+ *
+ * `flow-root` contains the floats a reviewer may have placed; without it a
  * picture floated beside the last paragraph hangs below the prose and over the
  * disclaimer.
  */
-export const PROSE_MEASURE = "flow-root max-w-[64ch]";
+export const PROSE_MEASURE = "flow-root max-w-[600px]";
 export const PROSE_PARAGRAPH =
   "mb-[22px] text-pretty font-body text-prose text-ink-2 last:mb-0";
+
+/**
+ * A section title inside the article.
+ *
+ * `font-ui` because it is a *title*, and titles in this product are the one
+ * place the sans is used — `ARTICLE_TITLE` is the same face. A serif subhead at
+ * this size sits too close to the serif body to break it up, which is the whole
+ * job of the element.
+ *
+ * The asymmetric margin is the point: a heading belongs to the prose beneath
+ * it, so the space above it is nearly three times the space below. Set flush
+ * with `text-ink` against the body's `text-ink-2`, so the hierarchy is carried
+ * by weight and colour rather than by size alone — it must read as a step below
+ * the 32–50px `h1` without competing with it.
+ */
+export const PROSE_HEADING =
+  "mb-2.5 mt-9 text-pretty font-ui text-[19px] font-bold leading-[1.25] tracking-[-0.02em] text-ink first:mt-0";
 
 /** `whitespace-nowrap` so a chip never wraps away from the word it follows. */
 export const CHIP_ANCHOR = "relative whitespace-nowrap";
@@ -299,7 +366,7 @@ export const POPOVER_UNRESOLVED = "mt-2 block font-body text-meta text-ink-3";
  * Media sits inside the prose measure rather than breaking out of it.
  *
  * A full-bleed image is the magazine move, and this is not a magazine: the
- * column is 64 characters because that is where the evidence reads well, and a
+ * column is ~89 characters because that is where the evidence reads well, and a
  * picture that escapes it announces itself as the more important thing on the
  * page.
  *
@@ -353,8 +420,8 @@ export const VIDEO_CAPTION = "mt-2 font-body text-micro text-ink-3";
  * The previous design pinned them beside the prose, which answered "what is
  * this resting on?" without scrolling. This one answers it at the end, and the
  * citation chips are what serve the mid-article question — each one opens the
- * paper it points at in place. On a 760px measure a 320px sidebar would leave
- * the prose too narrow to be the thing the page is for.
+ * paper it points at in place. On this measure a 320px sidebar would leave the
+ * prose too narrow to be the thing the page is for.
  */
 export const SOURCES_SECTION =
   "mt-9 rounded-panel border border-rule-soft bg-surface-2 px-7 py-[26px]";

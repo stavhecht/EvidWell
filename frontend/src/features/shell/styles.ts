@@ -10,6 +10,11 @@
  * - **Actions are pills, content is rounded rectangles.** Now that tiles and
  *   panels have corners, `rounded-full` is what still separates a control from
  *   a card at a glance. Anything clickable and standalone in here is a pill.
+ * - **The nav buttons are the product's other sans.** Everything else in the
+ *   interface is set in Instrument Serif; the buttons in this bar, in the
+ *   drawer and in the tab bar keep Archivo via `font-ui`, because they are
+ *   10–12px tracked-out caps and a display serif gives up its shapes there.
+ *   Article titles are the only other caller — see `styles/youth.css`.
  * - **The logo is centred and the nav is not.** The bar is a three-column grid
  *   with the mark in the middle column, so the wordmark stays optically centred
  *   on the page regardless of how wide the two nav clusters grow.
@@ -53,11 +58,12 @@ export const SEARCH_FORM =
   "flex min-w-0 max-w-[240px] flex-1 items-center gap-2 rounded-full border border-rule-soft bg-surface px-3.5 py-2 focus-within:border-ink-3";
 export const SEARCH_RING =
   "h-[11px] w-[11px] flex-none rounded-full border-[1.5px] border-ink-3";
+/** A field, not a button — so it takes the interface serif like other prose. */
 export const SEARCH_INPUT =
   "w-full min-w-0 border-0 bg-transparent p-0 font-body text-[12.5px] text-ink outline-none placeholder:text-ink-4";
 
 const NAV_LINK =
-  "whitespace-nowrap font-body text-micro font-semibold uppercase leading-none tracking-[0.13em] transition-colors";
+  "whitespace-nowrap font-ui text-micro font-semibold uppercase leading-none tracking-[0.13em] transition-colors";
 
 /** The current route steps up in ink; the accent is reserved for "your feed". */
 export function navLink(isActive: boolean): string {
@@ -69,7 +75,7 @@ export const NAV_LINK_ACCENT = `${NAV_LINK} text-accent-ink hover:text-accent`;
 
 /** The avatar. Ink-filled, so it reads as a person rather than a control. */
 export const AVATAR =
-  "flex h-7 w-7 flex-none items-center justify-center rounded-full bg-invert font-body text-[10.5px] font-bold leading-none tracking-[0.04em] text-invert-fg";
+  "flex h-7 w-7 flex-none items-center justify-center rounded-full bg-invert font-ui text-[10.5px] font-bold leading-none tracking-[0.04em] text-invert-fg";
 
 export const THEME_TOGGLE =
   "flex flex-none items-center justify-center rounded-full border border-rule bg-transparent p-[7px] leading-none text-ink-3 transition-colors hover:border-ink hover:text-ink";
@@ -91,30 +97,34 @@ export const DRAWER_LIST = "flex flex-col";
  * of vertical padding rather than the 8 the type alone would want.
  */
 export function drawerRow(active: boolean): string {
-  return `flex min-h-[44px] items-baseline justify-between gap-2.5 border-0 border-b border-rule-soft bg-transparent py-[15px] text-left font-heading text-[17px] tracking-[-0.015em] transition-colors hover:text-accent-ink ${
+  return `flex min-h-[44px] items-baseline justify-between gap-2.5 border-0 border-b border-rule-soft bg-transparent py-[15px] text-left font-ui text-[17px] tracking-[-0.015em] transition-colors hover:text-accent-ink ${
     active ? "font-bold text-accent-ink" : "font-medium text-ink"
   }`;
 }
 
-export const DRAWER_COUNT = "font-body text-[11.5px] font-normal text-ink-4";
+/** Rides inside a drawer row, so it takes the row's face rather than the page's. */
+export const DRAWER_COUNT = "font-ui text-[11.5px] font-normal text-ink-4";
 export const DRAWER_FOOTER =
   "mt-7 flex flex-col gap-3.5 border-t border-rule-soft pt-5";
 export const DRAWER_LINK =
-  "font-body text-[12px] font-semibold uppercase tracking-[0.12em] text-ink hover:text-accent-ink";
+  "font-ui text-[12px] font-semibold uppercase tracking-[0.12em] text-ink hover:text-accent-ink";
 export const DRAWER_LINK_ACCENT =
-  "font-body text-[12px] font-semibold uppercase tracking-[0.12em] text-accent-ink hover:text-accent";
+  "font-ui text-[12px] font-semibold uppercase tracking-[0.12em] text-accent-ink hover:text-accent";
 
 /* ── the mobile tab bar ─────────────────────────────────────────────────── */
 
 /**
  * Shown below `sm` only, where the top bar has no room for the nav cluster.
  * Sticky at the bottom rather than fixed, so it cannot cover the last tile.
+ *
+ * It is the top nav in its small-screen form, not a fourth surface, so its
+ * buttons take `font-ui` for the same reason the bar's do.
  */
 export const TAB_BAR =
   "sticky bottom-0 z-40 grid grid-cols-4 border-t border-rule-soft bg-ground sm:hidden";
 
 export function tabButton(active: boolean): string {
-  return `min-h-[44px] border-0 border-t-2 bg-transparent px-0 pb-4 pt-3.5 font-body text-[10px] font-bold uppercase leading-none tracking-[0.11em] transition-colors ${
+  return `min-h-[44px] border-0 border-t-2 bg-transparent px-0 pb-4 pt-3.5 font-ui text-[10px] font-bold uppercase leading-none tracking-[0.11em] transition-colors ${
     active ? "border-accent text-ink" : "border-transparent text-ink-3"
   }`;
 }

@@ -29,7 +29,14 @@ import { ReviewQueue } from "@/features/console/ReviewQueue";
 
 export default function ReviewRoutes() {
   return (
-    <>
+    /*
+      `ew-type-console` retypes the whole desk back to Archivo — see the type
+      scopes in `styles/youth.css`. It sits here rather than on each screen so
+      a new console route cannot forget it, and it is a wrapper element rather
+      than a class toggled onto `<html>` so nothing has to be cleaned up when
+      the reviewer navigates back to the public site.
+    */
+    <div className="ew-type-console">
       <ReviewHeader />
       <Routes>
         {/* Paths are relative to /review/* */}
@@ -56,6 +63,6 @@ export default function ReviewRoutes() {
           }
         />
       </Routes>
-    </>
+    </div>
   );
 }

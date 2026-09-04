@@ -20,16 +20,15 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 
 from app.api.console import routes as console_routes
 from app.api.public import contact as public_contact
 from app.api.public import feed as public_feed
+from app.api.public import media as public_media
 from app.api.public import readers as public_readers
 from app.config import get_settings
 from app.db import dispose_engine
 from app.security.auth import AuthError
-from app.services.media import MEDIA_URL_PREFIX, ensure_media_root
 from app.services.reader import ReaderError
 from app.services.review import ReviewError
 
@@ -80,24 +79,18 @@ def create_app() -> FastAPI:
     app.include_router(public_feed.router, prefix="/api")                      # app client
     app.include_router(public_readers.router, prefix="/api")                  # accounts
     app.include_router(public_contact.router, prefix="/api")                  # let us know
-    app.include_router(console_routes.auth_router, prefix="/api/console")     # login
-    app.include_router(console_routes.router, prefix="/api/console")           # reviewer
-
-    # Reviewer-uploaded images, mounted after the routers so a future public
-    # route can never be shadowed by the media prefix. Unauthenticated by
-    # design: these files are embedded in published articles, so every reader
-    # fetches them. Uploading is the console-only half, and it lives on the
-    # authenticated router above.
+    # Stored images, read from `media_objects`. A router rather than the
+    # StaticFiles mount this replaced, because the bytes are in the database —
+    # see services/media.py. Unauthenticated by design: these images are
+    # embedded in published articles, so every reader fetches them. Uploading
+    # is the console-only half and lives on the authenticated router below.
     #
     # Under /api rather than a /media of its own because the dev proxy and any
-    # deployment already route that prefix — an uploaded image needs no new
-    # rule in either place. In production this mount is replaced by S3 plus a
-    # CDN, and article documents keep pointing at the same paths.
-    app.mount(
-        MEDIA_URL_PREFIX,
-        StaticFiles(directory=ensure_media_root(settings.media_root)),
-        name="media",
-    )
+    # deployment already route that prefix — media needs no new rule in either
+    # place, and article documents hold these paths verbatim.
+    app.include_router(public_media.router, prefix="/api")                     # images
+    app.include_router(console_routes.auth_router, prefix="/api/console")     # login
+    app.include_router(console_routes.router, prefix="/api/console")           # reviewer
 
     @app.exception_handler(ReviewError)
     async def _review_error(_: Request, exc: ReviewError) -> JSONResponse:

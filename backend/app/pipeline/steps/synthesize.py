@@ -60,7 +60,15 @@ class SynthesizeStage:
             {
                 "verdict": str(result.output.verdict),
                 "sources_in_prompt": len(payload.sources),
-                "handles_cited": len(result.output.all_cited_handles()),
+                # Body handles, matching ``was_cited`` in PERSIST. Counting
+                # the union with the ``citations`` list reported sources the
+                # article never refers to as cited, which is the one direction
+                # this metric must not err in.
+                "handles_cited": len(result.output.body.cited_handles()),
+                "handles_listed_not_written": len(
+                    result.output.all_cited_handles()
+                    - result.output.body.cited_handles()
+                ),
                 "body_words": len(result.output.body.as_text().split()),
             },
         )
@@ -101,6 +109,7 @@ class SynthesizeStage:
                 "verdict": str(draft.verdict),
                 "sources_in_prompt": 0,
                 "handles_cited": 0,
+                "handles_listed_not_written": 0,
                 "body_words": len(draft.body.as_text().split()),
                 "model_called": False,
                 "no_evidence_cause": cause,

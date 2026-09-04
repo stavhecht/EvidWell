@@ -48,8 +48,9 @@ export const REVIEW_BRAND_TAG =
   "justify-self-start whitespace-nowrap font-body text-micro font-bold uppercase leading-none tracking-[0.13em] text-accent-ink";
 export const REVIEW_NAV =
   "flex min-w-0 flex-wrap items-center justify-end gap-3 justify-self-end";
+/** A nav button in a bar, so it takes `font-ui` like the public site's do. */
 export const REVIEW_NAV_LINK =
-  "whitespace-nowrap font-body text-micro font-semibold uppercase leading-none tracking-[0.11em] text-ink-3 transition-colors hover:text-ink";
+  "whitespace-nowrap font-ui text-micro font-semibold uppercase leading-none tracking-[0.11em] text-ink-3 transition-colors hover:text-ink";
 
 export const SIGNED_IN_AS =
   "inline-flex items-baseline gap-[7px] font-body text-[12px] leading-normal text-ink-3";
@@ -97,8 +98,9 @@ export const QUEUE_VALIDATION_BADGE = "font-body text-micro leading-none text-in
 export const WEAK_EVIDENCE_FLAG =
   "border border-accent px-[7px] py-1 font-body text-label font-semibold normal-case leading-none tracking-normal text-accent-ink";
 
+/** An article title, so Archivo — the same face the tile and the page use. */
 export const QUEUE_ROW_HEADLINE =
-  "mt-[9px] text-pretty font-heading text-row font-semibold text-ink";
+  "mt-[9px] text-pretty font-ui text-row font-semibold text-ink";
 export const QUEUE_ROW_META = "mt-1 font-body text-meta text-ink-3";
 export const QUEUE_ROW_ERROR = "mt-1 font-body text-micro text-accent-ink";
 export const QUEUE_ROW_ASIDE = "flex items-start justify-between gap-3";
@@ -198,9 +200,14 @@ export const DRAFT_VERDICT_WORDING =
   "font-body text-label font-semibold uppercase leading-none tracking-[0.09em] text-ink-2";
 export const DRAFT_META = "font-body text-meta text-ink-3";
 
-/** Read-only: the headline is not part of the autosave contract. */
+/**
+ * Read-only: the headline is not part of the autosave contract.
+ *
+ * `font-ui` because it is an article title, and a reviewer should be reading it
+ * in the face it publishes in — see `styles/youth.css`.
+ */
 export const DRAFT_HEADLINE =
-  "mt-[18px] border-b-2 border-rule-soft pb-3 font-heading text-subhead font-extrabold text-ink";
+  "mt-[18px] border-b-2 border-rule-soft pb-3 font-ui text-subhead font-extrabold text-ink";
 export const EDITOR_SLOT = "mt-[18px]";
 
 export const SIDEBAR_SOURCES = "mt-6";
@@ -347,9 +354,16 @@ export const FIELD_LABEL =
  * `flow-root` makes the surface contain its floats. Without it a picture
  * floated beside the last beat hangs out of the bottom of the editing panel
  * and over whatever follows it.
+ *
+ * The `h2` rule mirrors `PROSE_HEADING` on the public side — same face, same
+ * weight, same asymmetric margin. This editor is at a narrower measure than the
+ * article, so the two cannot be identical, but a section heading has to *read*
+ * as one here or the reviewer is judging a structure they cannot see. Same
+ * argument `mediaWrapClass()` makes for pictures: the reviewer approves what
+ * publishes, layout included.
  */
 export const EDITOR_PROSE =
-  "flow-root font-body text-[15px] leading-[1.72] text-ink focus:outline-none [&_p]:mb-4 [&_p:last-child]:mb-0 [&_.ProseMirror-selectednode]:outline [&_.ProseMirror-selectednode]:outline-2 [&_.ProseMirror-selectednode]:outline-offset-2 [&_.ProseMirror-selectednode]:outline-accent";
+  "flow-root font-body text-[15px] leading-[1.72] text-ink focus:outline-none [&_p]:mb-4 [&_p:last-child]:mb-0 [&_h2]:mb-2 [&_h2]:mt-7 [&_h2]:font-ui [&_h2]:text-[17px] [&_h2]:font-bold [&_h2]:leading-[1.25] [&_h2]:tracking-[-0.02em] [&_h2:first-child]:mt-0 [&_.ProseMirror-selectednode]:outline [&_.ProseMirror-selectednode]:outline-2 [&_.ProseMirror-selectednode]:outline-offset-2 [&_.ProseMirror-selectednode]:outline-accent";
 
 /** `-mt-px` collapses the toolbar's bottom rule into the surface's top one. */
 export const EDITOR_SURFACE = "-mt-px border border-rule-soft bg-surface p-[18px]";
@@ -509,8 +523,14 @@ export const PREVIEW_ACTIONS = "flex items-baseline gap-3";
  * differently from the one that ships, and that difference is the whole point
  * of looking.
  */
+/**
+ * `ew-type-feed` is not decoration: the desk is scoped to Archivo at the route
+ * level, and these are the real feed tiles, so without it the preview would
+ * show a reviewer their card in a face the feed never uses. See the type scopes
+ * in `styles/youth.css`.
+ */
 export const PREVIEW_GRID =
-  "mt-4 grid grid-cols-[repeat(auto-fill,190px)] justify-center gap-[14px]";
+  "ew-type-feed mt-4 grid grid-cols-[repeat(auto-fill,190px)] justify-center gap-[14px]";
 
 /**
  * The reviewer's own tile, marked so it is findable among the neighbours.
@@ -521,8 +541,10 @@ export const PREVIEW_GRID =
  * decoration is how that reservation stops meaning anything.
  */
 export const PREVIEW_MINE = "relative outline outline-2 outline-offset-[3px] outline-accent";
+// Back to the desk's face inside the feed-typed grid: the tag is console
+// furniture pointing at the tile, not part of the tile.
 export const PREVIEW_MINE_TAG =
-  "absolute -top-[9px] left-2 z-10 border border-accent bg-ground px-1.5 py-0.5 font-body text-[8.5px] font-bold uppercase leading-none tracking-[0.11em] text-accent-ink";
+  "ew-type-console absolute -top-[9px] left-2 z-10 border border-accent bg-ground px-1.5 py-0.5 font-body text-[8.5px] font-bold uppercase leading-none tracking-[0.11em] text-accent-ink";
 
 export const PREVIEW_NOTE =
   "mt-4 border-t border-rule-soft pt-3 font-body text-micro leading-[1.55] text-ink-3";

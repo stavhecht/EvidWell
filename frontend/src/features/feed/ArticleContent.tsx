@@ -13,11 +13,16 @@
  * making its source available. The chip is the primary affordance for the thing
  * this product exists to let you do, so it is sized to be pressed.
  *
- * Two block nodes sit alongside the beat paragraphs — a picture and a YouTube
- * embed, both added by the reviewer in the console. They are re-checked here
- * before they render: the server refuses to store either one pointing anywhere
- * it did not put it, so anything that fails these checks means that guarantee
- * has broken, and a reader is the wrong person to find that out from.
+ * Section headings render as `h2` under the article's own `h1`. They come from
+ * the pipeline (`ArticleBody.sections`) and a reviewer can add or remove one in
+ * the console; either way they are plain labels, never claims, so nothing here
+ * needs to treat them as content that could assert something.
+ *
+ * Two more block nodes sit alongside the beat paragraphs — a picture and a
+ * YouTube embed, both added by the reviewer in the console. They are re-checked
+ * here before they render: the server refuses to store either one pointing
+ * anywhere it did not put it, so anything that fails these checks means that
+ * guarantee has broken, and a reader is the wrong person to find that out from.
  */
 
 import { useEffect, useRef, useState, type CSSProperties } from "react";
@@ -41,6 +46,7 @@ import {
   POPOVER_META,
   POPOVER_TITLE,
   POPOVER_UNRESOLVED,
+  PROSE_HEADING,
   PROSE_MEASURE,
   PROSE_PARAGRAPH,
   SOURCE_POPOVER,
@@ -81,6 +87,17 @@ export function ArticleContent({ doc, sources, onCite }: Props) {
       {(doc.content ?? []).map((block, index) => {
         if (block.type === "image") return <ArticleFigure key={index} node={block} />;
         if (block.type === "youtube") return <ArticleVideo key={index} node={block} />;
+        if (block.type === "heading") {
+          // Always h2. The article's own headline is the h1, and the document
+          // has no level below this one — `body_text_to_doc` writes level 2 and
+          // the console editor only offers level 2, so the attribute is not
+          // read. Reading it would invite an h4 nested under nothing.
+          return (
+            <h2 key={index} className={PROSE_HEADING}>
+              {(block.content ?? []).map((node) => node.text).join("")}
+            </h2>
+          );
+        }
 
         return (
           <p key={index} className={PROSE_PARAGRAPH}>

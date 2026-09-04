@@ -1,7 +1,7 @@
 /**
  * The full on-tap article.
  *
- * One column at 760px, where the previous design used two with the evidence
+ * One column at 800px, where the previous design used two with the evidence
  * pinned in a sidebar. The sidebar answered "what is this resting on?" without
  * scrolling, and that question still has to be answerable mid-paragraph — but
  * the citation chips are what answer it now, each opening its own paper in
@@ -26,6 +26,7 @@ import { GRADE_NOTES, VERDICT_GLOSS, VERDICT_LABELS } from "@/features/evidence/
 import { verdictWording } from "@/features/evidence/styles";
 import { subjectLabel, subjectText } from "@/features/evidence/subject";
 import { fetchArticle, feedKeys } from "@/lib/api/feed";
+import { readingTimeLabel } from "@/lib/readingTime";
 import { PublishedDate } from "./ArticleCard";
 import { ArticleContent } from "./ArticleContent";
 import { ArticleActions } from "./ArticleActions";
@@ -145,6 +146,13 @@ export function ArticleView() {
           <span>
             <PublishedDate iso={article.publishedAt} />
           </span>
+          <span className={ARTICLE_BYLINE_SEP}>|</span>
+          {/*
+            Derived from the body on this page rather than sent by the API, so
+            it describes the document the reader was actually given — including
+            anything a reviewer cut before publishing. See lib/readingTime.ts.
+          */}
+          <span>{readingTimeLabel(article.content)}</span>
           <span className={ARTICLE_BYLINE_SEP}>|</span>
           <span>{sourceSummary(article.sources.length)}</span>
           <span className={ARTICLE_BYLINE_SEP}>|</span>

@@ -77,7 +77,13 @@ SYNTHESIS_MODEL = "claude-sonnet-5"
 # Extraction's output is tiny (a product, <=6 claims, <=12 ingredients); the
 # budget is what it is to leave room for thinking, not for the JSON.
 EXTRACTION_MAX_TOKENS = 4_000
-SYNTHESIS_MAX_TOKENS = 8_000
+#: 16K rather than 8K since articles grew to a three-to-five minute read
+#: (~700-950 words, plus the citations list). Because this cap covers thinking
+#: as well, an under-sized budget does not truncate the tail of a finished
+#: article — it spends the whole budget thinking and returns nothing parseable,
+#: which is why `_check_truncation` names the cause explicitly instead of
+#: letting it surface as a schema failure.
+SYNTHESIS_MAX_TOKENS = 16_000
 
 #: Passed explicitly on both calls rather than relying on the model default,
 #: because that default is not stable across the model range: Sonnet 5 and

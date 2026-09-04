@@ -76,16 +76,25 @@ export default {
       },
 
       fontFamily: {
+        /**
+         * Both resolve to Instrument Serif — see the type block in
+         * `styles/youth.css`. They stay two names because they carry two
+         * intents, and a future retype that splits the face again should not
+         * have to rediscover which of two hundred class strings meant which.
+         */
         heading: "var(--font-heading)",
         body: "var(--font-body)",
         /**
-         * Playfair Display, and it earns its place on exactly one element: the
-         * statement over the hero video. A serif at 60px against a moving
-         * image is the comp's one flourish, and spending a second font file on
-         * one line is the trade it makes deliberately. Anywhere else in the
-         * product this is the wrong face — reach for `font-heading`.
+         * The exception, and the only sans in the product: article titles and
+         * the nav buttons in the site bar, the drawer and the tab bar. Both are
+         * type that has to survive at 10–12px, tracked out, frequently over a
+         * photograph — which is the one job a display serif does badly.
+         *
+         * Anywhere else this is the wrong face; reach for `font-body`. A third
+         * kind of caller here is how an interface ends up set in two typefaces
+         * with no rule about which.
          */
-        display: '"Playfair Display", Georgia, serif',
+        ui: "var(--ew-font-ui)",
       },
 
       /**
@@ -99,7 +108,7 @@ export default {
         headline: ["30px", { lineHeight: "1.1", letterSpacing: "-0.02em" }],
         subhead: ["27px", { lineHeight: "1.14", letterSpacing: "-0.025em" }],
         lede: ["20px", { lineHeight: "1.5" }],
-        prose: ["17px", { lineHeight: "1.7" }],
+        prose: ["20px", { lineHeight: "1.62" }],
         standfirst: ["16px", { lineHeight: "1.55" }],
         row: ["16px", { lineHeight: "1.3", letterSpacing: "-0.01em" }],
         excerpt: ["14px", { lineHeight: "1.55" }],
@@ -157,10 +166,26 @@ export default {
         "fade-up": "fade-up 0.2s ease-out",
       },
 
-      // The comp's page frame: a 1240px measure inset 28px. `prose` is the
-      // article's own narrower measure — the feed is a grid and the article is
-      // a column, and they are not the same page width.
-      maxWidth: { page: "1240px", prose: "760px", console: "1040px" },
+      // The comp's page frame: a 1240px measure inset 28px. The feed is a grid
+      // and an article is a column, and they are not the same page width.
+      //
+      // `article` and `prose` were one value at 760px until articles grew to a
+      // three-to-five minute read. They separated rather than both moving:
+      // `prose` still frames /about, /join, /contact and /you, which are short
+      // pages where 760px is right, while an article carries a longer headline
+      // and a source panel. Widening the shared token would have quietly
+      // restyled four pages that did not change.
+      //
+      // 800px and not more. The frame holds the headline, byline, verdict bar
+      // and source panel; the body sits at 600px inside it (see PROSE_MEASURE),
+      // because a measure that reads well is narrower than a page that holds a
+      // headline. Every px of frame beyond this is dead space beside the prose,
+      // and at 880 it read as a ribbon of text in a wide box.
+      //
+      // The 200px gap to the body is as small as it goes without one of the two
+      // moving: 800 is already the narrowest frame the source panel sits in
+      // comfortably, and 600 is a ~89-character measure at the body's 20px.
+      maxWidth: { page: "1240px", article: "800px", prose: "760px", console: "1040px" },
       spacing: { gutter: "28px", header: "68px" },
     },
   },

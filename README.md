@@ -74,6 +74,32 @@ readers out is `RequireAuth` plus the router-level bearer check on every
 
 ## Quickstart
 
+Everything in containers except the model server:
+
+```bash
+# Every model call runs locally by default (LLM_PROVIDER=ollama,
+# EMBEDDING_PROVIDER=ollama). Ollama stays on the host — a container on macOS
+# has no Metal access, so a containerised llama3.1:8b would be CPU-only.
+ollama pull llama3.1:8b          # both generative calls
+ollama pull mxbai-embed-large    # embeddings, 1024-d to match EMBEDDING_DIM
+
+docker compose up                # db -> migrate -> api :8000 + worker + web :5173
+
+# Once, for a reviewer login. Its own service because seed_admin prompts for a
+# password — an argument would land in shell history and in `ps`.
+docker compose run --rm seed --email you@example.com --name "Your Name"
+```
+
+No `backend/.env` is needed: every setting in `app/config.py` has a working
+local default. Create one (`cp backend/.env.example backend/.env`) when you want
+hosted providers or an image key — compose picks it up if present and ignores it
+if not. Source is mounted read-only over the image, so an edit needs
+`docker compose restart backend`, and only a `pyproject.toml` change needs
+`--build`.
+
+<details>
+<summary>Or run it on the host, with only Postgres in Docker</summary>
+
 ```bash
 cp backend/.env.example backend/.env    # defaults are local-only; no key needed
 docker compose up -d db
@@ -99,6 +125,8 @@ python -m app.pipeline.runner            # worker, separate terminal
 
 cd ../frontend && npm install && npm run dev   # web on :5173
 ```
+
+</details>
 
 Then sign in at **`/review/login`**, enter a topic such as `ashwagandha for
 stress`, and the worker will produce a draft for review. Nothing it produces can

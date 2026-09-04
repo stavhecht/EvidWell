@@ -10,7 +10,6 @@ write — or worse, as silently degraded retrieval.
 from __future__ import annotations
 
 from functools import lru_cache
-from pathlib import Path
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -103,7 +102,17 @@ class Settings(BaseSettings):
     provider_max_retry_wait_seconds: float = 10.0
 
     # --- retrieval tuning ---
-    retrieval_top_k: int = 8
+    #: Ranked sources kept **per claim**, deduplicated across claims when the
+    #: synthesis prompt is assembled. This is the one knob that decides how many
+    #: sources an article *can* cite, so it moved 8 -> 12 when articles grew
+    #: from three beats to a three-to-five minute read.
+    #:
+    #: Raising it further means raising `SYNTHESIS_NUM_CTX` in
+    #: `llm/ollama_client.py` with it. Ollama's context overflow is silent: the
+    #: front of the prompt is dropped, so sources vanish while the instruction
+    #: to cite them survives, and the run fails as `hallucinated_handle` with
+    #: nothing pointing at the real cause.
+    retrieval_top_k: int = 12
     retrieval_max_candidates_per_claim: int = 50
     retrieval_min_year: int | None = None
 
@@ -125,16 +134,14 @@ class Settings(BaseSettings):
     #: harmless, since the only run it could recover is the one it is running.
     worker_sweep_interval_seconds: float = 60.0
 
-    # --- reviewer-uploaded media ---
-    #: Where uploaded images are written, relative to the backend working
-    #: directory unless absolute. Local disk is the store while deployment is
-    #: deferred; the S3 swap is `services/media.py` alone. Files are
-    #: content-addressed, so this directory is a cache in every sense except
-    #: that published articles point into it — back it up with the database.
-    media_root: Path = Path("var/media")
-    #: Per-file ceiling. Generous for a photo, small enough that a stray
-    #: upload cannot fill the disk or the request buffer. The reviewer sees the
+    # --- article media ---
+    #: Per-file ceiling. Generous for a photo, small enough that a stray upload
+    #: cannot bloat the database or the request buffer. The reviewer sees the
     #: limit in the error, so raising it is a config change, not a code one.
+    #:
+    #: There is no `media_root` any more: image bytes live in `media_objects`,
+    #: so the store needs a session rather than a path and there is nothing
+    #: left to configure. See migrations/0004_media_objects.sql.
     media_max_bytes: int = 8 * 1024 * 1024
 
     # --- article imagery (generated) ---

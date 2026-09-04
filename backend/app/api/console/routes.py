@@ -398,7 +398,7 @@ async def regenerate_illustration(
             ingredients=" ".join(article.ingredients or ()),
             lead_size=(settings.image_lead_width, settings.image_lead_height),
             cover_size=(settings.image_cover_width, settings.image_cover_height),
-            media_root=settings.media_root,
+            session=session,
             max_bytes=settings.media_max_bytes,
             seed=fresh_seed(),
             frames=requested,
@@ -453,15 +453,17 @@ def _stored_illustration(raw: Any, article_id: str) -> Illustration | None:
 @router.post("/media", response_model=MediaUploadOut, status_code=status.HTTP_201_CREATED)
 async def upload_media(
     file: Annotated[UploadFile, File(description="A PNG, JPEG, GIF or WebP image")],
+    session: SessionDep,
     settings: SettingsDep,
     reviewer: ReviewerDep,
 ) -> MediaUploadOut:
     """Store an image the reviewer picked on their own machine.
 
-    Not scoped to an article. The store is content-addressed and an image is
-    referenced only by the document that embeds it, so an article id here would
-    be a claim about ownership that nothing could keep true once the reviewer
-    moves the image between drafts.
+    Not scoped to an article, and this is also why the bytes are keyed by their
+    digest in a table of their own rather than hung off ``articles``. The store
+    is content-addressed and an image is referenced only by the document that
+    embeds it, so an article id here would be a claim about ownership that
+    nothing could keep true once the reviewer moves the image between drafts.
 
     The upload's filename and Content-Type are never trusted: the response
     reports the type sniffed from the bytes, and the stored filename is their
@@ -486,11 +488,10 @@ async def upload_media(
         )
 
     try:
-        # Synchronous write: bounded by the ceiling above, to local disk, from
-        # a console action a reviewer takes a handful of times per article. The
-        # S3 version of this call is async and belongs in the module that owns
-        # the store, not in a thread pool here.
-        stored = store_image(data, root=settings.media_root)
+        # The bytes go to `media_objects`, not to disk. No commit here: the
+        # request-scoped session commits on a clean return, as it does for
+        # every other write on this router.
+        stored = await store_image(data, session=session)
     except UnsupportedMediaError as exc:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc)

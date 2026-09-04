@@ -16,8 +16,17 @@ Document shape::
       {"type": "paragraph", "attrs": {"beat": 1}, "content": [
         {"type": "text", "text": "One trial found lower cortisol "},
         {"type": "citation", "attrs": {"sourceIds": ["S1", "S3"]}}
-      ]}
+      ]},
+      {"type": "heading", "attrs": {"level": 2}, "content": [
+        {"type": "text", "text": "What the trials measured"}
+      ]},
+      {"type": "paragraph", "content": [...]}
     ]}
+
+Three block types come out of this module: ``paragraph``, ``heading`` (a
+section title, always level 2), and — passed in rather than parsed — ``image``.
+A reviewer can add ``image`` and ``youtube`` in the console. Beat paragraphs
+carry ``attrs.beat``; section paragraphs and reviewer-added ones do not.
 """
 
 from __future__ import annotations
@@ -72,28 +81,59 @@ def body_text_to_doc(
     beat 1 for the card excerpt, and the walks below skip a node with no
     ``content`` without producing an empty paragraph.
 
+    Sections (optional, and often absent) sit between beats 2 and 3 as an ``h2``
+    followed by one paragraph per blank-line-separated block. **Their paragraphs
+    carry no ``beat`` attribute**, for the same reason a reviewer's own added
+    paragraph carries none: a section is a sibling of the beats, not a fourth
+    beat, and must not answer to ``beat_text``.
+
     Raises:
         MalformedBodyError: unbalanced brackets, or a marker that isn't
             ``S<digits>``.
     """
-    beats = [
-        body.beat_1_claim,
-        body.beat_2_evidence,
-        body.beat_3_bottom_line,
-    ]
     blocks: list[dict[str, Any]] = [
-        _paragraph(text, beat_number)
-        for beat_number, text in enumerate(beats, start=1)
+        _paragraph(body.beat_1_claim, beat=1, where="beat 1"),
+        _paragraph(body.beat_2_evidence, beat=2, where="beat 2"),
     ]
+
+    for index, section in enumerate(body.sections, start=1):
+        where = f"section {index}"
+        blocks.append(_heading(section.heading, where=f"{where} heading"))
+        # A section may be several paragraphs. Splitting here rather than
+        # asking the model for a list keeps the generated shape one string per
+        # section, which is what the structured-output grammar handles well.
+        for block in _split_paragraphs(section.body):
+            blocks.append(_paragraph(block, beat=None, where=where))
+
+    blocks.append(_paragraph(body.beat_3_bottom_line, beat=3, where="beat 3"))
+
     if lead_image is not None:
         blocks.insert(0, lead_image)
     return {"type": "doc", "content": blocks}
 
 
-def _paragraph(text: str, beat: int) -> dict[str, Any]:
+#: A blank line, however much trailing whitespace the model leaves on it.
+_PARAGRAPH_BREAK_RE = re.compile(r"\n[ \t]*\n+")
+
+
+def _split_paragraphs(text: str) -> list[str]:
+    """A section's prose as one string per paragraph.
+
+    Never returns an empty list: ``ArticleSection.body`` is ``NonEmptyStr``, so
+    a section that happens to hold no blank line is simply one paragraph.
+    """
+    return [block.strip() for block in _PARAGRAPH_BREAK_RE.split(text) if block.strip()]
+
+
+def _inline_content(text: str, *, where: str) -> list[dict[str, Any]]:
+    """Text and citation nodes, in order.
+
+    ``where`` names the block for the error message only — a reviewer reading a
+    ``malformed_body`` failure needs to know which block to look at.
+    """
     if match := _STRAY_BRACKET_RE.search(_CITATION_RUN_RE.sub("", text)):
         raise MalformedBodyError(
-            f"beat {beat} contains a malformed citation marker: {match.group(0)!r}"
+            f"{where} contains a malformed citation marker: {match.group(0)!r}"
         )
 
     content: list[dict[str, Any]] = []
@@ -110,7 +150,32 @@ def _paragraph(text: str, beat: int) -> dict[str, Any]:
         else:
             content.append({"type": "text", "text": segment})
 
-    return {"type": "paragraph", "attrs": {"beat": beat}, "content": content}
+    return content
+
+
+def _paragraph(text: str, *, beat: int | None, where: str) -> dict[str, Any]:
+    node: dict[str, Any] = {
+        "type": "paragraph",
+        "content": _inline_content(text, where=where),
+    }
+    if beat is not None:
+        node["attrs"] = {"beat": beat}
+    return node
+
+
+def _heading(text: str, *, where: str) -> dict[str, Any]:
+    """A section title, as an ``h2``.
+
+    Runs through the same marker check as prose. A heading should not carry a
+    citation, but an unbalanced bracket in one would print into the finished
+    article exactly as it would in a paragraph, so it is checked rather than
+    trusted.
+    """
+    return {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": _inline_content(text, where=where),
+    }
 
 
 #: Whitespace stranded before punctuation once a citation node is removed.
