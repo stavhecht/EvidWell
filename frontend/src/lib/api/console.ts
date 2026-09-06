@@ -9,12 +9,14 @@ import type {
   CardPreview,
   GeneratedImagery,
   IllustrationFrame,
+  DiscoveryCandidate,
   Subject,
   MediaUpload,
   QueueItem,
   Reviewer,
   RunPage,
   TipTapDoc,
+  TrendScan,
 } from "@/types/api";
 
 export const consoleKeys = {
@@ -26,6 +28,10 @@ export const consoleKeys = {
   card: (id: string) => ["console", "card", id] as const,
   runs: ["console", "runs"] as const,
   me: ["console", "me"] as const,
+  /** Live trend proposals. Invalidated alongside `runs` when one is promoted. */
+  candidates: ["console", "candidates"] as const,
+  /** The manual scan's state. Polled only while one is running. */
+  trendScan: ["console", "trend-scan"] as const,
 };
 
 /**
@@ -213,4 +219,59 @@ export async function fetchRuns(
   params: { cursor?: string; limit?: number } = {},
 ): Promise<RunPage> {
   return apiFetch(`/console/pipeline/runs${qs(params)}`);
+}
+
+/**
+ * Live trend proposals, best first.
+ *
+ * Unpaginated: the scan writes at most `DISCOVERY_MAX_CANDIDATES` per run and
+ * expires what it no longer ranks, so this list is bounded by the scan rather
+ * than by the request.
+ */
+export async function fetchCandidates(limit = 20): Promise<DiscoveryCandidate[]> {
+  return apiFetch(`/console/discovery/candidates${qs({ limit })}`);
+}
+
+/**
+ * Turn a proposal into a queued generation run.
+ *
+ * Returns the run, so the caller invalidates `consoleKeys.runs` and the
+ * reviewer immediately sees the in-flight row they already recognise. This is
+ * the one action here that spends money.
+ */
+export async function promoteCandidate(id: string): Promise<{ id: string }> {
+  return apiFetch(`/console/discovery/candidates/${id}/promote`, { method: "POST" });
+}
+
+/**
+ * Say no, with a reason.
+ *
+ * The reason is stored and shown in the next scan's output; the substance stays
+ * suppressed until both the cooloff elapses and its literature has doubled.
+ */
+export async function dismissCandidate(id: string, reason: string): Promise<void> {
+  return apiFetch(`/console/discovery/candidates/${id}/dismiss`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
+  });
+}
+
+/**
+ * The manual scan's state — this process's last press, plus the ledger's last
+ * success. Cheap enough to poll while one is running.
+ */
+export async function fetchTrendScan(): Promise<TrendScan> {
+  return apiFetch("/console/discovery/scan");
+}
+
+/**
+ * Run the trend scan now, rather than waiting for the cron slot.
+ *
+ * 202: the scan is minutes of PubMed requests and the server does not hold the
+ * connection open for it, so the caller polls `fetchTrendScan`. Costs nothing
+ * generative — a scan proposes, and promoting what it finds is still a separate
+ * human decision. A 409 means one is already running.
+ */
+export async function startTrendScan(): Promise<TrendScan> {
+  return apiFetch("/console/discovery/scan", { method: "POST" });
 }

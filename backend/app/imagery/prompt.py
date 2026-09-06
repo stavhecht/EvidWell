@@ -65,12 +65,27 @@ measured too: the provider ignores ``seed`` entirely (see
 ``services/illustration.py::seed_for_run``), so those identical-looking renders
 *already* came from different noise. Variety has to come from the prompt.
 
-So the prompt is assembled from four varying axes, selected by a seed we
+So the prompt is assembled from five varying axes, selected by a seed we
 control rather than one we hope the provider honours: framing, arrangement,
-light and surface. Each path supplies its own set — a still life is *scattered
-across a surface*, a person is *mid-stretch on a mat*, and the two vocabularies
-do not survive being swapped — but the axis count and the option counts are
-identical, so both paths give the same ~500 combinations from the same seed.
+light, surface, and **the motif itself**. Each path supplies its own set — a
+still life is *scattered across a surface*, a person is *mid-stretch on a mat*,
+and the two vocabularies do not survive being swapped — but the axis count and
+the option counts are identical, so both paths give the same 5,184 combinations
+from the same seed.
+
+The motif axis was added last and is the one that mattered most. With one motif
+per subject, every article the hint table called a ``SUPPLEMENT`` — which is
+most of a wellness feed — rendered the same jar of capsules, and the four
+composition axes could only re-photograph it: five hundred angles on one still
+life still read as one picture. It is also the *slowest* digit, so neighbouring
+seeds move the camera while distant ones change what is in the frame; an
+article's seed is meant to be a stable composition, not a reroll.
+
+Two of those axes carry the tonal range, because the palette cannot. ``_LIGHTS``
+reaches from soft overcast to hard sunlight to near-dark, and ``_SURFACES`` runs
+from pale paper to dark oiled wood — value, never hue. That is the only kind of
+contrast available once the palette is locked, and locking the palette is the
+next paragraph.
 
 The one fixed axis is ``TREATMENT``: palette and register, and nothing else.
 That split is the whole design: **treatment locked, composition free.** Locking
@@ -111,15 +126,49 @@ from app.domain.enums import Subject
 #: and unlabelled — a generated label is either an invented brand or a real one
 #: we have no right to depict, and a readable word on a wellness image reads as
 #: a product endorsement.
-_MOTIFS: dict[Subject, str] = {
+#:
+#: **Each subject holds ``_MOTIF_RADIX`` variants, and the seed picks one.**
+#: This was one string per subject until it was measured against a real feed,
+#: and that was the dominant source of sameness — ``SUPPLEMENT`` catches most
+#: of the vocabulary a wellness feed uses, so almost every article rendered the
+#: literal phrase "loose capsules, a small heap of pale powder and a plain
+#: unlabelled glass jar". The four composition axes could not compensate: they
+#: re-photograph one still life from five hundred angles, and five hundred
+#: photographs of the same jar still read as one picture. Changing *what is in
+#: the frame* is the only axis with that much amplitude.
+_MOTIFS: dict[Subject, tuple[str, ...]] = {
     Subject.SUPPLEMENT: (
         "loose capsules, a small heap of pale powder and a plain unlabelled "
-        "glass jar"
+        "glass jar",
+        "a few loose tablets resting beside a plain glass of water",
+        "a measuring scoop tipped over, powder spilling into a low pile",
+        "dried herb and seed pods in a stone mortar with a wooden pestle",
     ),
-    Subject.DEVICE: "a small matte unbranded consumer device and its coiled cable",
-    Subject.PROTOCOL: "a folded towel, a glass of water and a simple timer",
-    Subject.FOOD: "whole raw ingredients and a shallow ceramic bowl",
-    Subject.TOPICAL: "a plain unlabelled tube and a small smear of pale cream",
+    Subject.DEVICE: (
+        "a small matte unbranded consumer device and its coiled cable",
+        "an unbranded wearable band lying open beside its charging puck",
+        "a plain matte panel propped against a wall beside its power brick, "
+        "switched off",
+        "a simple unlabelled device turned over, its strap coiled loosely",
+    ),
+    Subject.PROTOCOL: (
+        "a folded towel, a glass of water and a simple timer",
+        "a rolled exercise mat stood on end beside a filled water bottle",
+        "plain unbranded trainers set down beside a folded towel",
+        "a small kettlebell and a coiled resistance band left on the floor",
+    ),
+    Subject.FOOD: (
+        "whole raw ingredients and a shallow ceramic bowl",
+        "cut sections of the raw ingredient on a plain wooden board",
+        "a simple glass of the prepared drink beside its raw ingredients",
+        "loose dried leaves and a plain unglazed cup",
+    ),
+    Subject.TOPICAL: (
+        "a plain unlabelled tube and a small smear of pale cream",
+        "an unlabelled glass dropper bottle laid on its side beside its pipette",
+        "a small open jar of balm with a clean spatula across the rim",
+        "a folded cotton cloth and a plain unlabelled pump bottle",
+    ),
 }
 
 #: The subjects a person may appear in, and what that person is there to do.
@@ -136,11 +185,18 @@ _MOTIFS: dict[Subject, str] = {
 #: The objects from ``_MOTIFS`` are kept alongside the person on purpose. They
 #: anchor the frame to the same props the still-life path uses, which is most
 #: of why these renders stay in the same magazine as the others.
-_PEOPLE_MOTIFS: dict[Subject, str] = {
+_PEOPLE_MOTIFS: dict[Subject, tuple[str, ...]] = {
     Subject.PROTOCOL: (
         "one ordinary person in plain unbranded everyday clothing, in the "
         "middle of the activity, with a folded towel and a glass of water "
-        "nearby"
+        "nearby",
+        "one ordinary person in plain unbranded everyday clothing working "
+        "through the movement, a rolled mat and a water bottle set down "
+        "beside them",
+        "one ordinary person in loose plain clothes partway through the "
+        "activity, plain unbranded trainers and a folded towel nearby",
+        "one ordinary person in plain unbranded clothing pausing mid-effort, "
+        "a simple timer and a glass of water within reach",
     ),
 }
 
@@ -206,7 +262,28 @@ _MOTIF_HINTS: tuple[tuple[Subject, tuple[str, ...]], ...] = (
 )
 
 
-def _default_motif(noun: str) -> str:
+#: The fallback scene when no motif matched, as ``_MOTIF_RADIX`` templates on
+#: the subject noun. Kept the same length as every ``_MOTIFS`` entry so the
+#: motif digit means the same thing on every path — see the import-time guard.
+_DEFAULT_MOTIFS: tuple[str, ...] = (
+    "plain, unbranded objects associated with {noun}",
+    "a few plain everyday objects that go with {noun}, nothing branded",
+    "the ordinary unbranded things {noun} is used with",
+    "a small group of plain unlabelled objects belonging to {noun}",
+)
+
+#: The same, for a product that scrubbed away to nothing and a topic that did
+#: too. There is no noun to defer to, so these name no objects — which is the
+#: failure mode described below, accepted only because nothing else is left.
+_DEFAULT_MOTIFS_UNNAMED: tuple[str, ...] = (
+    "a few plain, unbranded everyday objects",
+    "a small group of plain unlabelled household objects",
+    "two or three ordinary unbranded objects, nothing remarkable",
+    "four or five plain everyday objects, all unlabelled",
+)
+
+
+def _default_motif(noun: str, variant: int) -> str:
     """When nothing matched, let the subject noun choose the objects.
 
     The old default named no objects at all — "plain unlabelled objects" — and
@@ -214,9 +291,9 @@ def _default_motif(noun: str) -> str:
     every article. Deferring to the noun is what lets a hot-yoga article get a
     mat and a towel instead.
     """
-    return f"plain, unbranded objects associated with {noun}" if noun else (
-        "a few plain, unbranded everyday objects"
-    )
+    if noun:
+        return _DEFAULT_MOTIFS[variant].format(noun=noun)
+    return _DEFAULT_MOTIFS_UNNAMED[variant]
 
 
 # --- the varying axes -------------------------------------------------------
@@ -233,6 +310,7 @@ _FRAMINGS: tuple[str, ...] = (
     "close macro crop, shallow depth of field, the subject filling the frame",
     "wide shot with the subject small in an open field",
     "slightly raised three-quarter view, shallow depth of field",
+    "eye-level and straight on, the objects seen edge-on against the backdrop",
 )
 
 #: How the objects sit.
@@ -242,16 +320,25 @@ _ARRANGEMENTS: tuple[str, ...] = (
     "laid out in an orderly row",
     "grouped near one edge of the frame",
     "resting apart from one another with space between",
+    "overlapping, one object partly hiding another",
 )
 
-#: What they sit on. Varies in material, never in colour — the palette is
-#: locked in ``TREATMENT``, and that is what holds the feed together.
+#: What they sit on. Varies in material and in **value**, never in hue — the
+#: palette is locked in ``TREATMENT``, and that is what holds the feed together.
+#:
+#: The value half is newer and deliberate. Five pale neutrals differ on paper
+#: and not on screen: at feed-tile size they read as one backdrop, so the axis
+#: was contributing almost nothing. A dark surface changes the whole tonal
+#: structure of the frame while staying inside the same muted warm neutral
+#: family the treatment names — which is the only kind of range available once
+#: hue is locked.
 _SURFACES: tuple[str, ...] = (
     "on a matte paper backdrop",
     "on raw plaster",
     "on pale linen cloth",
     "on unpolished stone",
     "on a smooth clay surface",
+    "on dark oiled wood",
 )
 
 #: Camera distance and angle, person. The still-life framings do not transfer:
@@ -262,6 +349,7 @@ _PEOPLE_FRAMINGS: tuple[str, ...] = (
     "close crop, shallow depth of field, one limb filling the frame",
     "low three-quarter angle near floor level",
     "seen from slightly above at conversational distance",
+    "seen through a doorway at middle distance, the figure partly obscured",
 )
 
 #: What the person is doing. The counterpart of ``_ARRANGEMENTS``.
@@ -277,6 +365,7 @@ _POSES: tuple[str, ...] = (
     "cropped close on a forearm and hand mid-effort, the rest out of frame",
     "standing at rest, shoulders loose, pausing between efforts",
     "lying on a mat, seen from a distance",
+    "kneeling to set something down, head lowered and turned away",
 )
 
 #: Where they are. The counterpart of ``_SURFACES``: same materials, same
@@ -287,15 +376,25 @@ _PEOPLE_SETTINGS: tuple[str, ...] = (
     "beside a window hung with linen",
     "against a bare plaster wall",
     "on a smooth clay-coloured floor",
+    "in a dim room with dark oiled floorboards",
 )
 
 #: Direction and hardness. **Shared by both paths**, and stays inside the same
 #: daylight family so the feed does not swing between studio and candlelight.
+#:
+#: The last two are the hard and the dark end of that family, and they carry
+#: most of this axis's weight. The original four were all soft daylight —
+#: "diffused", "raking", "overcast", "late-afternoon" — which on a four-step
+#: distilled checkpoint is a distinction the render mostly does not make, so
+#: the axis was nearly a constant. Contrast and shadow depth are what the
+#: locked palette leaves free, so this is where they come from.
 _LIGHTS: tuple[str, ...] = (
     "soft diffused daylight from one side, gentle shadows",
     "low raking light casting long soft shadows",
     "even overcast light, almost shadowless",
     "warm late-afternoon light from behind, soft rim highlights",
+    "hard directional sunlight, crisp shadow edges and a bright falloff",
+    "dim low-key light from one small source, most of the frame in shadow",
 )
 
 
@@ -415,13 +514,25 @@ class _Path:
         self.exclusions = exclusions
         self.negative = negative
 
-    def compose(self, scene: str, seed: int) -> str:
+    def compose(self, scene: str, seed: int, *, noun: str = "") -> str:
+        """One prompt, from a scene and the four composition digits of ``seed``.
+
+        ``noun`` leads the sentence when there is one. It used to trail the
+        motif as ``, suggesting <noun>`` — *after* three concrete object nouns
+        that had already fully specified the frame, which is why creatine,
+        ashwagandha and melatonin all drew the same jar. At the head it is the
+        thing the picture is of, and the motif reads as how to photograph it.
+
+        The default-motif path passes no ``noun``: that scene already names it
+        ("objects associated with X"), so a head would say it twice.
+        """
         framing, arrangement, light, surface = (
             axis[(seed // stride) % len(axis)]
             for axis, stride in zip(self.axes, _STRIDES, strict=True)
         )
+        subject = f"{self.genre} of {noun}" if noun else self.genre
         return (
-            f"{self.genre}: {scene}, {arrangement}. {framing}. "
+            f"{subject}: {scene}, {arrangement}. {framing}. "
             f"{light}, {surface}. {TREATMENT}. {self.exclusions}."
         )
 
@@ -429,7 +540,7 @@ class _Path:
 #: Options per axis, in stride order: framing, arrangement, light, surface.
 #: Both paths must match, which is checked at import — a mismatched length is
 #: what would silently break the mixed radix below.
-_AXIS_RADIX = (5, 5, 4, 5)
+_AXIS_RADIX = (6, 6, 6, 6)
 
 #: Mixed radix: each stride is the product of the radices *before* it, so the
 #: four axes decompose ``seed % 500`` into four genuinely independent digits.
@@ -450,6 +561,29 @@ _AXIS_RADIX = (5, 5, 4, 5)
 #: Derived rather than written out so it cannot fall out of step with the axis
 #: lengths when someone adds a sixth framing.
 _STRIDES = tuple(accumulate(_AXIS_RADIX[:-1], operator.mul, initial=1))
+
+#: Motif variants per subject — a fifth digit, on the same radix scheme.
+#:
+#: **Deliberately the slowest digit**, with a stride past every composition
+#: axis. The motif is the coarsest change this module can make: it swaps the
+#: objects in the frame rather than the camera in front of them. Flipping it on
+#: every neighbouring seed would mean two consecutive seeds share nothing, and
+#: a seed is meant to be an article's stable composition, not a reroll. So
+#: neighbouring seeds move the camera and the light; distant ones change what
+#: is being photographed.
+#:
+#: Every motif tuple must hold exactly this many options — checked at import,
+#: for the same reason the axis lengths are: a short tuple makes the digit
+#: non-uniform, and the whole point of the mixed radix is that it is not.
+_MOTIF_RADIX = 4
+
+#: The motif digit's stride: past all four composition axes.
+_MOTIF_STRIDE = _STRIDES[-1] * _AXIS_RADIX[-1]
+
+#: Distinct prompts one product can produce. ``build_prompt(x, seed=n)`` equals
+#: ``build_prompt(x, seed=n + _PERIOD)``, and every combination comes up exactly
+#: once per ``_PERIOD`` consecutive seeds.
+_PERIOD = _MOTIF_STRIDE * _MOTIF_RADIX
 
 _OBJECTS = _Path(
     genre="Still life",
@@ -478,6 +612,19 @@ for _path in (_OBJECTS, _WITH_PEOPLE):
             f"{tuple(len(axis) for axis in _path.axes)} do not match "
             f"_AXIS_RADIX {_AXIS_RADIX}; update the radix and re-check the "
             "strides, or the axes stop being independent"
+        )
+
+for _name, _variants in (
+    *((f"_MOTIFS[{k.name}]", v) for k, v in _MOTIFS.items()),
+    *((f"_PEOPLE_MOTIFS[{k.name}]", v) for k, v in _PEOPLE_MOTIFS.items()),
+    ("_DEFAULT_MOTIFS", _DEFAULT_MOTIFS),
+    ("_DEFAULT_MOTIFS_UNNAMED", _DEFAULT_MOTIFS_UNNAMED),
+):
+    if len(_variants) != _MOTIF_RADIX:
+        raise RuntimeError(
+            f"{_name} holds {len(_variants)} variants, not _MOTIF_RADIX "
+            f"{_MOTIF_RADIX}; every motif tuple has to be the same length or "
+            "the motif digit stops being uniform across subjects"
         )
 
 #: Longest subject noun phrase allowed into the prompt.
@@ -561,12 +708,13 @@ def build_prompt(
             when present, which is why pressing Regenerate after classifying a
             draft can genuinely improve the picture. ``None`` on every pipeline
             call — the article row does not exist yet.
-        seed: selects the four varying axes. The pipeline derives it from the
-            run id (stable across retries); Regenerate rolls a fresh one. Note
-            this seed does real work *here* even though the image provider
-            ignores the one it is also sent.
+        seed: selects the four composition axes and the motif variant. The
+            pipeline derives it from the run id (stable across retries);
+            Regenerate rolls a fresh one. Note this seed does real work *here*
+            even though the image provider ignores the one it is also sent.
     """
     noun = depicted_subject(product, fallback)
+    variant = (seed // _MOTIF_STRIDE) % _MOTIF_RADIX
 
     # Trust order, and the tier that matched is load-bearing rather than
     # incidental: only the top two open the people path. See the module
@@ -581,15 +729,17 @@ def build_prompt(
         chosen, confident = infer_motif_subject(fallback, ingredients), False
 
     if confident and chosen in _PEOPLE_MOTIFS:
-        path, motif = _WITH_PEOPLE, _PEOPLE_MOTIFS[chosen]
+        path, motifs = _WITH_PEOPLE, _PEOPLE_MOTIFS[chosen]
     else:
-        path, motif = _OBJECTS, _MOTIFS.get(chosen) if chosen else None
+        path, motifs = _OBJECTS, _MOTIFS.get(chosen) if chosen else None
 
-    scene = motif or _default_motif(noun)
-    if motif and noun:
-        scene = f"{scene}, suggesting {noun}"
+    if motifs is not None:
+        # The noun leads the sentence; the motif says how to photograph it.
+        return path.compose(motifs[variant], seed, noun=noun), path.negative
 
-    return path.compose(scene, seed), path.negative
+    # Nothing matched, so the scene names the noun itself and must not repeat
+    # it at the head.
+    return path.compose(_default_motif(noun, variant), seed), path.negative
 
 
 def build_alt_text(

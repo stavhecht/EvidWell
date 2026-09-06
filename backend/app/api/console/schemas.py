@@ -13,10 +13,12 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.api.public.schemas import FeedCardOut
 from app.api.schemas_base import CamelModel
+from app.discovery.manual import ManualScanStatus
 from app.domain.enums import (
     ArticleStatus,
     ContactKind,
     ContactStatus,
+    DiscoveryCandidateStatus,
     ImageFrame,
     RunStatus,
     StudyType,
@@ -383,3 +385,78 @@ class ContactRequestOut(CamelModel):
 
 class SetContactStatusRequest(CamelModel):
     status: ContactStatus
+
+
+# --- trend discovery -------------------------------------------------------
+
+
+class DiscoveryCandidateOut(CamelModel):
+    """A proposed topic, with the arithmetic that proposed it.
+
+    Everything past ``topic`` exists to be *shown*. The ranking is built from
+    constants that were guessed before any real data existed, so a reviewer has
+    to be able to see why something is on the list — a score with nothing behind
+    it is either believed too readily or ignored entirely.
+    """
+
+    id: str
+    topic: str
+    substance_ui: str
+    substance_name: str
+    outcome_name: str | None
+    score: float
+    #: Distinct papers in the scan's window.
+    #: Papers behind the substance's surge — what the score and lift measure.
+    paper_count: int
+    #: Papers behind this specific angle. Equal to ``paper_count`` for a
+    #: candidate that names no outcome. Both are shown because they answer
+    #: different questions: the first is why the substance is on the desk, the
+    #: second is what this particular article would rest on.
+    angle_paper_count: int
+    #: Mean papers per window over the preceding windows.
+    baseline_count: float
+    #: ``paper_count`` against ``baseline_count``, Laplace-smoothed.
+    lift: float
+    #: Study types among those papers. Six case reports and six RCTs are the
+    #: same surge and a very different proposition.
+    study_mix: dict[str, int]
+    top_pmids: list[str]
+    status: DiscoveryCandidateStatus
+    pipeline_run_id: str | None
+    scanned_at: datetime
+
+
+class DismissCandidateRequest(CamelModel):
+    """Why this topic is not worth writing about.
+
+    Required, mirroring ``RejectRequest`` — and the
+    ``discovery_candidates_dismissed_has_reason`` CHECK refuses the row without
+    one anyway, so making it optional would only turn a 422 into a 500.
+    """
+
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class TrendScanOut(CamelModel):
+    """The state of a manually triggered scan.
+
+    Deliberately not a ``discovery_scans`` row. That table is the window ledger
+    — ``next_window`` reads only its succeeded rows — and this is a UI
+    affordance about *this process's* last press, which a restart forgets. The
+    one field that does come from the ledger is ``last_scan_at``, so the desk
+    can still say when a scan last completed after a deploy.
+    """
+
+    status: ManualScanStatus
+    started_at: datetime | None
+    finished_at: datetime | None
+    records_seen: int
+    observations_written: int
+    candidates_proposed: int
+    #: The scan's own remarks — a shallow baseline, a truncated seed. Shown
+    #: verbatim, because "nothing is trending" and "this could not have proposed
+    #: anything" are different answers and the counts cannot tell them apart.
+    notes: list[str]
+    error: str | None
+    #: When a scan — cron or console — last succeeded. From the ledger.
+    last_scan_at: datetime | None

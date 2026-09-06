@@ -89,6 +89,18 @@ OUTCOME_HINTS: dict[str, str] = {
     "testosterone": "(testosterone OR androgen)",
     "blood sugar": '("blood glucose"[MeSH] OR "insulin resistance")',
     "cholesterol": '("cholesterol"[MeSH] OR "lipid profile")',
+    # Added 2026-09-06 for trend discovery, and useful to retrieval on its own.
+    # `discovery/topics.py::is_usable_angle` will only cut a sub-topic whose
+    # outcome appears in this map, so a gap here is a whole class of article the
+    # scan cannot propose — heart health and recovery are core to this product
+    # and were both missing, which is why "omega-3 for cardiovascular disease"
+    # could never be offered.
+    "heart": '("cardiovascular diseases"[MeSH] OR "heart" OR "cardiovascular health")',
+    "cardiovascular": '("cardiovascular diseases"[MeSH] OR "cardiovascular health")',
+    "blood pressure": '("blood pressure"[MeSH] OR hypertension)',
+    "bone": '("bone density"[MeSH] OR osteoporosis OR "bone health")',
+    "recovery": '("muscle soreness" OR "exercise recovery" OR "delayed onset")',
+    "endurance": '("physical endurance"[MeSH] OR "aerobic capacity" OR VO2)',
 }
 
 _STOPWORDS = frozenset(

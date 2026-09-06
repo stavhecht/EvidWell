@@ -499,13 +499,34 @@ in the same picture. The fix is not more randomness at the sampler, and cannot b
 ignores `seed` entirely, so those renders already came from different noise.
 
 So the prompt now separates **treatment from composition**. `TREATMENT` — palette, matte
-surfaces, register — is fixed and applies to every render; framing, arrangement, light and
-surface are selected from four tuples by the seed. Exactly 500 combinations, all of them the
-same magazine. Locking the treatment is what makes a feed read as one publication; locking the
-composition as well is what made it read as one photograph.
+surfaces, register — is fixed and applies to every render; framing, arrangement, light, surface
+and the motif itself are selected from tuples by the seed. Exactly 5,184 combinations, all of
+them the same magazine. Locking the treatment is what makes a feed read as one publication;
+locking the composition as well is what made it read as one photograph.
 
-**The strides are a mixed radix**, each the product of the axis lengths before it, so the four
-axes are exact digits of `seed % 500` and every combination appears once per 500 consecutive
+**The motif is an axis, and it is the one that mattered most.** Each subject held a single
+string, so every article the hint table called a `SUPPLEMENT` — which is most of a wellness
+feed's vocabulary — rendered the literal phrase *"loose capsules, a small heap of pale powder
+and a plain unlabelled glass jar"*. The four composition axes could not compensate, because
+they only re-photograph whatever the motif named: five hundred angles on one still life still
+read as one picture. `_MOTIFS`, `_PEOPLE_MOTIFS` and the default fallback therefore hold
+`_MOTIF_RADIX` variants each, checked at import for the same reason the axis lengths are. Two
+details are deliberate. It is the **slowest** digit — stride past all four composition axes — so
+neighbouring seeds move the camera and distant ones change the objects, which keeps a seed
+meaning "this article's composition" rather than "a reroll". And the article's noun moved to the
+*head* of the sentence (`Still life of Ashwagandha KSM-66: …`) from a trailing `, suggesting
+<noun>`; arriving after three concrete object nouns that had already specified the frame, it was
+doing almost nothing, which is why creatine, ashwagandha and melatonin all drew the same jar.
+
+**Two axes carry the tonal range, because the palette cannot.** `_SURFACES` varies material and
+**value** — pale paper through to dark oiled wood — never hue, and `_LIGHTS` reaches from even
+overcast through hard directional sunlight to near-dark. Five pale neutrals under four flavours
+of soft daylight differ on paper and not at feed-tile size, especially on a four-step distilled
+checkpoint; contrast and shadow depth are the only range available once hue is locked, and
+locking hue is what the paragraph above is protecting.
+
+**The strides are a mixed radix**, each the product of the axis lengths before it, so the axes
+are exact digits of `seed % 5184` and every combination appears once per 5,184 consecutive
 seeds. They were coprime odd numbers `(1, 7, 53, 401)` on the theory that coprimality *between
 the strides* buys independence *between the axes*. It does not, and the failure is arithmetic
 rather than statistical: with stride 7 against a 5-option axis, writing `seed = 35q + r` gives
@@ -515,7 +536,8 @@ framing×arrangement combinations came up exactly twice as often as the other 15
 rarest; 511 on 499 under the radix. The quantity that matters is each stride against the product
 of the *preceding axis lengths*, not the strides against each other. `_STRIDES` is therefore
 derived from `_AXIS_RADIX` rather than written out, so it cannot fall out of step when someone
-adds a sixth framing.
+adds a seventh framing — as widening the axes from `(5, 5, 4, 5)` to `(6, 6, 6, 6)` proved,
+since that change touched no stride at all.
 
 That also gives the seed real work. It selects *our* prompt rather than the provider's noise, so
 a retried run composes the same photograph and Regenerate composes a different one — the
@@ -550,7 +572,8 @@ guards come with the gate, both because being wrong here costs far more than a p
 The people path carries its own composition vocabulary (`_PEOPLE_FRAMINGS`, `_POSES`,
 `_PEOPLE_SETTINGS`; `_LIGHTS` is shared) because the still-life words do not transfer — a
 flat-lay of a human being is a mortuary photograph — but the same option counts, so the mixed
-radix and the 500 combinations hold on both. `TREATMENT` is shared unchanged, and that is what
+radix and the 5,184 combinations hold on both. `_PEOPLE_MOTIFS` carries the same number of
+variants as every other motif tuple for exactly that reason. `TREATMENT` is shared unchanged, and that is what
 keeps a yoga photograph in the same magazine as the pill still lifes instead of drifting into
 stock fitness photography. The genre word moved out of `TREATMENT` to `_Path.genre` in the
 process: `editorial still-life photograph` was a composition clause hiding in the treatment
@@ -1379,7 +1402,7 @@ the point), and no endpoint that can set `status = published` other than `approv
 
 ## 9. Data model
 
-Full DDL: `backend/migrations/0001_initial.sql` and `0002_readers_and_subjects.sql`. Shape:
+Full DDL: `backend/migrations/0001_initial.sql`. Shape:
 
 - **`users`** — reviewers. `role` in (`admin`, `reviewer`).
 - **`articles`** — `status`, `slug`, `topic`, `original_content` (JSONB, immutable),

@@ -134,6 +134,84 @@ class Settings(BaseSettings):
     #: harmless, since the only run it could recover is the one it is running.
     worker_sweep_interval_seconds: float = 60.0
 
+    # --- trend discovery ---
+    #: Days of literature one scan measures. Cadence and window are independent:
+    #: `discovery_observations` is keyed (descriptor, pmid), so counts are
+    #: COUNT(DISTINCT pmid) over a ledger rather than incremented counters, and
+    #: running weekly with a 14-day window double-counts nothing.
+    discovery_window_days: int = 14
+    #: Days each scan re-reads *before* its window start. MeSH indexing lands
+    #: days to weeks after a record enters PubMed, so a record inside last
+    #: window's dates only becomes visible during this one. Re-reading is free —
+    #: observations conflict to a no-op — and the only cost is API calls. Set it
+    #: too small and every scan under-counts the newest half of its own window,
+    #: which is exactly the half a trend detector exists to see.
+    discovery_overlap_days: int = 21
+    #: Completed windows averaged into a descriptor's baseline. Six fortnights
+    #: is a quarter: long enough that one quiet fortnight is not a surge, short
+    #: enough that a year-old wave stops reading as new.
+    discovery_baseline_windows: int = 6
+    #: Windows of history required before *any* candidate is emitted. Below
+    #: this the scan writes observations and proposes nothing. A first scan with
+    #: no baseline can only rank by raw volume, which floods the desk with
+    #: vitamin D and creatine — the three things a reviewer would have named
+    #: unaided, arriving with the authority of a ranking. There is deliberately
+    #: no volume fallback; build the baseline with
+    #: `python -m scripts.scan_trends --bootstrap --apply`.
+    discovery_min_baseline_windows: int = 4
+    #: Papers in the window before a substance can be proposed. Three is one lab
+    #: publishing a series; four is where "several groups" starts.
+    discovery_min_papers: int = 4
+    #: Angles one scan may propose for a single substance. A substance surges as
+    #: a whole and gets written about one question at a time — "omega-3 for
+    #: muscle recovery" and "omega-3 for skin" are different articles resting on
+    #: different papers. Without a cap a single surge takes every slot on the
+    #: desk, which is the opposite of the variety the ranking exists to provide;
+    #: with a cap of 1 the other angles are never offered at all. Two is a desk
+    #: that can show eight substances or four, not one.
+    discovery_max_angles_per_substance: int = 2
+    #: How far back to look when deciding *which questions* a substance is
+    #: studied for. Much wider than the trend window on purpose — they are
+    #: different questions with different timescales. "Is omega-3 surging?" is a
+    #: fortnight's question; "what is omega-3 studied for?" is a slow fact.
+    #: Measured 2026-09-06: a 21-day window produced four usable angles across
+    #: the whole corpus; sixty days produced caffeine against strength,
+    #: endurance, cognition and heart rate. Costs nothing — it reads the
+    #: observation ledger, not PubMed.
+    discovery_angle_lookback_days: int = 90
+    #: Papers backing a *single angle* before it is worth proposing separately.
+    #: Lower than `discovery_min_papers` on purpose: that floor asks whether the
+    #: substance is moving, this one asks whether there is enough to write a
+    #: specific piece. Measured 2026-09-06 — omega-3 had 8 papers over 55 outcome
+    #: descriptors, so a floor equal to the substance's would have collapsed
+    #: every substance back to one angle and made the change a no-op.
+    discovery_min_papers_per_angle: int = 3
+    #: Descriptors appearing in more than this share of a scan's records are
+    #: stoplisted automatically, whatever `discovery/vocab.py` says. MeSH has
+    #: ~30,000 descriptors and check tags change between editions, so a hand
+    #: list will always be missing something — and what it misses is always the
+    #: same shape: a term on most of the corpus, which by construction cannot
+    #: distinguish any part of it.
+    discovery_document_frequency_ceiling: float = 0.35
+    #: Candidates one scan may propose. This is the reviewer-flooding control:
+    #: it is literally the number of "spend money" buttons that appear on the
+    #: desk, and eight is about what one person adjudicates without starting to
+    #: ignore them.
+    discovery_max_candidates: int = 8
+    #: Records efetched per scan across all seeds. A hard request budget, not a
+    #: tuning knob: NCBI answers sustained overage by blocking the IP, and this
+    #: scan shares that IP with the pipeline worker.
+    discovery_max_records_per_scan: int = 4000
+    #: How long a dismissed candidate stays suppressed. Half a year, because a
+    #: reviewer who said no is saying no to *this* evidence base, and
+    #: re-proposing it next fortnight with two more papers is how a proposal
+    #: queue teaches people to stop reading it. The paper count must also have
+    #: doubled — see `DiscoveryService.suppression_reason`.
+    discovery_dismiss_cooloff_days: int = 180
+    #: Seeds to query, by name from `discovery/seeds.py`. Narrow it to debug one
+    #: net; empty means all of them.
+    discovery_seeds: list[str] = []
+
     # --- article media ---
     #: Per-file ceiling. Generous for a photo, small enough that a stray upload
     #: cannot bloat the database or the request buffer. The reviewer sees the
@@ -141,7 +219,8 @@ class Settings(BaseSettings):
     #:
     #: There is no `media_root` any more: image bytes live in `media_objects`,
     #: so the store needs a session rather than a path and there is nothing
-    #: left to configure. See migrations/0004_media_objects.sql.
+    #: left to configure. See the `media_objects` section of
+    #: migrations/0001_initial.sql.
     media_max_bytes: int = 8 * 1024 * 1024
 
     # --- article imagery (generated) ---
@@ -179,7 +258,9 @@ class Settings(BaseSettings):
     image_cover_width: int = 864
     image_cover_height: int = 1152
 
-    @field_validator("cors_origins", "enabled_providers", mode="before")
+    @field_validator(
+        "cors_origins", "enabled_providers", "discovery_seeds", mode="before"
+    )
     @classmethod
     def _split_csv(cls, value: object) -> object:
         """Allow comma-separated env values as well as JSON lists."""
@@ -223,6 +304,29 @@ class Settings(BaseSettings):
                 f"worker_stale_after_seconds ({self.worker_stale_after_seconds}) must be "
                 f"at least 3x worker_heartbeat_seconds ({self.worker_heartbeat_seconds}) "
                 f"= {floor}s, or a single missed heartbeat requeues a live run."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _overlap_covers_a_missed_scan(self) -> Settings:
+        """The overlap must be at least a whole window.
+
+        A missed cron slot leaves a hole in the baseline, and the hole is worse
+        than the missing scan: a descriptor with one empty bucket has a lower
+        mean, so the next real window reads as a surge. The scan then proposes a
+        false trend produced by an outage, with nothing anywhere saying so.
+
+        An overlap of at least one window means the next scan re-reads
+        everything the missed one would have, and re-reading costs only API
+        calls — observations are keyed (descriptor, pmid) and conflict to a
+        no-op.
+        """
+        if self.discovery_overlap_days < self.discovery_window_days:
+            raise ValueError(
+                f"discovery_overlap_days ({self.discovery_overlap_days}) must be at "
+                f"least discovery_window_days ({self.discovery_window_days}), or a "
+                "single missed scan leaves a permanent hole in the baseline that "
+                "reads as a surge."
             )
         return self
 

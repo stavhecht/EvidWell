@@ -146,13 +146,28 @@ class PipelineWorker:
                 # while the run continues, and a run that stops reporting is
                 # requeued and executed twice. Nothing here may escape.
                 factory = get_session_factory()
+                beat_at = datetime.now(UTC)
                 async with factory() as session:
                     await session.execute(
                         update(PipelineRun)
                         .where(PipelineRun.id == run_id)
-                        .values(heartbeat_at=datetime.now(UTC))
+                        .values(heartbeat_at=beat_at)
                     )
                     await session.commit()
+                # Logged after the commit, so the line is evidence the write
+                # landed rather than that the attempt was made — the failure
+                # this exists to make visible is a heartbeat that stops while
+                # its run continues, and a pre-commit log would still print on
+                # the beat that did not reach the database. INFO because a beat
+                # only fires under an in-flight run, so an idle worker stays
+                # quiet; the interval bounds the volume at one line per
+                # `WORKER_HEARTBEAT_SECONDS` of work.
+                logger.info(
+                    "heartbeat for run %s at %s (next in %.0fs)",
+                    run_id,
+                    beat_at.isoformat(timespec="seconds"),
+                    self._heartbeat_interval,
+                )
             except asyncio.CancelledError:
                 raise
             except Exception:

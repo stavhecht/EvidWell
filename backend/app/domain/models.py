@@ -13,12 +13,13 @@ fine. Always apply the migration.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     ARRAY,
     Boolean,
+    Date,
     DateTime,
     Enum,
     Float,
@@ -39,6 +40,11 @@ from app.domain.enums import (
     ArticleStatus,
     ContactKind,
     ContactStatus,
+    DiscoveryCandidateStatus,
+    DiscoveryDescriptorKind,
+    DiscoveryScanMode,
+    DiscoveryScanStatus,
+    RunOrigin,
     RunStatus,
     StudyType,
     Subject,
@@ -304,6 +310,13 @@ class PipelineRun(Base):
     cache_read_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     cache_write_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     requested_by: Mapped[str | None] = mapped_column(UUID(as_uuid=False))
+    #: What the topic came from — a reviewer typing it, or a reviewer promoting
+    #: a trend the scan proposed. Both are human decisions; this only says which
+    #: surface produced the string. Defaulted in the database so `create_run`
+    #: never has to set it.
+    origin: Mapped[RunOrigin] = mapped_column(
+        pg_enum(RunOrigin, "run_origin"), server_default=text("'console'")
+    )
     #: Attempts started, incremented when a worker claims the run.
     attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     #: Earliest time this run may be claimed; NULL means now. Set when a
@@ -357,7 +370,7 @@ class Reader(Base):
     """A public reader's account.
 
     Separate from :class:`User` on purpose — see the note in
-    ``migrations/0002_readers_and_subjects.sql``. ``users`` is the reviewer
+    ``migrations/0001_initial.sql``. ``users`` is the reviewer
     roster and ``articles.reviewed_by`` is a foreign key into it, so a row
     there is a claim about who is answerable for a published article. Readers
     sign themselves up; a reader id can never satisfy ``require_reviewer``
@@ -472,10 +485,10 @@ class MediaObject(Base):
 
     The store behind ``services/media.py``. Deliberately unrelated to
     ``articles``: an image is referenced by URL from inside a document, and the
-    same bytes may be embedded by several drafts or by none. See
-    ``migrations/0004_media_objects.sql`` for why a column on ``articles``
-    cannot work — the short version is that ILLUSTRATE stores pictures two
-    stages before the article row exists.
+    same bytes may be embedded by several drafts or by none. See the
+    ``media_objects`` section of ``migrations/0001_initial.sql`` for why a
+    column on ``articles`` cannot work — the short version is that ILLUSTRATE
+    stores pictures two stages before the article row exists.
 
     ``digest`` is the primary key rather than a surrogate, which is what makes
     storing the same image twice a no-op rather than a duplicate.
@@ -489,6 +502,160 @@ class MediaObject(Base):
     #: rather than stored, so there is one definition of that mapping.
     extension: Mapped[str] = mapped_column(Text, nullable=False)
     data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class DiscoveryScan(Base):
+    """One run of ``scripts/scan_trends.py``.
+
+    Bookkeeping only. The observations a scan recorded outlive it — they are the
+    baseline every later scan is measured against — which is why
+    ``DiscoveryObservation.scan_id`` is ``ON DELETE SET NULL``.
+    """
+
+    __tablename__ = "discovery_scans"
+
+    id: Mapped[str] = mapped_column(UUID_PK, primary_key=True, server_default=GEN_UUID)
+    #: The Entrez-date range asked of PubMed, overlap included. Successive scans
+    #: overlap heavily on purpose; see the trend-discovery section of
+    #: migrations/0001_initial.sql.
+    window_start: Mapped[date] = mapped_column(Date, nullable=False)
+    window_end: Mapped[date] = mapped_column(Date, nullable=False)
+    mode: Mapped[DiscoveryScanMode] = mapped_column(
+        pg_enum(DiscoveryScanMode, "discovery_scan_mode"),
+        server_default=text("'scan'"),
+    )
+    status: Mapped[DiscoveryScanStatus] = mapped_column(
+        pg_enum(DiscoveryScanStatus, "discovery_scan_status"),
+        server_default=text("'running'"),
+    )
+    seeds_queried: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    records_seen: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    descriptors_seen: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    candidates_emitted: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    error: Mapped[dict | None] = mapped_column(NullableJSONB)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DiscoveryDescriptor(Base):
+    """A MeSH descriptor we have seen, and what we take it to be.
+
+    ``ui`` is the primary key because it is the only stable name a substance
+    has: descriptor labels change between MeSH editions, and ``articles.product``
+    is free text the extraction model wrote. D003401 is creatine in every record
+    ever indexed, which is what makes the one-live-proposal-per-substance index
+    a real guarantee rather than fuzzy string matching.
+    """
+
+    __tablename__ = "discovery_descriptors"
+
+    ui: Mapped[str] = mapped_column(Text, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    #: Recomputed each scan rather than frozen, so a misclassification is one
+    #: UPDATE rather than a code change plus a full re-scan.
+    kind: Mapped[DiscoveryDescriptorKind] = mapped_column(
+        pg_enum(DiscoveryDescriptorKind, "discovery_descriptor_kind")
+    )
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class DiscoveryObservation(Base):
+    """One (descriptor, paper) pair. The unit every trend count is made of.
+
+    Counts are ``COUNT(DISTINCT pmid)`` over this table, never an incremented
+    counter. That is what lets each scan re-read the weeks a previous scan
+    already covered — necessary, because MeSH indexing lags PubMed entry — for
+    free, and it makes the whole script idempotent.
+    """
+
+    __tablename__ = "discovery_observations"
+
+    descriptor_ui: Mapped[str] = mapped_column(
+        Text, ForeignKey("discovery_descriptors.ui"), primary_key=True
+    )
+    pmid: Mapped[str] = mapped_column(Text, primary_key=True)
+    #: When PubMed received the record, not when we found it. A paper indexed
+    #: late belongs to the window it entered in, or a scan that happens to
+    #: notice a backlog reads as a surge.
+    entrez_date: Mapped[date] = mapped_column(Date, nullable=False)
+    #: Denormalised from ``DiscoveryDescriptor.kind``, because the baseline
+    #: query filters on it and joining 30k rows back to the vocabulary for a
+    #: boolean turns an index-only scan into a hash join per window.
+    is_substance: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    major_topic: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    #: Whether this paper tagged the descriptor with an intervention qualifier.
+    #: Per observation rather than aggregated: the substance-vs-biomarker rule
+    #: is a ratio over papers, and its threshold is expected to be retuned.
+    intervention_qualifier: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false")
+    )
+    study_type: Mapped[StudyType] = mapped_column(
+        pg_enum(StudyType, "study_type"), server_default=text("'unknown'")
+    )
+    scan_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("discovery_scans.id", ondelete="SET NULL")
+    )
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class DiscoveryCandidate(Base):
+    """A proposed article topic, ranked by how fast its literature is growing.
+
+    A proposal and nothing more. Promotion to a ``PipelineRun`` is a reviewer
+    action through the console, so nothing here spends money on its own — the
+    same principle as invariant #1, moved one step earlier to what gets written
+    at all rather than what gets published.
+    """
+
+    __tablename__ = "discovery_candidates"
+
+    id: Mapped[str] = mapped_column(UUID_PK, primary_key=True, server_default=GEN_UUID)
+    scan_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("discovery_scans.id", ondelete="CASCADE")
+    )
+    substance_ui: Mapped[str] = mapped_column(
+        Text, ForeignKey("discovery_descriptors.ui"), nullable=False
+    )
+    #: Nullable: a substance whose co-occurring descriptors name no recognisable
+    #: outcome is still proposed, under a bare topic. Missing context is not a
+    #: reason to hide an emerging trend.
+    outcome_ui: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("discovery_descriptors.ui")
+    )
+    #: Verbatim what becomes ``pipeline_runs.topic``. Stored rather than
+    #: recomposed at promote time, so what the reviewer read is what runs.
+    topic: Mapped[str] = mapped_column(Text, nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    paper_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    baseline_count: Mapped[float] = mapped_column(Float, nullable=False)
+    #: ``{lift, study_mix, top_pmids, window}`` — the reviewer's evidence for the
+    #: proposal, and the dismissal rule's memory of what was known at the time.
+    #: Not nullable, so bare JSONB is correct here.
+    rationale: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    status: Mapped[DiscoveryCandidateStatus] = mapped_column(
+        pg_enum(DiscoveryCandidateStatus, "discovery_candidate_status"),
+        server_default=text("'proposed'"),
+    )
+    pipeline_run_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("pipeline_runs.id", ondelete="SET NULL")
+    )
+    decided_by: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dismiss_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

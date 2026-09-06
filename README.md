@@ -44,10 +44,8 @@ backend/
     pipeline/      seven stages, orchestrator, local worker
     api/           public/ (unauthenticated) and console/ (JWT)
     services/      review, card derivation, TipTap conversion
-  migrations/      0001_initial.sql — the schema source of truth
+  migrations/      0001_initial.sql — the schema source of truth, and the whole of it
   tests/           test_invariants.py — the invariant suite
-  migrations/      0001_initial.sql — the schema source of truth
-                   0002 — reader accounts, folders, contact inbox, subject, card image
 frontend/
   src/
     lib/api/       framework-agnostic data layer (keeps the Next.js port cheap)
@@ -193,7 +191,7 @@ Honest accounting of what has and has not been exercised.
 | Check | Result |
 |---|---|
 | `pytest tests/` | 490 passed, **0 skipped** (seven suites skip silently with no DB — see CLAUDE.md) |
-| `python -m scripts.migrate` | 0001 and 0002 apply cleanly from empty |
+| `python -m scripts.migrate` | 0001 applies cleanly from empty |
 | DB invariants | CHECK constraint and immutability trigger both confirmed rejecting |
 | Reader schema | composite FK, the save-is-a-move primary key, folder-name uniqueness and the contact CHECK all confirmed rejecting |
 | API end to end | reviewer auth, feed, facets, article, reader signup → `/me` → save → shelf, contact submit (202), console inbox anon (401) |

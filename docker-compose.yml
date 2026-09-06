@@ -75,10 +75,8 @@ x-backend: &backend
     # old named volume got wrong: it was its own storage, had never seen
     # ./backend/var/media, and served every path in `articles.generated_imagery`
     # as a 404 the moment the stack moved into containers. One store, one
-    # backup, one restore. See migrations/0004_media_objects.sql.
-    #
-    # ./backend/var/media may still hold the pre-migration files. Nothing reads
-    # it; `python -m scripts.import_media` moved them and it can be deleted.
+    # backup, one restore. See the `media_objects` section of
+    # migrations/0001_initial.sql.
 
 services:
   db:

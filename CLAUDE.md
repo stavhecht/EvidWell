@@ -11,9 +11,13 @@ All backend commands run from `backend/` with the venv active (`source .venv/bin
 docker compose up -d db                  # pgvector/pgvector:pg16 on :5432
 pip install -e ".[dev]"
 python -m scripts.migrate                # applies migrations via asyncpg; no psql needed
-                                         # 0002 adds readers, folders, the contact inbox,
-                                         # articles.subject and articles.card_image
-                                         # 0004 adds media_objects — image bytes move off disk
+                                         # one file, 0001_initial.sql — squashed 2026-09-06,
+                                         # folding in what had been 0002–0006 (readers and the
+                                         # contact inbox, subject and card image, generated
+                                         # imagery, media_objects, trend discovery). Squashing
+                                         # is only free while every database holding the schema
+                                         # can be dropped and rebuilt; the file's header states
+                                         # that condition. From here, a schema change is 0002.
 python -m scripts.migrate --status
 python -m scripts.seed_admin --email you@example.com --name "Your Name"
 
@@ -21,8 +25,10 @@ python -m scripts.seed_admin --email you@example.com --name "Your Name"
 python -m scripts.reclassify_sources          # after any classifier change
 python -m scripts.check_retractions           # re-check cited sources
 python -m scripts.check_retractions --scope all
-python -m scripts.import_media                # one-time, after 0004: var/media -> media_objects
 python -m scripts.reembed_sources             # after any EMBEDDING_PROVIDER / model change
+python -m scripts.scan_trends                 # trend discovery; dry run makes the API calls
+                                              # (same code as the console's Run scan button)
+python -m scripts.scan_trends --bootstrap --apply   # one-time, ~3 min: build the baseline
 
 # run
 uvicorn app.main:app --reload            # API :8000, OpenAPI at /docs
@@ -88,11 +94,18 @@ query planner. A green `pytest` with the DB down is a much weaker signal than it
 | `test_stale_recovery.py` | heartbeat sweep, requeue-vs-fail on a spent budget |
 | `test_rerank_plan.py` | the `EXPLAIN` assertion that no approximate scan is chosen |
 | `test_reader_accounts.py` | the composite FK on `reader_saves`, the save-is-a-move primary key, folder-name uniqueness, and the contact `CHECK` |
+| `test_discovery_db.py` | the one-live-proposal-per-substance index, the observation ledger's idempotence, the three decision CHECKs, the descriptor FK that forces the scan's write order, and `pipeline_runs.origin` defaulting |
 
 Point them elsewhere with `TEST_DATABASE_URL`; they otherwise use `database_url` from
-settings. `test_worker_claim.py` and `test_stale_recovery.py` also skip when the queue is
+settings. `test_discovery_db.py` runs against a *populated* database on purpose — after a
+`scan_trends --bootstrap` the observations table holds tens of thousands of rows — so its fixtures
+use synthetic descriptor UIs (`D9999xx`) and generated PMIDs rather than real ones. Assertions
+scoped to real MeSH terms fail for reasons that have nothing to do with the guarantee being
+checked. `test_worker_claim.py` and `test_stale_recovery.py` also skip when the queue is
 already non-empty — they need to see the whole table, so a leftover `queued` or `running` row
-from a manual run turns them into passes. Clear it before trusting them.
+from a manual run turns them into passes. Clear it before trusting them. Worse than skipping:
+they also *claim* such a row, so a leftover queued run can flip to `running` mid-suite and make
+the failure look intermittent. Promoting a trend candidate by hand leaves exactly that residue.
 
 The remaining suites use `FakeSession` from `tests/conftest.py` and need no database.
 `asyncio_mode = "auto"`, so async tests need no decorator.
@@ -459,21 +472,45 @@ efficacy claim takes when a person makes it.
 what makes twenty articles read as one publication, and it is also what stops the people renders
 from becoming stock fitness photography. Framing, arrangement, light and surface are chosen by
 the **seed** from a per-path vocabulary (`_FRAMINGS`/`_ARRANGEMENTS`/`_SURFACES` for objects,
-`_PEOPLE_FRAMINGS`/`_POSES`/`_PEOPLE_SETTINGS` for a person, `_LIGHTS` shared), giving 500
-combinations either way. Do not add a composition clause to `TREATMENT`; that is exactly how this
+`_PEOPLE_FRAMINGS`/`_POSES`/`_PEOPLE_SETTINGS` for a person, `_LIGHTS` shared), giving 1,296
+compositions either way. Do not add a composition clause to `TREATMENT`; that is exactly how this
 module once produced the same beige photograph for every article, with three words of eighty
 varying — and the genre word (`Still life` / `Unposed documentary photograph`) was moved out to
 `_Path.genre` for that reason, being composition hiding in the treatment string.
 
+**The motif is a fifth axis, and swapping it is the only change with real amplitude.** Each
+subject held one string, so every article the hint table called a `SUPPLEMENT` — most of a
+wellness feed — rendered the same jar of capsules, and the composition axes could only
+re-photograph it: five hundred angles on one still life read as one picture. `_MOTIFS`,
+`_PEOPLE_MOTIFS`, `_DEFAULT_MOTIFS` and `_DEFAULT_MOTIFS_UNNAMED` now hold `_MOTIF_RADIX` (4)
+variants each — **every tuple the same length, checked at import**, or the digit stops being
+uniform across subjects — for 5,184 prompts (`_PERIOD`). It is deliberately the **slowest**
+digit (`_MOTIF_STRIDE` is past all four composition axes), so neighbouring seeds move the camera
+and distant ones change the objects; a seed is an article's stable composition, not a reroll.
+The noun also moved to the head of the sentence (`Still life of Ashwagandha KSM-66: …`) from a
+trailing `, suggesting <noun>` — arriving after three concrete object nouns that had already
+specified the frame, it was doing almost nothing. The default-motif path passes no head noun,
+because that scene already names it.
+
+**Tonal range comes from `_SURFACES` and `_LIGHTS`, never from hue.** Surfaces vary material
+*and value* (pale paper through dark oiled wood); lights run from even overcast through hard
+directional sunlight to near-dark. The original five pale neutrals under four flavours of soft
+daylight were nearly a constant at feed-tile size on a four-step distilled checkpoint. This is
+the only range available once the palette is locked — which it stays.
+
 **The strides are a mixed radix, not coprime numbers.** Each is the product of the axis lengths
 *before* it (`_STRIDES` is derived from `_AXIS_RADIX`, so it cannot drift when someone adds a
-sixth framing), which makes the four axes exact digits of `seed % 500` — every combination once
-per 500 consecutive seeds. The previous `(1, 7, 53, 401)` was chosen for coprimality between the
+seventh framing — widening `(5, 5, 4, 5)` to `(6, 6, 6, 6)` touched no stride), which makes the
+axes exact digits of `seed % 5184` — every combination once per 5,184 consecutive seeds. The previous `(1, 7, 53, 401)` was chosen for coprimality between the
 strides, which buys nothing: stride 7 against a 5-option axis gives
 `(seed % 5, seed // 7 % 5) == (r % 5, r // 7)` for `seed = 35q + r`, so 10 framing×arrangement
 pairs came up exactly twice as often as the other 15 (χ² 49073 on 16 dof over 400k seeds; 511 on
 499 after). The quantity that matters is each stride against the product of the preceding axis
-lengths — which is also why both paths must keep the same option counts, checked at import.
+lengths — which is also why both paths must keep the same option counts, checked at import, and
+why the motif digit's stride is the product of all four axes rather than a number that looked
+big enough. Sampling seeds is no longer an adequate content check at 5,184 combinations, so
+`test_no_option_in_any_vocabulary_names_a_claim_shaped_thing` checks every string in every
+vocabulary directly: it fails when a banned word is *written*, not when a seed selects it.
 
 **The seed selects the prompt, not the sampler, and that distinction is the whole design.** The
 provider ignores the seed it is sent (measured — see `seed_for_run`), so randomising harder
@@ -500,6 +537,113 @@ must stay there; the tests fail if they are "tidied" into the negative channel. 
 exclusions are deliberately narrower than they look — *branded* packaging, and no ban on
 numbers — because several motifs name a jar, a tube or a timer, and a blanket ban contradicted
 them on every render.
+
+**Trend discovery proposes; it never enqueues.** `discovery/scan.py::run_scan` counts MeSH tags on
+newly-indexed PubMed records, ranks substances by acceleration, and writes `discovery_candidates`.
+A reviewer promotes one from the console and *that* creates the run. This is invariant #1's
+reasoning moved one step earlier — a human decides what gets written, not just what gets published
+— and it is why there is no `--auto-enqueue` flag. The scan itself makes **no model calls at all**,
+so it costs nothing; the spend is entirely in what a reviewer chooses to promote, and
+`pipeline_runs.origin` is what makes that spend one `WHERE` against the token ledger.
+
+**Two callers, one scan.** `scripts/scan_trends.py` is argparse and printing around `run_scan`;
+`POST /console/discovery/scan` is a background task around it, driven by the desk's Run scan
+button. The endpoint must **not** shell out to the script — `scripts/` is deliberately outside the
+deployed image ([.dockerignore](backend/.dockerignore)), so that button would work on a laptop and
+500 in a container. Exposing a manual trigger at all is safe only because of the paragraph above:
+a scan proposes, so the button spends PubMed requests and nothing of ours. `discovery/manual.py`
+holds the runner, and three things about it are deliberate — it is **single-flight per process**
+(two concurrent scans double this process's draw on NCBI's per-IP ceiling, which the worker shares,
+to compute the same answer twice; the ledger's idempotence is what makes the per-*process* scope
+merely wasteful rather than corrupting), its state lives **in memory, not in `discovery_scans`**
+(that table is the window ledger — `next_window` reads only its succeeded rows — so a press must
+not write to it), and a scan that raises lands on that state as an error string rather than as an
+unhandled task exception. A restart therefore reports `idle`; `last_scan_at`, read from the ledger,
+is what still answers "when did one last finish".
+
+Six things about it that are load-bearing:
+
+- **Counts are `COUNT(DISTINCT pmid)` over a ledger, never incremented counters.** MeSH indexing
+  lags PubMed entry by days to weeks, so every scan must re-read weeks a previous scan already
+  covered — `discovery_overlap_days` (21) against a 14-day window. `discovery_observations` is
+  keyed `(descriptor_ui, pmid)` and written `ON CONFLICT DO NOTHING`, which makes that overlap
+  free, makes a missed cron slot self-heal, and makes the whole script idempotent. Verified
+  against the live index: a second `--apply` run writes 0 observations and refreshes the same
+  candidates. Records bucket on `entrez_date`, not on which scan found them, so a backlog cannot
+  read as a surge.
+- **The window is measured on `datetype=edat`, and the harvester is deliberately not a
+  `ScholarlyProvider`.** `ScholarlyProvider.search` is contractually required to drop records with
+  no abstract, and discovery wants exactly those — a MEDLINE record with no abstract carries its
+  full heading list, and there were **21,689** such records in the supplements and vitamins nets
+  when this was built. `discovery/harvest.py` therefore has its own esearch/efetch parse and shares
+  only the *throttle* — which it must, because NCBI's ceiling is per IP and shared with the worker.
+  Same shape as `scripts/check_retractions.py`. It also uses `sort=date`, not the pipeline's
+  `sort=relevance`; putting either on a shared `SearchQuery` would let a future caller silently
+  degrade every article's evidence base.
+- **No candidates until the baseline is deep enough.** Below `discovery_min_baseline_windows` (4)
+  the scan writes observations and proposes *nothing*, with no volume-ranked fallback — a first
+  scan can only rank by raw volume, which proposes vitamin D, creatine and omega-3, i.e. the three
+  things a reviewer would have named unaided, arriving with the authority of a ranking.
+  `--bootstrap --apply` builds it (~3 min, 6 months; the scorer only reads
+  `discovery_baseline_windows` buckets, so a deeper backfill writes rows nothing reads).
+- **`score = log2(lift) × log2(1 + n) × quality_weight`, and the product is the point.** Lift alone
+  is dominated by tiny denominators (1→4 beats 30→90); volume alone re-proposes vitamin D forever.
+  Every constant was guessed before any data existed, which is why the console shows the arithmetic
+  ("17 papers, usually 3") and not the score.
+- **A descriptor a seed query *names* can never be a finding**, and those anchors live on the seed
+  in `discovery/seeds.py`, not in the stoplist — so editing a seed's terms cannot leave its own
+  subject topping its own ranking. Measured: before this, "Plant Extracts" ranked first among
+  botanicals with 146 of 665 papers. Substances are separated from biomarkers by MeSH *intervention
+  qualifiers* (/administration & dosage, /therapeutic use…) plus `<ChemicalList>` membership, with
+  `BOTANICAL_UIS` and `BIOMARKER_UIS` covering what that rule cannot see. Category abstractions
+  (`Antineoplastic Agents`, `Capsules`) pass the rule cleanly and are stoplisted by hand; the real
+  fix is a MeSH tree lookup against D27, which is a network hop per descriptor.
+- **One proposal per (substance, *angle*), not per substance.** "Omega-3 for muscle
+  recovery" and "omega-3 for skin" rest on different papers and reach different verdicts, and
+  under the old identity promoting either silenced the substance so the other was never offered.
+  Three things keep this from becoming "one substance, eight ways":
+  `discovery_max_angles_per_substance` (2) caps exposure; an angle must clear
+  `discovery_min_papers_per_angle` (3, deliberately below the substance floor — they ask different
+  questions, and set equal the change is a no-op); and **`is_usable_angle` requires the outcome to
+  map into `OUTCOME_HINTS`**, because everything not identified as a substance falls through to
+  "outcome" and that is far too permissive for naming an article. Real proposals it now refuses:
+  `vitamin d for cross-sectional studies` (a study design), `vitamin d for vitamin d deficiency`
+  (tautological), `catechin for tea`. A refused angle is not a refused substance — it falls back to
+  a bare topic, exactly as before angles existed.
+- **Angles are read from the ledger over `discovery_angle_lookback_days` (90), not from the scan's
+  own window.** Two different questions with two different timescales: "is omega-3 surging?" is a
+  fortnight's question, "what is omega-3 studied for?" is a slow fact. Measured 2026-09-06 — a
+  21-day window yielded four usable angles across the whole corpus, all on two papers; sixty days
+  yielded caffeine against strength, endurance, cognition and heart rate. A sub-topic is a slice of
+  an already-small count, so a short window structurally cannot see one. Costs no API requests.
+- **The trend is counted over the trailing `discovery_window_days` only, not over everything
+  harvested.** The harvest spans the overlap so late-indexed records reach the ledger; counting
+  them into `current` compares a 21-to-35-day span against 14-day baseline buckets and inflates
+  every lift by the ratio. It was doing exactly that until 2026-09-06 — vitamin D read as flat
+  (1.0x) when it was in fact declining (0.8x). Both numbers look reasonable alone, which is why it
+  survived a live run and a full test suite.
+- **`discovery_candidates_one_live_per_angle` is the anti-repeat guarantee.** A trend that
+  emerges keeps clearing the bar, so the scan writes `ON CONFLICT … DO UPDATE` and a re-detected
+  trend *refreshes* its row rather than appearing three times at three scores. The index is partial
+  on `proposed` so history is unconstrained — which is what `suppression_reason` reads: a promotion
+  that produced an article suppresses permanently, a dismissal until **both** the cooloff elapses
+  and the paper count has doubled. Time alone would let a slow-burn topic nag every fortnight.
+  Suppression is keyed on the angle's *spoken keyword*, not its descriptor UI: MeSH is granular
+  enough that "Skin Aging", "Skin Physiological Phenomena" and "Skin Absorption" are three UIs for
+  one question, and a per-UI rule would let a dismissed angle return under six names. The index
+  keys on the UI because that is the duplicate row it can see; the keyword is the editorial
+  judgement on top.
+- **Zero proposals is the ordinary outcome, and the scan now says why.** A floor, a quorum and a
+  suppression rule exist to make most fortnights propose nothing — but on the console "0 proposals"
+  read exactly like a scan that had failed. `_suppression_note` folds the count into
+  `ScanReport.notes`, which the desk already renders. Without it the most common cause of an empty
+  desk was the one cause the desk could not display.
+
+The sharpest risk is `UnanchoredQuery`: a promoted topic that leads extraction to return an empty
+`ingredients` and a vague `product` dies at a **non-retryable** stage failure, having spent the
+extraction call. Topics are composed as `"<substance> for <outcome>"` with the substance bare and
+first for that reason, and `tests/test_discovery_topics.py` pins that every botanical still anchors
+a query. It fails *visibly* — the run shows `failed` — so it costs one call, not a wrong article.
 
 ## Invariants — do not route around these
 
@@ -645,14 +789,14 @@ generated by a separate model call, so card and article cannot contradict each o
   did not cover: images generated by a host-venv run were served as 404s the moment the stack
   moved into containers, because the compose volume was its own storage and had never seen
   `backend/var/media`. Every path in `articles.generated_imagery` pointed at a file the API
-  could not reach. One store, one backup, one restore. `scripts/import_media.py` moved the
-  legacy files (dry by default, `--apply` to write); `backend/var/media` is read by nothing.
+  could not reach. One store, one backup, one restore. That directory and the one-time
+  `import_media` script that emptied it are both gone — nothing reads or writes local disk.
   - **The URL did not change.** `/api/media/<2 hex>/<62 hex>.<ext>` is still what a document
     holds and what `MEDIA_SRC_RE` matches, so no stored JSON was rewritten. The two-character
     shard is now decorative — there is no directory — and stays because rewriting stored
     documents to drop a slash would be a migration with nothing to gain.
-  - **A column on `articles` cannot work**, and `migrations/0004_media_objects.sql` records
-    why: ILLUSTRATE stores pictures at stage 5 and the article row is not created until
+  - **A column on `articles` cannot work**, and the `media_objects` section of
+    `migrations/0001_initial.sql` records why: ILLUSTRATE stores pictures at stage 5 and the article row is not created until
     PERSIST at stage 7, uploads are deliberately not article-scoped, and content addressing
     dedups across articles. Keyed by digest, related to nothing.
   - `store_image` is now `async` and takes a **session, not a path**, and **does not commit** —

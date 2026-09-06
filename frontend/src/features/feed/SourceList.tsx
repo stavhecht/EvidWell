@@ -9,10 +9,14 @@
  *
  * Each entry carries `id="source-S1"` so the citation chips in the body can
  * anchor to it, and the row the reader just came from is washed with the accent
- * so the jump lands somewhere visible.
+ * so the jump lands somewhere visible. The *label* on the entry is not that
+ * handle: it is the reader's number, 1..n with no gaps, from the same map the
+ * chips read — see `citations.ts`. The id keeps the handle because it is the
+ * identity, and because changing it would break every link already shared.
  */
 
 import { STUDY_TYPE_LABELS, isWeakStudyType } from "@/features/evidence/labels";
+import { citationLabel } from "./citations";
 import {
   CITATION_MAP,
   CITATION_MAP_CLAIM,
@@ -41,11 +45,13 @@ import type { Citation, Source } from "@/types/api";
 interface Props {
   sources: Source[];
   citations: Citation[];
+  /** Handle → the number the reader sees. Shared with the body's chips. */
+  numbers: Map<string, number>;
   /** Handle of the chip the reader last pressed. */
   activeHandle?: string | null;
 }
 
-export function SourceList({ sources, citations, activeHandle }: Props) {
+export function SourceList({ sources, citations, numbers, activeHandle }: Props) {
   if (sources.length === 0) {
     return (
       <section className={SOURCES_SECTION}>
@@ -77,7 +83,9 @@ export function SourceList({ sources, citations, activeHandle }: Props) {
               className={sourceRow(active)}
             >
               <div className={SOURCE_ROW_HEAD}>
-                <span className={SOURCE_HANDLE}>{source.citationHandle}</span>
+                <span className={SOURCE_HANDLE}>
+                  {citationLabel(numbers, source.citationHandle)}
+                </span>
                 <a
                   href={source.url}
                   target="_blank"
@@ -129,7 +137,7 @@ export function SourceList({ sources, citations, activeHandle }: Props) {
                   <span key={handle}>
                     {index > 0 ? ", " : ""}
                     <a href={`#source-${handle}`} className={CITATION_MAP_HANDLE}>
-                      {handle}
+                      {citationLabel(numbers, handle)}
                     </a>
                   </span>
                 ))}

@@ -177,14 +177,14 @@ export default {
       // restyled four pages that did not change.
       //
       // 800px and not more. The frame holds the headline, byline, verdict bar
-      // and source panel; the body sits at 600px inside it (see PROSE_MEASURE),
-      // because a measure that reads well is narrower than a page that holds a
-      // headline. Every px of frame beyond this is dead space beside the prose,
-      // and at 880 it read as a ribbon of text in a wide box.
-      //
-      // The 200px gap to the body is as small as it goes without one of the two
-      // moving: 800 is already the narrowest frame the source panel sits in
-      // comfortably, and 600 is a ~89-character measure at the body's 20px.
+      // and source panel, and the body now fills it (see PROSE_MEASURE) rather
+      // than sitting in a 600px column inside it — so this number is the
+      // article's one measure, and every px added to it lengthens the line.
+      // 880 was tried as a frame around the narrower column and read as a
+      // ribbon of text in a wide box; that complaint does not apply now the
+      // prose fills the frame, but the character count does: 744px of type at
+      // the body's 20px is ~111 characters, so widening this again means
+      // raising `text-prose` with it.
       maxWidth: { page: "1240px", article: "800px", prose: "760px", console: "1040px" },
       spacing: { gutter: "28px", header: "68px" },
     },

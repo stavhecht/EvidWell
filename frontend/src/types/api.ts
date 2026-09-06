@@ -430,3 +430,74 @@ export interface ContactSubmission {
   link?: string | null;
   note: string;
 }
+
+/**
+ * How a pipeline run's topic was chosen. Both are human decisions — this says
+ * which surface produced the string, not whether anyone approved it.
+ */
+export type RunOrigin = "console" | "discovery";
+
+export type DiscoveryCandidateStatus =
+  | "proposed"
+  | "promoted"
+  | "dismissed"
+  | "expired";
+
+/**
+ * A topic the fortnightly scan proposes, with the arithmetic behind it.
+ *
+ * Everything past `topic` exists to be shown. The ranking is built from
+ * constants guessed before any real data existed, so a reviewer has to be able
+ * to see *why* something is on the list — a bare score is either believed too
+ * readily or ignored entirely.
+ */
+export interface DiscoveryCandidate {
+  id: string;
+  topic: string;
+  substanceUi: string;
+  substanceName: string;
+  outcomeName: string | null;
+  score: number;
+  /** Distinct papers behind the substance's surge — what the lift measures. */
+  paperCount: number;
+  /**
+   * Papers behind this specific angle. Equal to `paperCount` when the candidate
+   * names no outcome. Both matter: the first is why the substance is on the
+   * desk, the second is what this article would actually rest on.
+   */
+  anglePaperCount: number;
+  /** Mean papers per window across the preceding windows. */
+  baselineCount: number;
+  /** `paperCount` against `baselineCount`, Laplace-smoothed. */
+  lift: number;
+  /** Study types among those papers, keyed by grade. */
+  studyMix: Record<string, number>;
+  topPmids: string[];
+  status: DiscoveryCandidateStatus;
+  pipelineRunId: string | null;
+  scannedAt: string;
+}
+
+/** Where the console's manual scan is. `idle` is also the state after a restart. */
+export type TrendScanStatus = "idle" | "running" | "succeeded" | "failed";
+
+/**
+ * The state of a scan the reviewer started, plus when one last succeeded.
+ *
+ * Not a `discovery_scans` row: that table is the window ledger and a restart
+ * forgets that a press was in flight. `lastScanAt` is the one field that does
+ * come from it, so the desk can still say when the cron slot last ran.
+ */
+export interface TrendScan {
+  status: TrendScanStatus;
+  startedAt: string | null;
+  finishedAt: string | null;
+  /** Zero records is a broken harvest; zero candidates is an ordinary week. */
+  recordsSeen: number;
+  observationsWritten: number;
+  candidatesProposed: number;
+  /** The scan's own remarks — a shallow baseline, a truncated seed. */
+  notes: string[];
+  error: string | null;
+  lastScanAt: string | null;
+}

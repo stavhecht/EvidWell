@@ -15,7 +15,7 @@
  * article regardless of verdict, and it is deliberately not model output.
  */
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
@@ -29,12 +29,14 @@ import { fetchArticle, feedKeys } from "@/lib/api/feed";
 import { readingTimeLabel } from "@/lib/readingTime";
 import { PublishedDate } from "./ArticleCard";
 import { ArticleContent } from "./ArticleContent";
+import { citationNumbers } from "./citations";
 import { ArticleActions } from "./ArticleActions";
 import { ReadMore } from "./ReadMore";
 import { SourceList } from "./SourceList";
 import {
   ARTICLE_BACK_LINK,
   ARTICLE_BYLINE,
+  ARTICLE_BYLINE_LIFT,
   ARTICLE_BYLINE_SEP,
   ARTICLE_BYLINE_STRONG,
   ARTICLE_DISCLAIMER,
@@ -82,6 +84,12 @@ export function ArticleView() {
     retry: (count, err) =>
       !(err instanceof ApiError && err.status === 404) && count < 2,
   });
+
+  // One map for both the chips and the list, above the early returns because it
+  // is a hook. Deriving it twice would be two objects rather than two
+  // numberings — but a reader checking a chip against the list is the whole use
+  // of a citation, so it is worth being literal about there being one.
+  const numbers = useMemo(() => citationNumbers(article?.sources ?? []), [article?.sources]);
 
   if (status === "pending") return <ArticleSkeleton />;
 
@@ -152,11 +160,15 @@ export function ArticleView() {
             it describes the document the reader was actually given — including
             anything a reviewer cut before publishing. See lib/readingTime.ts.
           */}
-          <span>{readingTimeLabel(article.content)}</span>
+          <span className={ARTICLE_BYLINE_LIFT}>
+            {readingTimeLabel(article.content)}
+          </span>
           <span className={ARTICLE_BYLINE_SEP}>|</span>
           <span>{sourceSummary(article.sources.length)}</span>
           <span className={ARTICLE_BYLINE_SEP}>|</span>
-          <span>Reviewed by a person before publishing</span>
+          <span className={ARTICLE_BYLINE_LIFT}>
+            Reviewed by a person before publishing
+          </span>
         </div>
 
         {/*
@@ -185,12 +197,14 @@ export function ArticleView() {
         <ArticleContent
           doc={article.content}
           sources={article.sources}
+          numbers={numbers}
           onCite={setActiveHandle}
         />
 
         <SourceList
           sources={article.sources}
           citations={article.citations}
+          numbers={numbers}
           activeHandle={activeHandle}
         />
 

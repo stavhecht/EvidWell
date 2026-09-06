@@ -24,8 +24,8 @@ were on local disk until they turned out to be the one piece of published state
 that a database backup did not cover and a container did not carry — a run on
 the host wrote files a containerised API then served as 404s, with the paths in
 ``articles.generated_imagery`` pointing at each one. One store, one backup, one
-restore. See ``migrations/0004_media_objects.sql`` for why the table is keyed by
-digest rather than hung off ``articles``.
+restore. See the ``media_objects`` section of ``migrations/0001_initial.sql``
+for why the table is keyed by digest rather than hung off ``articles``.
 
 The module is split so the part worth testing hardest needs no database:
 ``prepare_image()`` is pure — it sniffs, digests, and builds the path a document

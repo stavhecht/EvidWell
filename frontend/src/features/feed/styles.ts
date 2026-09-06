@@ -7,17 +7,16 @@
  *
  * Three things worth knowing before editing:
  *
- * - **The measures are arguments.** `max-w-article` (800px) on the article page
- *   and 520px on its prose are not arbitrary — they are what make the body read
- *   as an article rather than as a page. Changing either changes the voice, not
- *   just the layout.
+ * - **The measures are arguments.** `max-w-article` (800px) is the article
+ *   page, and the prose now fills it rather than sitting in a narrower column
+ *   inside it — one measure, not two. That is a voice decision, not a layout
+ *   one: the picture and the body run the full width of the page the headline
+ *   sits on.
  *
- *   They were 760px and `max-w-[64ch]`, sized for a body of three short beats.
- *   Articles now carry subheads and several sections, so the column widened —
- *   but the body reads wider because the *type* grew with it, not because the
- *   column alone did; see PROSE_MEASURE for the measurement that forced that.
+ *   They were 760px and `max-w-[64ch]`, then 800px around a 600px column.
  *   `max-w-prose` still exists at 760px and still frames the short public
- *   pages — see `tailwind.config.ts`.
+ *   pages — see `tailwind.config.ts`. What has to be watched when this moves
+ *   is the character count, not the pixel: see PROSE_MEASURE.
  * - **`shadow-panel` and `shadow-pop` are the only shadows in the system.** Both
  *   belong to things that float over the page. Nothing resting on the page gets
  *   one; the tiles use radius and a scrim instead.
@@ -195,9 +194,17 @@ export function articleKicker(subjectText: string): string {
   return `mb-4 font-body text-micro font-bold uppercase tracking-[0.14em] ${subjectText}`;
 }
 
-/** The article's own title — the one heading that stays on Archivo. */
+/**
+ * The article's own title — the one heading that stays on Archivo, and the one
+ * element on the page that is centred.
+ *
+ * Centred *alone*, deliberately: the kicker, lede, byline and verdict bar stay
+ * flush left. A centred headline over a left-aligned page reads as a masthead;
+ * centring the block under it would make the whole header a poster, and the
+ * verdict bar is a row of facts rather than a title card.
+ */
 export const ARTICLE_TITLE =
-  "text-pretty font-ui text-title font-bold leading-[1.04] tracking-[-0.03em] text-ink";
+  "text-pretty text-center font-ui text-title font-bold leading-[1.04] tracking-[-0.03em] text-ink";
 /** Sized off the body, not fixed: it must stay a step above `text-prose`. */
 export const ARTICLE_LEDE =
   "mt-5 text-pretty font-body text-[23px] leading-[1.45] text-ink-2";
@@ -207,6 +214,26 @@ export const ARTICLE_BYLINE =
   "mt-6 flex flex-wrap items-center gap-x-2.5 gap-y-1.5 pb-4 font-body text-[12px] text-ink-3";
 export const ARTICLE_BYLINE_STRONG = "font-semibold text-ink";
 export const ARTICLE_BYLINE_SEP = "text-ink-4";
+
+/**
+ * The two byline facts about *this page* — how long it takes to read and that a
+ * person signed it off — stepped up to full ink, but only on the dark theme.
+ *
+ * The **only** `dark:` variant in the app, and it is deliberate rather than a
+ * crack in the token system: everything else flips because its token flips, and
+ * that is still the rule. This one asks for a different *relationship* to the
+ * byline in each theme — the same step up that reads as emphasis on the dark
+ * ground is heavier than the byline wants on the light one — and a token cannot
+ * express "one ramp step on one theme and none on the other".
+ *
+ * Safe because `dark:` is configured as `html[data-theme="dark"]`
+ * (`tailwind.config.ts`) and the pre-paint script in `index.html` resolves the
+ * system preference *into* that attribute. There is no bare
+ * `prefers-color-scheme` rule anywhere, so the variant and the palette switch
+ * on exactly the same condition. Add a media-query palette and this silently
+ * stops following it.
+ */
+export const ARTICLE_BYLINE_LIFT = "dark:text-ink";
 
 /** Verdict, its scope limit and the grade rungs, on one ruled line. */
 export const ARTICLE_VERDICT_BAR =
@@ -236,7 +263,7 @@ export const SOURCE_RETRACTED =
 
 /** Tracks the prose measure, so it sits under the body rather than beside it. */
 export const ARTICLE_DISCLAIMER =
-  "mt-8 max-w-[600px] font-body text-[11.5px] leading-[1.5] text-ink-4";
+  "mt-8 max-w-[800px] font-body text-[11.5px] leading-[1.5] text-ink-4";
 
 /* ── save and share ─────────────────────────────────────────────────────── */
 
@@ -285,15 +312,16 @@ export const SKELETON_PARAGRAPH = "h-24 rounded-field bg-surface-2";
 /* ── article prose and citation chips ───────────────────────────────────── */
 
 /**
- * The body column: **600px, which is ~89 characters a line** at `text-prose`
+ * The body column: **the article frame's full width** — 800px less the 28px
+ * gutters, so ~744px of type, which is ~111 characters a line at `text-prose`
  * (20px Instrument Serif).
  *
- * The character count is measured, not estimated, and measuring it is what
- * decided the size of the type. Instrument Serif averages **5.71px a character
- * at 17px** — run the font's advance widths over a paragraph of real article
- * prose and divide. That is ~0.34em, far narrower than a text serif, because it
- * is a display face doing a body job. Two numbers in this file were wrong
- * because nobody had run that:
+ * The count is measured, not estimated, and it is the number to watch here, not
+ * the pixel. Instrument Serif averages **5.71px a character at 17px** — run the
+ * font's advance widths over a paragraph of real article prose and divide. That
+ * is ~0.34em, far narrower than a text serif, because it is a display face
+ * doing a body job. Two numbers in this file were wrong because nobody had run
+ * that:
  *
  *   - `max-w-[64ch]` rendered as 441px, ~77 characters. `ch` is the width of
  *     the *wrapper's* zero and the wrapper inherits 15px while the paragraphs
@@ -301,21 +329,17 @@ export const SKELETON_PARAGRAPH = "h-24 rounded-field bg-surface-2";
  *   - 520px was then written down as "~82 characters, the top of the
  *     comfortable range". It was ~91 — already past it.
  *
- * So the column could not simply be widened again: at 17px, a 600px column is
- * 105 characters and a 640px one is 112. The type had to grow with it.
- * `text-prose` is 20px for that reason, which puts 600px at ~89 characters —
- * long, and deliberately at the far end rather than the middle. A count that
- * reads as "comfortable" in a face this condensed renders as a ribbon of text
- * in a wide box, which is the complaint this replaced.
- *
- * Anyone retuning this: the relationship is `chars ≈ 2.98 × width ÷ size`. Move
- * one and the other has to follow, or the measure silently goes long.
+ * The column then sat at 600px / ~89 characters for a while, with `text-prose`
+ * raised to 20px to hold that count. Filling the frame takes it to ~111, which
+ * is past where that tuning left it: **the lever, if the line reads long, is
+ * `text-prose`, not this width.** The relationship is
+ * `chars ≈ 2.98 × width ÷ size`, so ~25px would put 744px back at ~89.
  *
  * `flow-root` contains the floats a reviewer may have placed; without it a
  * picture floated beside the last paragraph hangs below the prose and over the
  * disclaimer.
  */
-export const PROSE_MEASURE = "flow-root max-w-[600px]";
+export const PROSE_MEASURE = "flow-root max-w-[800px]";
 export const PROSE_PARAGRAPH =
   "mb-[22px] text-pretty font-body text-prose text-ink-2 last:mb-0";
 

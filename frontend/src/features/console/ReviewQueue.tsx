@@ -33,6 +33,7 @@ import { VerdictMark } from "@/features/evidence/VerdictMark";
 import { GRADE_LABELS, VERDICT_LABELS } from "@/features/evidence/labels";
 import { subjectBorderLeft } from "@/features/evidence/subject";
 import type { ArticleStatus, PipelineRun, QueueItem } from "@/types/api";
+import { TrendCandidates } from "./TrendCandidates";
 import { PRIMARY } from "./controls";
 import {
   CONSOLE_PAGE,
@@ -126,6 +127,9 @@ export function ReviewQueue() {
             sign-out buttons on one screen. */}
       </div>
 
+      {/* Above the free-text box on purpose: both start a run, and the ranked
+          list is the evidence-backed version of typing a topic from memory. */}
+      <TrendCandidates />
       <NewRunForm />
 
       <nav className={TAB_BAR}>

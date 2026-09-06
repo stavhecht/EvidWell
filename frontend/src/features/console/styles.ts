@@ -549,3 +549,91 @@ export const PREVIEW_MINE_TAG =
 export const PREVIEW_NOTE =
   "mt-4 border-t border-rule-soft pt-3 font-body text-micro leading-[1.55] text-ink-3";
 export const PREVIEW_MESSAGE = "mt-4 font-body text-micro text-ink-3";
+
+
+/* --- trend candidates ---------------------------------------------------- */
+/*
+ * The desk half of the fortnightly scan. Shares the New-run panel's frame on
+ * purpose: both are "start a run", and the ranked list is the evidence-backed
+ * version of the free-text box beneath it.
+ */
+
+export const CANDIDATES_PANEL = "mt-5 border border-rule-soft bg-surface";
+
+/**
+ * The header holds two controls, so it is a row rather than one big button.
+ *
+ * It was a single full-width toggle until Run scan joined it, and a button
+ * inside a button is not a thing HTML has — the disclosure had to give up the
+ * whole row to gain a sibling.
+ */
+export const CANDIDATES_HEADER = "flex w-full items-center gap-2 px-4 py-3";
+
+/**
+ * The disclosure: an arrow and the title, and no surface of its own.
+ *
+ * No fill and no hover wash on purpose — this panel already sits on `surface`
+ * inside `ground`, and a third tone on the header would read as a nested card.
+ * The arrow rotating is the whole affordance, which is enough because the state
+ * it reports is visible directly beneath it.
+ */
+export const CANDIDATES_TOGGLE =
+  "-m-1 flex min-w-0 items-center gap-2 rounded-field p-1 text-left";
+
+export const CANDIDATES_TITLE =
+  "font-body text-label-sm font-semibold uppercase tracking-[0.08em] text-ink-2";
+
+/** Points right when closed, down when open. Transform, so it turns. */
+export function candidatesChevron(open: boolean): string {
+  return `size-4 shrink-0 text-ink-3 transition-transform ${open ? "rotate-90" : ""}`;
+}
+
+/**
+ * The count, as a mark rather than a sentence.
+ *
+ * Accent fill — the console's one fill, otherwise reserved for the button that
+ * publishes — because this is the only other thing on the desk asking to be
+ * noticed from across the room. It is rendered *only* when there is something
+ * to count: a circled 0 is a badge saying nothing is here, which is worse than
+ * no badge at all.
+ */
+export const CANDIDATES_BADGE =
+  "inline-flex size-[22px] shrink-0 items-center justify-center rounded-full bg-accent px-1 font-body text-[11px] font-bold leading-none text-white";
+
+export const CANDIDATES_COUNT = "font-body text-micro text-ink-3";
+
+/**
+ * Run the scan now. Deliberately the quietest control in the panel: it costs
+ * nothing generative, but it is minutes of somebody else's API budget, and it
+ * must not compete with Generate draft for a reviewer's attention.
+ */
+export const CANDIDATES_SCAN =
+  "ml-auto inline-flex shrink-0 items-center gap-1.5 rounded-full border border-rule px-3 py-1.5 font-body text-[11px] font-bold uppercase leading-none tracking-[0.08em] text-ink-3 transition-colors hover:border-ink hover:text-ink disabled:cursor-not-allowed disabled:opacity-45";
+
+/** What the scan is doing or found. Sits under the header, above the list. */
+export const CANDIDATES_SCAN_NOTE =
+  "border-t border-rule-soft px-4 py-2 font-body text-micro text-ink-3";
+
+export const CANDIDATES_LIST = "border-t border-rule-soft";
+
+export const CANDIDATE_ROW =
+  "flex flex-wrap items-start justify-between gap-3 border-b border-rule-soft px-4 py-3 last:border-b-0";
+
+export const CANDIDATE_MAIN = "min-w-0 flex-1 basis-64";
+
+export const CANDIDATE_TOPIC = "font-body text-[14px] leading-tight text-ink";
+
+/** The arithmetic, in words. See the component for why it is not a bare score. */
+export const CANDIDATE_EVIDENCE = "mt-1 font-body text-micro text-ink-3";
+
+export const CANDIDATE_MIX = "mt-0.5 font-body text-micro text-ink-4";
+
+export const CANDIDATE_ACTIONS = "flex shrink-0 items-center gap-2";
+
+export const CANDIDATE_DISMISS_ROW = "mt-2 flex w-full flex-wrap gap-2";
+
+export const CANDIDATE_DISMISS_FIELD = `${FIELD} flex-1 basis-56`;
+
+export const CANDIDATES_EMPTY = "px-4 py-3 font-body text-micro text-ink-3";
+
+export const CANDIDATES_ERROR = "px-4 py-3 font-body text-micro text-accent-ink";

@@ -6,8 +6,12 @@
  * text is a cost with no benefit. The console loads the real editor; the feed
  * does not.
  *
- * Citation nodes become bracketed chips — `[S1]` — that open the paper's card
- * in place. The design comp weighed three treatments and this is the one that
+ * Citation nodes become bracketed chips — `[1]` — that open the paper's card
+ * in place. The number is the reader's, not the pipeline's: the stored handle
+ * is `S4`, a position in the ranked retrieval set, and `citations.ts` maps it
+ * onto the source list's own ordering so the brackets count 1, 2, 3 with no
+ * gaps. The handle stays the identity behind it — anchor, popover key, and the
+ * row the source list highlights. The design comp weighed three treatments and this is the one that
  * shipped: a superscript is a 4px tap target that vanishes at body size, and a
  * dotted underline on the sentence makes the *claim* look uncertain rather than
  * making its source available. The chip is the primary affordance for the thing
@@ -28,6 +32,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 
 import { STUDY_TYPE_LABELS } from "@/features/evidence/labels";
+import { citationLabel } from "./citations";
 import {
   clampMediaWidth,
   isStoredMedia,
@@ -70,6 +75,11 @@ interface Props {
   doc: TipTapDoc;
   sources: Source[];
   /**
+   * Handle → the number the reader sees. Passed in rather than derived here so
+   * the chips and the source list cannot disagree — see `citations.ts`.
+   */
+  numbers: Map<string, number>;
+  /**
    * Raised whenever a chip is pressed, so the source list can highlight the
    * matching row. The chip's `href` still anchors there — the highlight is what
    * makes the jump legible once you arrive.
@@ -77,7 +87,7 @@ interface Props {
   onCite?: (handle: string) => void;
 }
 
-export function ArticleContent({ doc, sources, onCite }: Props) {
+export function ArticleContent({ doc, sources, numbers, onCite }: Props) {
   // One popover at a time, keyed by paragraph + handle so the same source cited
   // twice does not open both cards.
   const [openKey, setOpenKey] = useState<string | null>(null);
@@ -107,6 +117,7 @@ export function ArticleContent({ doc, sources, onCite }: Props) {
                   key={childIndex}
                   handles={sourceIds(node.attrs)}
                   sources={sources}
+                  numbers={numbers}
                   keyPrefix={`${index}-${childIndex}`}
                   openKey={openKey}
                   onOpenChange={setOpenKey}
@@ -223,6 +234,7 @@ function ArticleVideo({ node }: { node: TipTapNode }) {
 function CitationChips({
   handles,
   sources,
+  numbers,
   keyPrefix,
   openKey,
   onOpenChange,
@@ -230,6 +242,7 @@ function CitationChips({
 }: {
   handles: string[];
   sources: Source[];
+  numbers: Map<string, number>;
   keyPrefix: string;
   openKey: string | null;
   onOpenChange: (key: string | null) => void;
@@ -243,6 +256,7 @@ function CitationChips({
         <CitationChip
           key={handle}
           handle={handle}
+          label={citationLabel(numbers, handle)}
           source={sources.find((s) => s.citationHandle === handle)}
           open={openKey === `${keyPrefix}-${handle}`}
           onOpenChange={(next) => onOpenChange(next ? `${keyPrefix}-${handle}` : null)}
@@ -255,12 +269,16 @@ function CitationChips({
 
 function CitationChip({
   handle,
+  label,
   source,
   open,
   onOpenChange,
   onCite,
 }: {
+  /** The stored handle. Still the identity: anchor, key, highlighted row. */
   handle: string;
+  /** What the reader reads inside the brackets. */
+  label: string;
   source: Source | undefined;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -300,14 +318,15 @@ function CitationChip({
         }}
         aria-expanded={open}
         className={CITATION_CHIP}
+        aria-label={`Source ${label}`}
       >
-        {handle}
+        {label}
       </a>
 
       {open ? (
         <span className={SOURCE_POPOVER}>
           <span className={POPOVER_KICKER}>
-            {handle}
+            {`Source ${label}`}
             {source ? ` · ${STUDY_TYPE_LABELS[source.studyType]}` : ""}
           </span>
 
