@@ -71,6 +71,21 @@ class ScanAlreadyRunning(RuntimeError):
 
 
 @dataclass(frozen=True)
+class SuppressedTopic:
+    """One trend the scan found again and declined to re-propose.
+
+    ``reason`` is the sentence ``discovery/service.py::suppression_reason``
+    wrote — "promoted 2026-09-07" or "dismissed ..., cooloff to 2026-10-05" —
+    and is passed through verbatim rather than re-worded here. It is the same
+    string the CLI prints, which is the point: there is now one explanation of a
+    suppression and both callers show it.
+    """
+
+    topic: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class ManualScanState:
     """What the desk is told about the last press.
 
@@ -90,6 +105,16 @@ class ManualScanState:
     #: verbatim: they are the difference between "nothing is trending" and
     #: "this could not have proposed anything".
     notes: list[str] = field(default_factory=list)
+    #: The topics this scan declined to re-propose, each with why — already
+    #: written, or dismissed and not yet back off cooloff.
+    #:
+    #: Carried rather than summarised into a count, because the count alone sent
+    #: the reviewer to a terminal: the note used to end "Run the CLI for the
+    #: per-topic list", which is a dead end on a deployed stack — `scripts/` is
+    #: deliberately outside the image (see .dockerignore). The list was computed
+    #: on the way past and thrown away here, so the desk could name every reason
+    #: it had to stay silent except the one it actually had.
+    suppressed: list[SuppressedTopic] = field(default_factory=list)
     error: str | None = None
 
 
@@ -148,6 +173,10 @@ class ManualScanRunner:
             observations_written=report.observations_written,
             candidates_proposed=report.candidates_proposed,
             notes=list(report.notes),
+            suppressed=[
+                SuppressedTopic(topic=topic, reason=reason)
+                for topic, reason in report.suppressed
+            ],
         )
 
 

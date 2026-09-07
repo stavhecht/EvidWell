@@ -614,6 +614,23 @@ export const CANDIDATES_SCAN =
 export const CANDIDATES_SCAN_NOTE =
   "border-t border-rule-soft px-4 py-2 font-body text-micro text-ink-3";
 
+/**
+ * The trends the scan held back, under the note that counts them.
+ *
+ * Quieter than a candidate row and never interactive: there is nothing to do
+ * about these, and the whole point is that they explain a *short* list rather
+ * than competing with it. `ink-4` and the micro size put them a step below the
+ * scan note itself, which is already the panel's quietest text.
+ */
+export const CANDIDATES_SUPPRESSED =
+  "border-t border-rule-soft px-4 pb-2 pt-1 font-body text-micro text-ink-4";
+
+export const CANDIDATES_SUPPRESSED_ROW = "flex flex-wrap items-baseline gap-x-2 py-0.5";
+
+export const CANDIDATES_SUPPRESSED_TOPIC = "text-ink-3";
+
+export const CANDIDATES_SUPPRESSED_WHY = "text-ink-4";
+
 export const CANDIDATES_LIST = "border-t border-rule-soft";
 
 export const CANDIDATE_ROW =

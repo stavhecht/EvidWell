@@ -26,6 +26,11 @@ from app.imagery.factory import build_image_client
 from app.llm.base import TokenUsage
 from app.llm.embeddings.factory import build_embedding_provider
 from app.llm.factory import build_generative_clients
+from app.pipeline.graph import (
+    MAX_REFINE_ROUNDS,
+    build_pipeline_graph,
+    recursion_limit,
+)
 from app.pipeline.stages import (
     PipelineContext,
     Stage,
@@ -58,6 +63,22 @@ def retry_delay(attempt: int) -> timedelta:
     return RETRY_DELAYS[min(attempt, len(RETRY_DELAYS)) - 1]
 
 
+class _RunAborted(Exception):
+    """Carries the failed run's context out through the graph.
+
+    The failure has already been recorded and rolled back by the time this is
+    raised; it exists only to stop the graph and return the context, which
+    ``run`` hands back to the worker exactly as the old loop's early ``return``
+    did. It carries the context rather than letting the caller re-read it
+    because the stage mutated ``usage_by_stage`` on its way out, and that object
+    is the only record of what a failed model call cost.
+    """
+
+    def __init__(self, ctx: PipelineContext) -> None:
+        super().__init__("pipeline run aborted")
+        self.ctx = ctx
+
+
 class PipelineOrchestrator:
     """Drives the stages and writes the run record.
 
@@ -85,6 +106,11 @@ class PipelineOrchestrator:
         self._stages = stages
         self._bookkeeping = bookkeeping_factory
         self._max_attempts = max_attempts
+        # Compiled once per orchestrator, not per run: the shape depends only on
+        # the stage list, and building it per attempt would rebuild an identical
+        # graph on every retry.
+        self._graph = build_pipeline_graph(stages, self._run_stage)
+        self._recursion_limit = recursion_limit(stages, MAX_REFINE_ROUNDS)
 
     async def run(
         self,
@@ -127,46 +153,93 @@ class PipelineOrchestrator:
         """
         ctx = PipelineContext(run_id=run_id, topic=topic, blurb=blurb)
         await self._set_run_status(run_id, RunStatus.RUNNING, started=True)
-        final_ordinal = len(self._stages) - 1
 
-        for ordinal, stage in enumerate(self._stages):
-            stage_run_id = await self._record_stage_start(
-                run_id, stage.name, ordinal, attempt
+        # The per-stage bookkeeping lives in ``_run_stage``, which the graph
+        # calls for every node. Failure unwinds through ``_RunAborted`` rather
+        # than through a return value, because a raising node produces no state
+        # for LangGraph to hand back and the context it mutated on the way out
+        # is the one carrying the failed call's tokens.
+        try:
+            final = await self._graph.ainvoke(
+                {"ctx": ctx, "attempt": attempt},
+                config={"recursion_limit": self._recursion_limit},
             )
-            try:
-                ctx = await stage.run(ctx)
-            except StageError as exc:
-                await self._abandon(
-                    stage_run_id, stage.name, exc, ctx, retryable=exc.retryable
-                )
-                await self._roll_up_usage(run_id, ctx)
-                await self._handle_failure(
-                    run_id, stage.name, str(exc), attempt, retryable=exc.retryable
-                )
-                return ctx
-            except Exception as exc:
-                await self._abandon(stage_run_id, stage.name, exc, ctx)
-                await self._roll_up_usage(run_id, ctx)
-                await self._handle_failure(
-                    run_id,
-                    stage.name,
-                    f"{type(exc).__name__}: {exc}",
-                    attempt,
-                    retryable=False,
-                )
-                return ctx
+        except _RunAborted as aborted:
+            return aborted.ctx
 
-            # Durable before it is reported succeeded, not after.
-            if ordinal < final_ordinal:
-                await self._session.commit()
-            await self._record_stage_end(
-                stage_run_id,
-                metrics=ctx.metrics.get(str(stage.name)),
-                usage=ctx.usage_by_stage.get(str(stage.name)),
-            )
-
+        ctx = final["ctx"]
         await self._finish_run(run_id, ctx)
         return ctx
+
+    async def _run_stage(
+        self, ordinal: int, stage: Stage, ctx: PipelineContext, attempt: int
+    ) -> PipelineContext:
+        """One stage, with the row, the commit and the failure handling around it.
+
+        This is verbatim the body of the loop this class used to be, and keeping
+        it verbatim is the point: the commit boundary, the rollback-before-record
+        order in ``_abandon``, and the last stage's commit being deferred into
+        ``_finish_run`` are all guarantees with tests attached, and none of them
+        is expressible as a LangGraph feature. The graph decides what runs next
+        and nothing else.
+
+        **``ordinal`` is the execution slot, not the list position, and the two
+        stopped being the same thing when the refinement loop arrived.**
+        ``pipeline_stage_runs`` carries a UNIQUE constraint on
+        ``(run_id, attempt, ordinal)``, so a second pass through RETRIEVE on one
+        attempt cannot reuse RETRIEVE's list index: it is an
+        ``IntegrityError`` that escapes the orchestrator entirely and crashes the
+        worker's poll loop, outside any stage's failure handling.
+
+        Offsetting by the round keeps every row unique without a migration, and
+        keeps the numbers monotonic in execution order — round 0 runs 0..6, and a
+        run that refines continues 8, 9, then 10..13 — which is what the console
+        sorts on. On ``refine_round`` 0 this is exactly the list position, so an
+        ordinary run records precisely the ordinals it always did.
+
+        The *commit* boundary still keys on the list position, because "is this
+        the last stage" is a question about the pipeline's shape and not about
+        how many times it has looped.
+        """
+        run_id = ctx.run_id
+        stage_run_id = await self._record_stage_start(
+            run_id, stage.name, ordinal + ctx.refine_round * len(self._stages), attempt
+        )
+        try:
+            new_ctx = await stage.run(ctx)
+        except StageError as exc:
+            await self._abandon(
+                stage_run_id, stage.name, exc, ctx, retryable=exc.retryable
+            )
+            await self._roll_up_usage(run_id, ctx)
+            await self._handle_failure(
+                run_id, stage.name, str(exc), attempt, retryable=exc.retryable
+            )
+            raise _RunAborted(ctx) from exc
+        except Exception as exc:
+            await self._abandon(stage_run_id, stage.name, exc, ctx)
+            await self._roll_up_usage(run_id, ctx)
+            await self._handle_failure(
+                run_id,
+                stage.name,
+                f"{type(exc).__name__}: {exc}",
+                attempt,
+                retryable=False,
+            )
+            raise _RunAborted(ctx) from exc
+
+        # Durable before it is reported succeeded, not after. The last stage is
+        # the exception: its write commits with the run's completion row in
+        # ``_finish_run``. Identified by position in the list, exactly as the
+        # loop did.
+        if ordinal < len(self._stages) - 1:
+            await self._session.commit()
+        await self._record_stage_end(
+            stage_run_id,
+            metrics=new_ctx.metrics.get(str(stage.name)),
+            usage=new_ctx.usage_by_stage.get(str(stage.name)),
+        )
+        return new_ctx
 
     async def _abandon(
         self,

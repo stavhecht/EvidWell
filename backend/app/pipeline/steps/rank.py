@@ -11,10 +11,43 @@ import logging
 from collections import Counter
 
 from app.domain.contracts import RankedSource
+from app.domain.enums import Verdict
+from app.evidence.grading import QUORUM_FOR_SUPPORTED, VERDICT_CEILING
 from app.pipeline.stages import PipelineContext, StageError, StageName
 from app.retrieval.rerank import RerankConfig, SemanticReranker, assign_handles
 
 logger = logging.getLogger(__name__)
+
+
+def thin_claims(ranked: dict[str, list[RankedSource]]) -> list[str]:
+    """Claims that cannot reach ``supported`` however well the article is written.
+
+    The test is invariant #3's own quorum, read one stage early: a claim needs
+    ``QUORUM_FOR_SUPPORTED`` sources at a supported-tier grade before
+    ``supported`` is reachable at all, and the article inherits its weakest
+    claim's ceiling. A claim short of that has had its verdict decided by what
+    retrieval found, before the model has written a word.
+
+    **This is deliberately not "few sources".** The measured failure that
+    prompted the refinement loop had twelve ranked sources on the claim and nought
+    citations, and no amount of re-searching fixes a model that ignores what it
+    is handed — that is what rendering each source's claims into the prompt is
+    for. What re-searching does fix is the other half: a claim whose ceiling was
+    set by a shortage of good studies rather than by a shortage of good results.
+    Counting raw candidates instead would fire on claims that are already
+    perfectly well served and spend provider budget re-asking an answered
+    question.
+    """
+    return sorted(
+        claim
+        for claim, entries in ranked.items()
+        if sum(
+            1
+            for entry in entries
+            if VERDICT_CEILING[entry.paper.study_type] is Verdict.SUPPORTED
+        )
+        < QUORUM_FOR_SUPPORTED
+    )
 
 
 class RankStage:
@@ -52,6 +85,15 @@ class RankStage:
         # two independent findings.
         ranked_by_claim = assign_handles(ranked_by_claim)
 
+        thin = thin_claims(ranked_by_claim)
+        if thin:
+            logger.info(
+                "%d of %d claims are below the supported-tier quorum: %s",
+                len(thin),
+                len(ranked_by_claim),
+                ", ".join(repr(claim) for claim in thin),
+            )
+
         study_types = Counter(
             str(entry.paper.study_type)
             for entries in ranked_by_claim.values()
@@ -75,7 +117,11 @@ class RankStage:
                         for entry in entries
                     }
                 ),
+                "refine_round": ctx.refine_round,
+                "thin_claims": thin,
             },
         )
 
-        return ctx.model_copy(update={"ranked": ranked_by_claim})
+        return ctx.model_copy(
+            update={"ranked": ranked_by_claim, "thin_claims": thin}
+        )

@@ -132,6 +132,10 @@ class ValidationReportOut(CamelModel):
     citations_total: int
     citations_resolved: int
     best_evidence_grade: StudyType
+    #: The strongest verdict the cited evidence would have allowed. ``None`` on
+    #: articles drafted before it was recorded, which the desk must render as
+    #: "not recorded" rather than as any particular verdict.
+    verdict_ceiling: Verdict | None = None
     failures: list[ValidationFailureOut] = Field(default_factory=list)
 
 
@@ -437,6 +441,16 @@ class DismissCandidateRequest(CamelModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class SuppressedTopicOut(CamelModel):
+    """A trend the scan found again and declined to re-propose."""
+
+    topic: str
+    #: Verbatim from ``discovery/service.py::suppression_reason`` — "promoted
+    #: 2026-09-07", or a dismissal with the date it comes back. Not re-worded
+    #: here: one explanation, shown identically by the desk and the CLI.
+    reason: str
+
+
 class TrendScanOut(CamelModel):
     """The state of a manually triggered scan.
 
@@ -457,6 +471,11 @@ class TrendScanOut(CamelModel):
     #: verbatim, because "nothing is trending" and "this could not have proposed
     #: anything" are different answers and the counts cannot tell them apart.
     notes: list[str]
+    #: Topics found again and not re-proposed, each with why. The desk renders
+    #: these, because "0 proposals" and "0 proposals, and here are the four
+    #: trends I am deliberately holding back" are different screens, and only the
+    #: second one is trustworthy when it is empty.
+    suppressed: list[SuppressedTopicOut]
     error: str | None
     #: When a scan — cron or console — last succeeded. From the ledger.
     last_scan_at: datetime | None

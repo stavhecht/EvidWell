@@ -249,6 +249,16 @@ export interface ValidationReport {
   citationsTotal: number;
   citationsResolved: number;
   bestEvidenceGrade: StudyType;
+  /**
+   * The strongest verdict the cited evidence would have allowed.
+   *
+   * The cap is one-sided: it fails a verdict that is too strong and says
+   * nothing about one that is too weak, so an under-confident draft is
+   * indistinguishable from a correct cautious call unless the ceiling is shown
+   * next to it. `null` on drafts written before this was recorded, which must
+   * render as "not recorded" rather than as any particular verdict.
+   */
+  verdictCeiling: Verdict | null;
   failures: ValidationFailure[];
 }
 
@@ -498,6 +508,20 @@ export interface TrendScan {
   candidatesProposed: number;
   /** The scan's own remarks — a shallow baseline, a truncated seed. */
   notes: string[];
+  /**
+   * Trends found again and deliberately not re-proposed, each with why.
+   *
+   * Rendered rather than counted: "0 proposals" and "0 proposals, and here are
+   * the three I am holding back" are different screens, and only the second is
+   * trustworthy when it is empty.
+   */
+  suppressed: SuppressedTopic[];
   error: string | null;
   lastScanAt: string | null;
+}
+
+export interface SuppressedTopic {
+  topic: string;
+  /** Verbatim from the server: "promoted 2026-09-07", or a dismissal + cooloff. */
+  reason: string;
 }

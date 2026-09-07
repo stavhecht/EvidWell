@@ -64,6 +64,15 @@ class RetrieveStage:
         if ctx.extraction is None:
             raise StageError(self.name, "extraction stage did not run")
 
+        # A refinement pass re-searches only the claims RANK found thin, with
+        # the outcome clause dropped. Everything else about the stage — the
+        # per-claim failure rule, the protocol and retraction screens, the
+        # global dedup, the cache write — is identical, because none of it
+        # depends on how the query was composed.
+        refining = ctx.refine_round > 0
+        claims = list(ctx.thin_claims) if refining else list(ctx.extraction.target_claims)
+        compose = self._strategy.broaden if refining else self._strategy.build
+
         raw_by_claim: dict[str, list[CandidatePaper]] = {}
         provider_hits: dict[str, int] = {}
         unsearched: list[str] = []
@@ -72,9 +81,9 @@ class RetrieveStage:
         protocols_dropped = 0
         retractions_dropped = 0
 
-        for claim in ctx.extraction.target_claims:
+        for claim in claims:
             try:
-                queries = self._strategy.build(
+                queries = compose(
                     claim, ctx.extraction.product, ctx.extraction.ingredients
                 )
             except UnanchoredQuery as exc:
@@ -208,6 +217,14 @@ class RetrieveStage:
                 self.name, f"source cache returned no row for candidate {exc}"
             ) from exc
 
+        # A refinement pass carries forward every claim the first pass already
+        # answered. Returning only the re-searched ones would drop the rest of
+        # the article's evidence on the floor, which reads downstream as a
+        # thinner corpus and therefore as a more cautious verdict — the failure
+        # mode this whole loop exists to remove.
+        if refining:
+            paired = {**ctx.candidates, **paired}
+
         raw_total = sum(len(papers) for papers in raw_by_claim.values())
         ctx.record_metrics(
             self.name,
@@ -235,6 +252,8 @@ class RetrieveStage:
                 # look at the provider.
                 "rate_limited": rate_limited,
                 "cache_hits": sum(1 for entry in cached if entry.had_embedding),
+                "refine_round": ctx.refine_round,
+                "claims_searched": len(claims),
             },
         )
 

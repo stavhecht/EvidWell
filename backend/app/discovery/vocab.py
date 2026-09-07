@@ -168,6 +168,12 @@ STOPLIST_UIS: dict[str, str] = {
     "D000900": "Anti-Bacterial Agents",
     "D000893": "Anti-Inflammatory Agents",
     "D019440": "Anti-Obesity Agents",
+    # Surfaced 2026-09-07 by lowering `discovery_min_papers` to 3: it ranked
+    # sixth as "antiviral agents for antioxidants", which is two category
+    # abstractions pointed at each other and names nothing anyone takes. Same
+    # omission as any other sibling of the entries around it — admitting more
+    # substances is what makes the gaps in this hand-maintained list visible.
+    "D000998": "Antiviral Agents",
     "D000970": "Antineoplastic Agents",
     "D000975": "Antioxidants",
     "D018696": "Neuroprotective Agents",

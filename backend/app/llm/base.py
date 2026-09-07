@@ -77,8 +77,21 @@ class SynthesisClient(Protocol):
     handle set and the database — neither of which the model can influence.
     """
 
-    async def synthesize(self, payload: SynthesisInput) -> LLMResult[SynthesisOutput]:
-        """Write a grounded article from the retrieved abstracts."""
+    async def synthesize(
+        self, payload: SynthesisInput, *, feedback: str | None = None
+    ) -> LLMResult[SynthesisOutput]:
+        """Write a grounded article from the retrieved abstracts.
+
+        ``feedback`` re-runs the same payload with an editorial note appended as
+        a further user turn — used by ``SynthesizeStage`` to ask once for a
+        fuller article when a draft came back short despite plentiful sources.
+        It carries no new *sources* and no new rules, so the grounding contract
+        is unchanged: the handle set the draft may cite is still exactly the one
+        in ``payload``.
+
+        Keyword-only and defaulted so that a caller which does not re-prompt is
+        written the same way it always was.
+        """
         ...
 
 

@@ -103,6 +103,18 @@ class PipelineContext(BaseModel):
     # RANK — top-k per claim, with handles assigned
     ranked: dict[str, list[RankedSource]] = Field(default_factory=dict)
 
+    # RETRIEVE <-> RANK refinement loop
+    #: Which pass through RETRIEVE this is. 0 is the ordinary first pass and is
+    #: what every stage sees unless the router below sent the run back.
+    refine_round: int = 0
+    #: Claims RANK found too little usable evidence for, which RETRIEVE
+    #: re-searches with the outcome clause dropped. Empty on the first pass.
+    #:
+    #: Carried on the context rather than recomputed inside RETRIEVE because the
+    #: judgement is RANK's: thinness is a property of what survived scoring and
+    #: the grade floor, which RETRIEVE cannot see from its own candidate list.
+    thin_claims: list[str] = Field(default_factory=list)
+
     # SYNTHESIZE
     #: The exact payload rendered into the synthesis prompt. Carried forward
     #: rather than rebuilt, because VALIDATE must check against the handle set

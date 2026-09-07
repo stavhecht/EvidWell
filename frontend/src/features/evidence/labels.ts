@@ -34,6 +34,23 @@ export const VERDICT_GLOSS: Record<Verdict, string> = {
 };
 
 /**
+ * The four verdicts, weakest first. Order is load-bearing in the same way
+ * `GRADE_ORDER` is: `VERDICT_ORDER.indexOf` is how the review desk compares a
+ * draft's verdict against the ceiling its sources allowed, and it mirrors
+ * `VERDICT_STRENGTH` in `evidence/grading.py`.
+ *
+ * Note this is *not* the declaration order of the `Verdict` type, which runs
+ * strongest-first for display. Reading strength off that would invert every
+ * comparison, which is why the ranking is written out here rather than derived.
+ */
+export const VERDICT_ORDER: readonly Verdict[] = [
+  "no_evidence",
+  "weak",
+  "mixed",
+  "supported",
+];
+
+/**
  * The nine rungs, weakest first. Order is load-bearing: `GRADE_ORDER.indexOf`
  * is what fills the grade bar, and it mirrors the server-side ranking in
  * `evidence/grading.py` that caps verdict confidence (invariant #3).

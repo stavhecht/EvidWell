@@ -64,6 +64,10 @@ import {
   CANDIDATES_PANEL,
   CANDIDATES_SCAN,
   CANDIDATES_SCAN_NOTE,
+  CANDIDATES_SUPPRESSED,
+  CANDIDATES_SUPPRESSED_ROW,
+  CANDIDATES_SUPPRESSED_TOPIC,
+  CANDIDATES_SUPPRESSED_WHY,
   CANDIDATES_TITLE,
   CANDIDATES_TOGGLE,
   candidatesChevron,
@@ -352,15 +356,38 @@ export function TrendCandidates() {
         </p>
       ) : null}
 
+      {/* The topics behind the suppression count. This used to end "Run the CLI
+          for the per-topic list", which is a dead end on a deployed stack:
+          `scripts/` is deliberately outside the image. The list was computed and
+          discarded server-side, so the one screen that needed it was the one
+          screen that could not have it. */}
+      {scan?.suppressed.length ? (
+        <ul className={CANDIDATES_SUPPRESSED}>
+          {scan.suppressed.map((item) => (
+            <li key={item.topic} className={CANDIDATES_SUPPRESSED_ROW}>
+              <span className={CANDIDATES_SUPPRESSED_TOPIC}>{item.topic}</span>
+              <span className={CANDIDATES_SUPPRESSED_WHY}>{item.reason}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
       {open ? (
         <div className={CANDIDATES_LIST}>
           {status === "error" ? (
             <p className={CANDIDATES_ERROR}>Could not load proposals.</p>
           ) : count === 0 ? (
             // Says which of the two silences this is. "Nothing here" would read
-            // as a broken panel on a deployment where the scan is not scheduled.
+            // as a broken panel, and an empty desk is the *ordinary* outcome —
+            // a floor, a quorum and a suppression rule exist to make it so.
+            //
+            // It no longer claims a cadence. It said "weekly" while nothing was
+            // scheduled at all, and now that something is, the interval is a
+            // setting this component cannot see; `lastScanAt` is a fact it has.
             <p className={CANDIDATES_EMPTY}>
-              Nothing proposed. The scan runs weekly
+              {scan?.lastScanAt
+                ? `Nothing proposed. The scan runs on its own; the last one finished ${new Date(scan.lastScanAt).toLocaleString()}.`
+                : "Nothing proposed. The scan runs on its own."}
             </p>
           ) : (
             data?.map((candidate) => (

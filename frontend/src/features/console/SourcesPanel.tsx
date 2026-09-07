@@ -27,8 +27,13 @@
 import { useEffect, useRef } from "react";
 
 import { GradeBar } from "@/features/evidence/GradeBar";
-import { GRADE_NOTES, STUDY_TYPE_LABELS } from "@/features/evidence/labels";
-import type { ReviewSource, StudyType, ValidationReport } from "@/types/api";
+import {
+  GRADE_NOTES,
+  STUDY_TYPE_LABELS,
+  VERDICT_LABELS,
+  VERDICT_ORDER,
+} from "@/features/evidence/labels";
+import type { ReviewSource, StudyType, ValidationReport, Verdict } from "@/types/api";
 import { SECTION_LABEL } from "./controls";
 import {
   CLAIM_GROUP,
@@ -132,12 +137,22 @@ function SourceRow({ source, focused }: { source: ReviewSource; focused: boolean
 export function ValidationSummary({
   report,
   grade,
+  verdict,
   restsOnWeakEvidence,
 }: {
   report: ValidationReport;
   grade: StudyType;
+  verdict: Verdict;
   restsOnWeakEvidence: boolean;
 }) {
+  // The verdict cap only ever fails a draft for being too *confident*. A draft
+  // that is more cautious than its sources require passes silently and looks
+  // exactly like a correct cautious call, which is how three articles in a row
+  // came out "weak" on meta-analyses with a clean report each time. Stating the
+  // ceiling next to the verdict is the only place that gap is visible.
+  const understated =
+    report.verdictCeiling !== null &&
+    VERDICT_ORDER.indexOf(verdict) < VERDICT_ORDER.indexOf(report.verdictCeiling);
   return (
     <div className={PANEL_BLOCK}>
       <span className={SECTION_LABEL}>Validation</span>
@@ -162,6 +177,15 @@ export function ValidationSummary({
       {restsOnWeakEvidence ? (
         <p className={WEAK_EVIDENCE_WARNING}>
           This verdict rests on weak study types. Check the sources before approving.
+        </p>
+      ) : null}
+
+      {understated && report.verdictCeiling ? (
+        <p className={PANEL_GRADE_NOTE}>
+          The cited evidence would have supported &ldquo;
+          {VERDICT_LABELS[report.verdictCeiling]}&rdquo;. This draft is more
+          cautious than its sources require, which may be right; check that it
+          uses what it cites.
         </p>
       ) : null}
     </div>

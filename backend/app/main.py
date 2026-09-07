@@ -27,7 +27,8 @@ from app.api.public import feed as public_feed
 from app.api.public import media as public_media
 from app.api.public import readers as public_readers
 from app.config import get_settings
-from app.db import dispose_engine
+from app.db import dispose_engine, get_session_factory
+from app.discovery.schedule import ScanScheduler
 from app.security.auth import AuthError
 from app.services.reader import ReaderError
 from app.services.review import ReviewError
@@ -55,8 +56,17 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
             "(the public feed and console are unaffected)"
         )
 
-    yield
-    await dispose_engine()
+    # Fills the trend desk on a timer so nobody has to press the button. Started
+    # here rather than in the worker because `manual_scan` — the single-flight
+    # runner it shares with the console's button — lives in this process, and
+    # two runners would be two guards. See `discovery/schedule.py`.
+    scheduler = ScanScheduler(settings, get_session_factory())
+    scheduler.start()
+    try:
+        yield
+    finally:
+        await scheduler.stop()
+        await dispose_engine()
 
 
 def create_app() -> FastAPI:
@@ -66,7 +76,7 @@ def create_app() -> FastAPI:
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
     )
 
-    app = FastAPI(title="EvidWell API", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="You.th API", version="0.1.0", lifespan=lifespan)
 
     app.add_middleware(
         CORSMiddleware,

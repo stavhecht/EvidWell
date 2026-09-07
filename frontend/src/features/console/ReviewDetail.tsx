@@ -38,6 +38,7 @@ import {
 } from "@/lib/api/console";
 import { VerdictMark } from "@/features/evidence/VerdictMark";
 import { VERDICT_LABELS } from "@/features/evidence/labels";
+import { readingTimeLabel } from "@/lib/readingTime";
 import { ArticleEditor } from "./ArticleEditor";
 import { FeedPreview } from "./FeedPreview";
 import { SubjectPicker } from "./SubjectPicker";
@@ -238,6 +239,12 @@ export function ReviewDetail() {
             {article.verdictQualifier ? (
               <span className={DRAFT_META}>{article.verdictQualifier}</span>
             ) : null}
+            {/* The reader is shown this number on the published page; the
+                reviewer deciding whether the draft is finished should see the
+                same one, from the same function. */}
+            <span className={DRAFT_META}>
+              {readingTimeLabel(article.editedContent ?? article.originalContent)}
+            </span>
             <span className={DRAFT_META}>{article.topic}</span>
           </div>
 
@@ -263,6 +270,7 @@ export function ReviewDetail() {
           <ValidationSummary
             report={article.validationReport}
             grade={article.evidenceGrade}
+            verdict={article.verdict}
             restsOnWeakEvidence={restsOnWeakEvidence}
           />
 

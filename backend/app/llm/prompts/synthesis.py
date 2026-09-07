@@ -50,6 +50,10 @@ STUDY_TYPE_LABELS: dict[StudyType, str] = {
         "observational study (researchers recorded what people already did, "
         "rather than assigning a treatment)"
     ),
+    StudyType.NARRATIVE_REVIEW: (
+        "narrative review (a summary of other studies, with no stated method "
+        "for finding them)"
+    ),
     StudyType.CASE_REPORT: "case report (a write-up of one or a few patients)",
     StudyType.ANIMAL: "animal study (done in animals, not in people)",
     StudyType.IN_VITRO: "in-vitro study (done on cells in a dish, not in people)",
@@ -117,7 +121,9 @@ is checked for **every claim separately**. One study is a finding, not a \
 conclusion. However well conducted it is, the honest verdict on a single \
 trial is "mixed". A claim you cite nothing for caps the whole article at \
 "weak", so do not let a well-evidenced claim carry a thin one: assess each \
-claim on its own sources.
+claim on its own sources. Every source lists the claims it was retrieved \
+for, so work through the claims one at a time and check each has sources \
+cited against it.
 
 Also downgrade for: very small samples, industry-funded trials with no \
 independent replication, trials in a population unlike the intended user, \
@@ -237,6 +243,23 @@ def render_source_block(payload: SynthesisInput) -> str:
     not a guarantee — the verdict cap is what actually enforces §3 — but it
     puts reviews and trials in front of cell-culture work when the model is
     deciding what the article is about.
+
+    **Each source names the claims it was retrieved for, and that line is what
+    makes the per-claim rules in §3 followable at all.** The prompt tells the
+    model that a claim it cites nothing for caps the whole article at "weak"
+    and that the two-source quorum is checked per claim separately. Both are
+    judgements about a claim-to-source mapping, and until this line existed the
+    mapping was not in the prompt: ``PromptSource.claims`` was populated,
+    carried the whole way here, and then dropped, leaving the model to infer it
+    from an unlabelled pile of abstracts. Measured on the first three articles,
+    it did not — one claim drew twelve sources and nought citations, which is
+    the single case that caps an article at "weak" no matter how strong every
+    other claim is.
+
+    It says *retrieved for*, not *supports*. Which claim sent us looking is a
+    fact about our query; whether the paper bears it out is the thing the
+    article is being written to find out, and a line asserting it here would be
+    handing the model its conclusion.
     """
     lines: list[str] = []
     for source in payload.sources:
@@ -246,15 +269,36 @@ def render_source_block(payload: SynthesisInput) -> str:
         lines.append(
             f"[{source.handle}] {source.title}\n"
             f"Type: {label} | {journal}, {year}\n"
+            f"Retrieved for: {'; '.join(source.claims)}\n"
             f"Abstract: {source.abstract}"
         )
     return "\n\n---\n\n".join(lines)
 
 
-def build_synthesis_user_prompt(payload: SynthesisInput) -> str:
-    """Render the volatile, per-article half of the synthesis prompt."""
+def build_synthesis_user_prompt(
+    payload: SynthesisInput, *, feedback: str | None = None
+) -> str:
+    """Render the volatile, per-article half of the synthesis prompt.
+
+    ``feedback`` appends an editorial note asking for a fuller article. It is
+    composed here, once, rather than in each client, so the two providers cannot
+    drift into asking for different things.
+
+    It is appended to the user turn rather than sent as a further exchange
+    carrying the short draft back. Two reasons. Ollama's repair loop rebuilds
+    the conversation as ``messages[:2]`` plus its own correction turn, so an
+    extra turn added here would be silently dropped the moment a draft also
+    failed contract validation — the case where both problems are most likely at
+    once. And handing the model its own thin draft invites it to edit that draft
+    up to length, where the thing actually wanted is a fuller article written
+    from the sources it skipped.
+
+    It adds no sources and no rules: the handle set stays exactly the one in
+    ``payload``, so the grounding contract is untouched.
+    """
     claims = "\n".join(f"- {claim}" for claim in payload.target_claims)
     handles = ", ".join(sorted(payload.handle_set, key=lambda h: int(h[1:])))
+    note = _length_note(feedback)
 
     return f"""\
 Product or trend: {payload.product}
@@ -270,4 +314,8 @@ Sources ({len(payload.sources)} available — you may cite {handles} and nothing
 
 Write the article. Assess the claims above against these sources only. If the \
 sources do not address a claim, say so rather than reaching for the closest \
-thing they do address."""
+thing they do address.{note}"""
+
+
+def _length_note(feedback: str | None) -> str:
+    return f"\n\n{feedback}" if feedback else ""

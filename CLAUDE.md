@@ -127,10 +127,57 @@ Each stage is `(input, ctx) -> output` and maps 1:1 onto a future Step Functions
 stages free of transport concerns. `ILLUSTRATE` sits where it does for a reason at both ends:
 it needs `ctx.draft`, so it must follow SYNTHESIZE, and **PERSIST must stay last** because its
 write commits atomically with the run-completion row (see below). `pipeline_stage_runs.ordinal`
-comes from list position, so runs recorded before illustrate existed carry `validate` at 4 and
-`persist` at 5 rather than 5 and 6 — correct about the pipeline they ran on, deliberately not
-backfilled. The orchestrator writes `pipeline_runs` / `pipeline_stage_runs` through
+comes from list position *offset by the refinement round*, so runs recorded before illustrate
+existed carry `validate` at 4 and `persist` at 5 rather than 5 and 6 — correct about the pipeline
+they ran on, deliberately not backfilled. The orchestrator writes `pipeline_runs` / `pipeline_stage_runs` through
 a **separate session factory**, so bookkeeping survives a rolled-back article write.
+
+**Ordering is a LangGraph `StateGraph` (`pipeline/graph.py`); everything else stayed in the
+orchestrator.** The graph decides what runs next and nothing more — `_run_stage` still records
+the stage row, commits, and handles failure, verbatim from the `for` loop it replaced, because
+the commit boundary and `_abandon`'s rollback-before-record order are guarantees with tests
+attached and neither is expressible as a LangGraph feature. Three things are load-bearing:
+
+- **`GraphState` has one context key, not a field-per-reducer.** LangGraph replaces `ctx`
+  wholesale. `usage_by_stage` and `metrics` are mutated in place on purpose — a raising stage
+  returns no context, and its burned tokens would vanish from exactly the runs whose cost is
+  least visible — and a per-field reducer would silently drop those writes on the failure path.
+- **Failure unwinds through `_RunAborted`, which carries the context out.** A raising node
+  produces no state for LangGraph to return, and the object the stage mutated on its way out is
+  the only record of what a failed model call cost.
+- **Node names are positional (`stage_0`…).** Tests build orchestrators over a single fake
+  stage; keying nodes on `StageName` would make the graph undefined for any list that is not the
+  full seven. `attempt` rides in the state rather than on the instance, so `run` stays reentrant.
+
+**`pipeline_stage_runs` is UNIQUE on `(run_id, attempt, ordinal)`, so a refinement pass cannot
+reuse RETRIEVE's list index.** `_run_stage` writes `ordinal + refine_round * len(stages)`. Get
+this wrong and the `IntegrityError` escapes the orchestrator entirely — it is raised by
+`_record_stage_start`, *before* the try block that converts stage failures — and crashes the
+worker's poll loop, leaving the run neither failed nor completed. The offset keeps ordinals
+monotonic in execution order (0..6, then 8, 9, then 10..13) and is a no-op on round 0, so an
+ordinary run records exactly what it always did. The **commit** boundary still keys on list
+position: "is this the last stage" is a question about the pipeline's shape, not about how many
+times it has looped. `tests/test_orchestrator_transactions.py::test_a_refinement_pass_does_not_collide_with_its_own_stage_row`
+fails with an `IntegrityError` without the offset.
+
+**The one branch is RANK → RETRIEVE, and it is why this is a graph at all.** `rank.py::thin_claims`
+flags any claim holding fewer than `QUORUM_FOR_SUPPORTED` supported-tier sources — meaning its
+verdict was capped by what retrieval found, before the model wrote a word — and the run goes back
+through RETRIEVE with `strategy.broaden()`, which drops the *outcome* clause and keeps the
+subject. That direction is not negotiable: relaxing the subject instead is precisely the shape
+`UnanchoredQuery` exists to refuse. `MAX_REFINE_ROUNDS` is 1 — each pass spends real budget
+against NCBI's per-IP ceiling, which the worker shares — and a refinement pass merges into
+`ctx.candidates` rather than replacing it, since returning only the re-searched claims would drop
+the rest of the article's evidence and read downstream as a more cautious verdict.
+
+**It is deliberately not "few sources".** The measured failure had *twelve* ranked sources on the
+uncited claim. No amount of re-searching fixes a model that ignores what it is handed; that is
+what rendering each source's claims into the prompt is for. Counting raw candidates would fire on
+claims that are already well served and re-ask an answered question.
+
+**LangGraph's checkpointer is unused, and should stay unused.** Durability is the per-stage commit
+plus the heartbeat sweep. A second durability mechanism beside them is how the
+no-double-execution guarantee gets re-derived by accident.
 
 **The orchestrator owns every transaction boundary — do not commit in a stage or in the
 worker.** It commits after each successful stage and rolls back a failing one, so a synthesis
@@ -234,6 +281,96 @@ for an unedited article, and `WHERE error IS NULL` matches no succeeded stage. P
 hide it — `json.loads('null')` is `None`, so `edited_content or original_content` is correct —
 which means it only breaks in the SQL that DESIGN.md §3.4 and `services/card.py` document as
 the enforcement of invariant #4. Both columns were shipping JSON `null` before this was caught.
+
+**The verdict cap is a ceiling, and nothing raises a verdict toward it.** This asymmetry is
+correct as a safety property and it hides a whole class of failure: an over-confident draft fails
+loudly, an under-confident one is indistinguishable from a correct cautious call. Measured
+2026-09-07 — all three articles in the database were `weak`, every one of them citing only
+meta-analyses and systematic reviews, every validation report clean. Two of the three had
+ceilings permitting `supported`; the model simply declined. `ValidationReport.verdict_ceiling`
+is recorded on every draft, pass or fail, and shown beside the verdict in the desk, because
+without it "always weak" has no signal anywhere in the system. It is `Verdict | None` — reports
+written before it existed must read as "not recorded", never as `no_evidence`, which is a real
+verdict and the falsest thing a default could say.
+
+**The other half of that diagnosis was a prompt that asked for reasoning it withheld the data
+for.** §3 tells the model that a claim it cites nothing for caps the whole article at `weak` and
+that the quorum is checked per claim — both judgements about a claim-to-source mapping that
+`render_source_block` did not render. `PromptSource.claims` was populated, carried the whole way
+to the prompt, and dropped. One claim drew twelve sources and nought citations, which capped its
+article by itself (`validation.py` seeds `types_by_claim` with *every* target claim, so an
+uncited one yields `best_grade([]) -> UNKNOWN -> WEAK`, and `max_verdict_for_claims` takes the
+weakest). Sources now carry a `Retrieved for:` line. It says *retrieved for*, not *supports*:
+which claim sent us looking is a fact about our query, and asserting the paper bears it out would
+hand the model its conclusion.
+
+**`SynthesizeStage` re-prompts once when a draft ignores its sources — and that is a coverage
+rule, not a length one.** The gate is `MIN_CITED_FRACTION` (0.5) of the offered sources, and only
+when `SECTIONS_EXPECTED_FROM` (6) or more were offered. A draft citing one of two sources has
+nothing more to say and is never asked; a draft handed 24 systematic reviews that wrote about
+three of them is.
+
+**It was briefly a word-count floor aimed at a three-minute read, and that was wrong twice over.**
+It fired on essentially every run, because no local model this machine can hold writes 700 words
+(see the sizing table below) — and length was never the defect anyway. The measured failure is
+*evidence ignored*: 2 of 13, 3 of 24, 1 of 13. The one re-prompt that clearly worked took a draft
+from 3 cited sources to 24. Aiming at coverage keeps DESIGN.md §6 intact rather than bending it:
+there is still **no floor on article length**, a thoroughly-cited short article is a correct
+output, and `test_a_well_covered_draft_is_left_alone_however_short` pins that. It also restates a
+rule the prompt already gives ("every source bearing on a claim deserves a sentence") instead of
+adding a competing one. `body_words` is still recorded as a metric — it is how the original
+problem was found — but nothing branches on it.
+
+Three rules keep the nudge from becoming a floor by another name: a thin source set is never
+re-prompted, it asks exactly once, and a re-prompt that *raises* keeps the first draft rather than
+failing the run. The feedback names the unused handles and refuses padding explicitly, because an
+instruction to write more, handed to a model with nothing left to say, produces exactly the
+manufactured nuance §6 refuses.
+
+**The second draft is kept only if it cites more sources, and that rule was written the hard
+way.** Keeping it unconditionally was tried. Live, a draft citing 3 of 13 came back citing 1; and
+separately a 152-word `mixed` draft came back at `no_evidence` *while citing all thirteen
+sources*. Nothing downstream catches the latter — `no_evidence` is exempt from the cited-beat rule
+and sits below every ceiling, so it validates clean and publishes. The test is coverage, not
+length: a second draft that says more about fewer papers is not what was asked for.
+
+**A docstring in `domain/contracts.py` is prompt text.** Pydantic uses a class docstring as the
+JSON-schema `description`, and `ollama_client.py` passes that schema in as the **generation
+grammar** — so every word written there to explain a decision to a maintainer is read by the model
+while it decides what to write. The docstrings argued for brevity, correctly and at length:
+*"every bound here is a ceiling, not a target"*, *"optional and have no minimum — that is the
+whole point"*, *"nothing in this system pads to length"*, and `sections` was described to the
+model as *"Optional titled sections expanding on the evidence"*. Two of the first three articles
+carried no sections at all.
+
+Both audiences are legitimate and they are not the same one. The rationale stays in the
+docstrings; `model_config = ConfigDict(json_schema_extra={"description": ...})` overrides what
+reaches the model. `sections` still has **no `min_length`** and must never grow one — that would
+be the padding instruction §6 refuses — but its description now states the prompt's own
+evidence-to-count rule, whose low end is *none at all*, so thin evidence still yields a short
+article. `test_the_generation_grammar_carries_no_developer_rationale` fails when a file name or a
+brevity argument reaches the grammar again. This is the same lever as the `STUDY_TYPE_LABELS`
+glosses: a local model mimics what it is handed far more reliably than it follows a rule about it.
+
+**All of the above was one root cause: `LLM_PROVIDER` was unset, so synthesis ran on
+`llama3.1:8b`.** It was handed 13 systematic reviews, cited 2, wrote 110 words and said `weak`.
+Synthesis is now `qwen2.5:7b-instruct`; extraction stays on the 8B (326 input / ~48 output
+tokens, never the bottleneck).
+
+**Sizing a local synthesis model on this machine: read `ollama ps`, not the model card.**
+Measured 2026-09-07 against 17 GB of RAM at `SYNTHESIS_NUM_CTX` 32768:
+
+| model | resident | processor | outcome |
+|---|---|---|---|
+| `qwen2.5:14b-instruct` | 15 GB | 27% CPU / 73% GPU | 7% memory free, ~580k pageouts, synthesis hit the 600s `ollama_timeout_seconds` without finishing |
+| `qwen2.5:7b-instruct` | 6.4 GB | 100% GPU | ~20s per synthesis call |
+
+**The PROCESSOR column is the signal.** Anything short of 100% GPU means the weights are
+partially in system RAM, and the run does not fail in a way that names the cause — it times out,
+and `ollama_client` reports it as "is `ollama serve` running?", which is the one thing that was
+never wrong. `llama3.3:70b` (~40 GB) is not reachable here at all. If a bigger model is wanted,
+drop `retrieval_top_k` to 10 and `SYNTHESIS_NUM_CTX` to 24_576 **together** — never one alone —
+or move to the hosted path, which needs the workspace header fix in the config traps below.
 
 **Article body is TipTap JSON, not markdown.** The model emits plain text with `[S1]` markers;
 `services/tiptap.py::body_text_to_doc()` parses them into typed citation nodes at assembly.
@@ -561,6 +698,36 @@ not write to it), and a scan that raises lands on that state as an error string 
 unhandled task exception. A restart therefore reports `idle`; `last_scan_at`, read from the ledger,
 is what still answers "when did one last finish".
 
+**The scan runs on a timer, and the button is now the exception rather than the only way.**
+`discovery/schedule.py` starts a task in the **API process's** lifespan that fires
+`manual_scan.start()` when the ledger's last *succeeded* scan is older than
+`DISCOVERY_SCAN_INTERVAL_HOURS` (24). Automating this side is safe for exactly one reason, and it
+is the paragraph above: **a scan proposes and never enqueues**, so the timer spends PubMed
+requests and no tokens at all — the whole generative bill still sits behind a reviewer pressing
+Generate draft. Automating the *promotion* would be a different decision entirely, and there is
+still no `--auto-enqueue`. Four things about it:
+
+- **It goes through `manual_scan`, not a second path.** One runner means the single-flight guard
+  already covers press-versus-timer, and the desk's status line describes whichever scan is in
+  flight without knowing what started it. A `ScanAlreadyRunning` from a race is caught and the
+  tick does nothing.
+- **Due-ness is read from the ledger, never from a timer since process start.** So a restart does
+  not scan, a deploy loop does not scan per deploy, and a slot missed while the process was down
+  heals on the next tick. Same shape as `discovery_overlap_days`.
+- **The loop cannot die on a bad tick.** The symptom of a dead scheduler is *nothing happening*,
+  which reads exactly like a quiet fortnight — so every tick is wrapped, and a naive `finished_at`
+  from an older row is coerced to UTC rather than raising.
+- **It lives in the API process because `manual_scan` does.** Running more than one API replica
+  would give each its own scheduler and its own single-flight scope: wasteful, not corrupting,
+  because the observation ledger is idempotent — but scaling out wants an advisory lock first.
+
+**A suppression is explained on the desk, not in a terminal.** `ScanReport.suppressed` carries
+every held-back topic with its reason, and `ManualScanState` used to drop it, leaving the note to
+end "Run the CLI for the per-topic list" — a dead end on a deployed stack, since `scripts/` is
+outside the image by design. The one screen that needed the list was the one screen that could not
+have it. It now renders under the scan note: "0 proposals" and "0 proposals, and here are the three
+I am holding back" are different screens, and only the second is trustworthy when it is empty.
+
 Six things about it that are load-bearing:
 
 - **Counts are `COUNT(DISTINCT pmid)` over a ledger, never incremented counters.** MeSH indexing
@@ -580,6 +747,16 @@ Six things about it that are load-bearing:
   Same shape as `scripts/check_retractions.py`. It also uses `sort=date`, not the pipeline's
   `sort=relevance`; putting either on a shared `SearchQuery` would let a future caller silently
   degrade every article's evidence base.
+- **When the desk looks empty, the floor is the suspect, never the cap.** `rank_candidates` is
+  asked for `limit * 3` precisely so suppression can drop already-decided topics and the next-best
+  ones get pulled up — that behaviour has always been there. `discovery_max_candidates` (6) is a
+  reviewer-flooding ceiling and is almost never what binds. Measured 2026-09-07 with the floor at
+  4: the substance counts over a live 14-day window ran 9, 5, 5, 4, then 3, 3, 3, 3, then a long
+  tail at 2 and 1 — so **four substances in the whole corpus** cleared it, three of their angles
+  were already promoted, and a desk of 8 showed 3. At a floor of 3 the pool is ten and the desk
+  fills. The dry run's "N of M above the floor" line is the number to read before touching either.
+  Lowering it also makes the gaps in the hand-maintained `STOPLIST_UIS` visible — the first scan at
+  3 proposed `antiviral agents for antioxidants`, two category abstractions pointed at each other.
 - **No candidates until the baseline is deep enough.** Below `discovery_min_baseline_windows` (4)
   the scan writes observations and proposes *nothing*, with no volume-ranked fallback — a first
   scan can only rank by raw volume, which proposes vitamin D, creatine and omega-3, i.e. the three
@@ -603,8 +780,11 @@ Six things about it that are load-bearing:
   under the old identity promoting either silenced the substance so the other was never offered.
   Three things keep this from becoming "one substance, eight ways":
   `discovery_max_angles_per_substance` (2) caps exposure; an angle must clear
-  `discovery_min_papers_per_angle` (3, deliberately below the substance floor — they ask different
-  questions, and set equal the change is a no-op); and **`is_usable_angle` requires the outcome to
+  `discovery_min_papers_per_angle` (3 — it sat below the substance floor until that floor came down
+  to 3 on 2026-09-07, and equal is safe: it only means a substance at exactly the floor needs *all*
+  its papers on one outcome to earn an angle, and otherwise falls back to a bare topic. Never set it
+  *above* `discovery_min_papers`, which is unreachable by construction); and **`is_usable_angle`
+  requires the outcome to
   map into `OUTCOME_HINTS`**, because everything not identified as a substance falls through to
   "outcome" and that is far too permissive for naming an article. Real proposals it now refuses:
   `vitamin d for cross-sectional studies` (a study design), `vitamin d for vitamin d deficiency`

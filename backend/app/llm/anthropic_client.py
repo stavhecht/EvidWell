@@ -236,7 +236,9 @@ class AnthropicSynthesisClient:
         self._client = client
         self._model = model
 
-    async def synthesize(self, payload: SynthesisInput) -> LLMResult[SynthesisOutput]:
+    async def synthesize(
+        self, payload: SynthesisInput, *, feedback: str | None = None
+    ) -> LLMResult[SynthesisOutput]:
         """Write a grounded article from the retrieved abstracts.
 
         Returns whatever the model produced: schema-valid, but **unverified**.
@@ -249,7 +251,7 @@ class AnthropicSynthesisClient:
             RefusalError: the model declined.
             LLMError: transport, rate limit, or schema failure.
         """
-        user_prompt = build_synthesis_user_prompt(payload)
+        user_prompt = build_synthesis_user_prompt(payload, feedback=feedback)
         logger.info(
             "synthesis prompt -> %s:\n--- system ---\n%s\n--- user ---\n%s",
             self._model, SYNTHESIS_SYSTEM_PROMPT, user_prompt,

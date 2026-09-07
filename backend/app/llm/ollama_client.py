@@ -333,7 +333,9 @@ class OllamaSynthesisClient:
         self._client = client
         self._model = model
 
-    async def synthesize(self, payload: SynthesisInput) -> LLMResult[SynthesisOutput]:
+    async def synthesize(
+        self, payload: SynthesisInput, *, feedback: str | None = None
+    ) -> LLMResult[SynthesisOutput]:
         """Write a grounded article from the retrieved abstracts.
 
         Raises:
@@ -345,7 +347,7 @@ class OllamaSynthesisClient:
             call="synthesis",
             model=self._model,
             system=SYNTHESIS_SYSTEM_PROMPT,
-            user=build_synthesis_user_prompt(payload),
+            user=build_synthesis_user_prompt(payload, feedback=feedback),
             output_format=SynthesisOutput,
             num_ctx=SYNTHESIS_NUM_CTX,
             max_tokens=SYNTHESIS_MAX_TOKENS,

@@ -19,8 +19,7 @@ import { useCallback, useEffect, useState } from "react";
 
 export type Theme = "light" | "dark";
 
-/** Shared with the pre-paint script in index.html. Changing it needs both. */
-const STORAGE_KEY = "evidwell.theme";
+const STORAGE_KEY = "youth.theme";
 
 function read(): Theme {
   try {

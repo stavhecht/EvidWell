@@ -16,6 +16,15 @@ dependencies = [
     "anthropic>=0.69",
     "ollama>=0.4",
     "voyageai>=0.3",
+    # Stage sequencing only — `pipeline/graph.py`. Nothing here talks to a
+    # model: both LLM clients are hand-written against their own SDKs, and the
+    # retrieval providers are httpx. What the graph buys is the RETRIEVE ->
+    # RANK -> RETRIEVE refinement cycle, which the ordered stage list it
+    # replaced could not express. Its checkpointer is deliberately unused:
+    # durability is already the per-stage commit plus the heartbeat sweep, and
+    # a second mechanism beside them is how the no-double-execution guarantee
+    # gets re-derived by accident.
+    "langgraph>=1.2",
     # Article imagery. Text-to-image is not available on Hugging Face's
     # OpenAI-compatible /v1 endpoint (chat only) and the raw HTTP shape differs
     # per inference provider, so the SDK is the supported path — same reason the

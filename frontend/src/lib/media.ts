@@ -74,7 +74,7 @@ export function isMediaAlign(value: unknown): value is MediaAlign {
 }
 
 /**
- * The classes that lay a media block out, from `styles/evidwell.css`.
+ * The classes that lay a media block out, from `styles/youth.css`.
  *
  * Here rather than in either styles module because the console and the feed
  * must produce the *same* classes — that identity is what makes "the editor

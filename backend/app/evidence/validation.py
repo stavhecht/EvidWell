@@ -204,7 +204,7 @@ def check_beats_are_cited(output: SynthesisOutput) -> list[ValidationFailure]:
 
 def check_verdict_within_grade(
     output: SynthesisOutput, resolved: list[ResolvedSource], payload: SynthesisInput
-) -> tuple[StudyType, list[ValidationFailure]]:
+) -> tuple[StudyType, Verdict, list[ValidationFailure]]:
     """Check 4 — invariant #3: the verdict does not exceed its evidence.
 
     Computed over the **cited** sources only. Sources the model retrieved but
@@ -218,6 +218,12 @@ def check_verdict_within_grade(
     version of this check only asked the first — so one cited study could carry
     ``supported``, the strongest thing this system can say. Both are evaluated
     **per claim**, and the article inherits its weakest claim's ceiling.
+
+    **The ceiling is returned whether or not it was exceeded**, because the
+    check is one-sided: it can only fail a verdict that is too strong. A verdict
+    below its ceiling is either an honest cautious call or a model declining to
+    commit, and nothing here can tell them apart — so the number is recorded and
+    the judgement left to the reviewer, who can see both.
 
     The returned ``StudyType`` is still the best grade cited anywhere in the
     article: it is stored on the row as a description of the evidence and shown
@@ -256,7 +262,7 @@ def check_verdict_within_grade(
             for claim, types in types_by_claim.items()
             if VERDICT_STRENGTH[max_verdict_for_sources(types)] < claimed
         )
-        return grade, [
+        return grade, ceiling, [
             ValidationFailure(
                 code="verdict_exceeds_grade",
                 message=(
@@ -279,7 +285,7 @@ def check_verdict_within_grade(
                 },
             )
         ]
-    return grade, []
+    return grade, ceiling, []
 
 
 async def validate_draft(
@@ -307,7 +313,9 @@ async def validate_draft(
 
     failures.extend(check_beats_are_cited(output))
 
-    grade, verdict_failures = check_verdict_within_grade(output, resolved, payload)
+    grade, ceiling, verdict_failures = check_verdict_within_grade(
+        output, resolved, payload
+    )
     failures.extend(verdict_failures)
 
     report = ValidationReport(
@@ -315,11 +323,22 @@ async def validate_draft(
         citations_total=len(cited),
         citations_resolved=len(resolved),
         best_evidence_grade=grade,
+        verdict_ceiling=ceiling,
         failures=failures,
     )
 
     if report.passed:
-        logger.info("draft validated: %s, grade=%s", report.badge, grade)
+        # The verdict and its ceiling are logged together so the gap between
+        # them is greppable: a run of "verdict=weak ceiling=supported" is the
+        # signature of a model declining to commit on good evidence, and it
+        # produces a clean report otherwise.
+        logger.info(
+            "draft validated: %s, grade=%s, verdict=%s, ceiling=%s",
+            report.badge,
+            grade,
+            output.verdict,
+            ceiling,
+        )
     else:
         logger.warning(
             "draft REJECTED (%d failures): %s", len(failures), summarise_failures(report)

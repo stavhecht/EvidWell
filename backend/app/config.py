@@ -161,7 +161,25 @@ class Settings(BaseSettings):
     discovery_min_baseline_windows: int = 4
     #: Papers in the window before a substance can be proposed. Three is one lab
     #: publishing a series; four is where "several groups" starts.
-    discovery_min_papers: int = 4
+    #:
+    #: Lowered 4 -> 3 on 2026-09-07 because four was starving the desk, measured
+    #: rather than guessed. Over a live 14-day window the substance counts ran
+    #: 9, 5, 5, 4, then 3, 3, 3, 3, then a long tail at 2 and 1 — so a floor of
+    #: four admitted **four substances in the whole corpus** and a floor of three
+    #: admits eight. With three of those already promoted the desk had nothing
+    #: left to offer, which reads as a broken scan rather than a strict one.
+    #:
+    #: The cost is smaller than it looks, because this floor is about *trend
+    #: detection*, not about how much evidence an article gets. A substance is
+    #: proposed on its recent publishing rate; the article it becomes retrieves
+    #: independently across all of PubMed (`retrieval_top_k` per claim), so a
+    #: substance with three recent papers can still rest on twenty-year-old
+    #: systematic reviews. Thin *recent* interest is also already priced in by
+    #: the scorer's `log2(1 + n)` term rather than only by this gate.
+    #:
+    #: Do not read it down to 2: that admits 24 more substances at once, which
+    #: is a ranking over noise.
+    discovery_min_papers: int = 3
     #: Angles one scan may propose for a single substance. A substance surges as
     #: a whole and gets written about one question at a time — "omega-3 for
     #: muscle recovery" and "omega-3 for skin" are different articles resting on
@@ -180,11 +198,21 @@ class Settings(BaseSettings):
     #: observation ledger, not PubMed.
     discovery_angle_lookback_days: int = 90
     #: Papers backing a *single angle* before it is worth proposing separately.
-    #: Lower than `discovery_min_papers` on purpose: that floor asks whether the
-    #: substance is moving, this one asks whether there is enough to write a
+    #: A different question from `discovery_min_papers`: that floor asks whether
+    #: the substance is moving, this one asks whether there is enough to write a
     #: specific piece. Measured 2026-09-06 — omega-3 had 8 papers over 55 outcome
-    #: descriptors, so a floor equal to the substance's would have collapsed
-    #: every substance back to one angle and made the change a no-op.
+    #: descriptors, so an angle floor set at the *then* substance floor of 4
+    #: would have collapsed every substance back to one angle.
+    #:
+    #: It sat below the substance floor until 2026-09-07, when that floor came
+    #: down to 3 and the two became equal. Left at 3 rather than dropped to 2:
+    #: two co-occurring papers is too thin to name an article's specific subject,
+    #: and equality is not the no-op the old note warned about — it only means a
+    #: substance at exactly the floor needs *all* its papers on one outcome to
+    #: earn an angle. Everything else falls back to a bare topic, which is what
+    #: `polyphenols` and `triterpenes` did on the first scan after the change.
+    #: **Never set it above `discovery_min_papers`**: that is unreachable by
+    #: construction, and every angle would silently become a bare topic.
     discovery_min_papers_per_angle: int = 3
     #: Descriptors appearing in more than this share of a scan's records are
     #: stoplisted automatically, whatever `discovery/vocab.py` says. MeSH has
@@ -193,11 +221,20 @@ class Settings(BaseSettings):
     #: same shape: a term on most of the corpus, which by construction cannot
     #: distinguish any part of it.
     discovery_document_frequency_ceiling: float = 0.35
-    #: Candidates one scan may propose. This is the reviewer-flooding control:
-    #: it is literally the number of "spend money" buttons that appear on the
-    #: desk, and eight is about what one person adjudicates without starting to
-    #: ignore them.
-    discovery_max_candidates: int = 8
+    #: Candidates one scan may propose, and so the most the desk ever holds —
+    #: `expire_absent` retires anything this scan did not re-rank, so the desk is
+    #: exactly the last scan's list.
+    #:
+    #: This is the reviewer-flooding control: it is literally the number of
+    #: "spend money" buttons on the screen. Six rather than eight by request.
+    #:
+    #: **It is a ceiling and has never been the reason the desk looks empty.**
+    #: `rank_candidates` is asked for `limit * 3` precisely so suppression can
+    #: remove already-decided topics without shrinking the desk — the next-best
+    #: candidates are pulled up automatically. When the desk shows three, the
+    #: binding constraint is `discovery_min_papers`, not this. Check the dry
+    #: run's "N of M above the floor" line before raising it.
+    discovery_max_candidates: int = 6
     #: Records efetched per scan across all seeds. A hard request budget, not a
     #: tuning knob: NCBI answers sustained overage by blocking the IP, and this
     #: scan shares that IP with the pipeline worker.
@@ -211,6 +248,21 @@ class Settings(BaseSettings):
     #: Seeds to query, by name from `discovery/seeds.py`. Narrow it to debug one
     #: net; empty means all of them.
     discovery_seeds: list[str] = []
+    #: Run the scan on a timer, so the desk fills without anyone pressing a
+    #: button. Safe to leave on: a scan *proposes* and never enqueues, so it
+    #: spends PubMed requests and no tokens at all — the entire generative bill
+    #: still sits behind a reviewer choosing to promote something.
+    discovery_scan_enabled: bool = True
+    #: How stale the last *succeeded* scan may get before the scheduler runs
+    #: another. Measured from the ledger rather than from process start, which is
+    #: what makes a restart cheap and a missed slot self-healing — the same
+    #: reasoning as `discovery_overlap_days`.
+    #:
+    #: Daily against a 14-day window is deliberate over-sampling: MeSH indexing
+    #: lags entry by days to weeks, so a topic's counts keep moving after the
+    #: window that will end up owning them, and re-reading a covered window is
+    #: free (`discovery_observations` is ON CONFLICT DO NOTHING).
+    discovery_scan_interval_hours: int = 24
 
     # --- article media ---
     #: Per-file ceiling. Generous for a photo, small enough that a stray upload

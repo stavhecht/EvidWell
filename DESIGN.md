@@ -16,9 +16,10 @@ producing two articles from 92 real cached papers. The caveat is now narrower an
 README → *Verification status*: the **hosted** providers (Claude, Voyage) have never been
 called, so their clients and the token accounting remain written-against-documentation.
 
-Deliberately deferred, per §11 of the brief: full-text retrieval and chunking, the agentic
-query-refinement loop, and the AWS deployment. `LLMQueryStrategy` is a declared seam that
-raises — the template strategy is what runs.
+Deliberately deferred, per §11 of the brief: full-text retrieval and chunking, and the AWS
+deployment. The agentic query-refinement loop shipped 2026-09-07 as a LangGraph cycle around
+RETRIEVE and RANK (§3.2); it is deterministic, so `LLMQueryStrategy` is still a declared seam
+that raises — the template strategy is still what runs.
 
 ---
 
@@ -240,11 +241,33 @@ fails citation validation, you need to know why.** `pipeline_runs` + `pipeline_s
 record per-stage status, timing, token cost, and the error payload. Without it, invariant #2
 fails silently and looks like "the pipeline didn't produce anything today."
 
-Each stage is a pure-ish function `(input, ctx) -> output` registered in an ordered list. That
+Each stage is a pure-ish function `(input, ctx) -> output`, run in a fixed order. That
 shape is deliberate: each stage maps 1:1 onto a future Step Functions state, so the AWS
 migration is a transport swap (the orchestrator calls Lambda instead of a local function)
-rather than a redesign. The agentic query-refinement loop, when it comes, is a loop *around*
-stages 3–4 in the orchestrator — no stage needs to change to accommodate it.
+rather than a redesign.
+
+**The order is now a LangGraph `StateGraph` (`pipeline/graph.py`), not a list the
+orchestrator walks.** The query-refinement loop is no longer deferred, and it went in exactly
+where this paragraph predicted — a loop *around* stages 3–4, with no stage rewritten to
+accommodate it. RANK flags any claim holding fewer than `QUORUM_FOR_SUPPORTED` supported-tier
+sources (`rank.py::thin_claims`), meaning its verdict was capped by what retrieval found rather
+than by what the evidence says, and a conditional edge sends the run back through RETRIEVE with
+`QueryStrategy.broaden()` — which drops the outcome clause and keeps the subject.
+
+Three properties hold it in place. Broadening **must not** relax the subject instead: that is
+precisely the shape `UnanchoredQuery` exists to refuse (§4). It makes **no model call** —
+`broaden` is `_compose` minus its second half, so a wider query cannot introduce a term the
+narrow one was not allowed to use, and `LLMQueryStrategy` remains a seam that raises. And it is
+bounded at one extra pass, because each pass spends real budget against NCBI's per-IP ceiling
+that the worker shares.
+
+That cycle is the only branch in the graph, and it is the whole reason an ordered list was no
+longer enough: a list runs each stage once. Everything else the orchestrator did it still does
+— the per-stage commit, the two session factories, `_abandon`'s rollback-before-record
+order, and the last stage's write committing with the run-completion row are unchanged, and none
+of them is expressible as a LangGraph feature. Its checkpointer is deliberately unused:
+durability is already the per-stage commit plus the heartbeat sweep, and a second mechanism
+beside them is how the no-double-execution guarantee gets re-derived by accident.
 
 **The orchestrator owns every transaction boundary, and commits per stage.** No stage commits
 and the worker does not commit; a successful stage is committed by the orchestrator and a
@@ -1639,8 +1662,9 @@ the login throttle must keep reading the socket peer), and secrets from somewher
 `.env` file mounted into compose.
 
 ### Later, explicitly deferred
-Full-text retrieval + chunking (v2 §4); agentic query refinement; multi-reviewer roles and
-invites; SerpApi fallback; Next.js port if SEO becomes a priority.
+Full-text retrieval + chunking (v2 §4); *model-generated* query refinement (the deterministic
+broadening loop shipped 2026-09-07, see §3.2); multi-reviewer roles and invites; SerpApi
+fallback; Next.js port if SEO becomes a priority.
 
 ---
 

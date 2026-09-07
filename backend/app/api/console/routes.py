@@ -48,6 +48,7 @@ from app.api.console.schemas import (
     SetContactStatusRequest,
     SetSubjectRequest,
     StageRunOut,
+    SuppressedTopicOut,
     TokenResponse,
     TrendScanOut,
 )
@@ -934,6 +935,10 @@ async def _scan_out(session: AsyncSession) -> TrendScanOut:
         observations_written=state.observations_written,
         candidates_proposed=state.candidates_proposed,
         notes=state.notes,
+        suppressed=[
+            SuppressedTopicOut(topic=item.topic, reason=item.reason)
+            for item in state.suppressed
+        ],
         error=state.error,
         last_scan_at=last,
     )

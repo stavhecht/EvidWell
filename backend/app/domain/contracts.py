@@ -15,7 +15,14 @@ from __future__ import annotations
 import re
 from typing import Annotated, Any
 
-from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from app.domain.enums import SourceApi, StudyType, Verdict
 
@@ -269,6 +276,27 @@ class ArticleSection(BaseModel):
     into sibling paragraph nodes.
     """
 
+    #: **What the model is shown, deliberately not this docstring.** Pydantic
+    #: uses a class docstring as the JSON-schema ``description``, and Ollama
+    #: passes that schema in as the *generation grammar* — so every word above
+    #: was reaching the model at the moment it decided how much to write, and
+    #: what it said was that sections are optional and that padding is
+    #: forbidden. Measured: two of the first three articles carried no sections
+    #: at all. The rationale is for whoever edits this file; the model needs the
+    #: shape, and it gets it here.
+    model_config = ConfigDict(
+        json_schema_extra={
+            "description": (
+                "One titled stretch of the evidence discussion, sitting between "
+                "beats 2 and 3. The heading is a plain label of at most 8 words, "
+                "never a claim. The body is at most 8 sentences and must carry at "
+                "least one [S...] citation marker; separate paragraphs within it "
+                "with a blank line."
+            )
+        }
+    )
+
+
     heading: NonEmptyStr = Field(description="A plain descriptive label, not a claim")
     body: NonEmptyStr = Field(description="The section's prose, with inline citations")
 
@@ -303,12 +331,35 @@ class ArticleBody(BaseModel):
     not already give.
     """
 
+    #: See the note on ``ArticleSection.model_config``: the docstring above is
+    #: for developers and must not be the grammar the model generates under.
+    model_config = ConfigDict(
+        json_schema_extra={
+            "description": (
+                "The article body: three beats, with titled sections between "
+                "beats 2 and 3 where the evidence supports them."
+            )
+        }
+    )
+
+
     beat_1_claim: NonEmptyStr = Field(description="What it claims to do")
     beat_2_evidence: NonEmptyStr = Field(description="What the research actually shows")
     sections: list[ArticleSection] = Field(
         default_factory=list,
         max_length=5,
-        description="Optional titled sections expanding on the evidence",
+        # Still no `min_length`, and there must never be one — that would be the
+        # padding instruction DESIGN.md §6 refuses. What changed is the word the
+        # model was reading: "Optional" told it, inside its own grammar, that
+        # skipping these was the easy correct answer. This states the same rule
+        # the prompt already gives, and its low end is *none*, so thin evidence
+        # still yields a short article.
+        description=(
+            "Titled sections working through the evidence in detail. How many is "
+            "decided by the evidence, not by a target: six or more usable sources "
+            "supports three to five sections, three to five sources supports one "
+            "or two, and one or two sources supports none at all."
+        ),
     )
     beat_3_bottom_line: NonEmptyStr = Field(description="Bottom line / caveat")
 
@@ -401,6 +452,19 @@ class SynthesisOutput(BaseModel):
     the prompt's handle set and the database, neither of which the model can
     influence.
     """
+
+    #: See ``ArticleSection.model_config``. Same split, same reason: the
+    #: docstring names the module that enforces grounding, which is what a
+    #: maintainer needs and is noise inside the model's generation grammar.
+    model_config = ConfigDict(
+        json_schema_extra={
+            "description": (
+                "One finished article: a headline, a verdict on the claims, a "
+                "two-sentence summary, the body, and the list of sources cited."
+            )
+        }
+    )
+
 
     headline: NonEmptyStr
     verdict: Verdict
@@ -557,6 +621,21 @@ class ValidationReport(BaseModel):
     citations_total: int
     citations_resolved: int
     best_evidence_grade: StudyType
+    #: The strongest verdict the cited evidence would have allowed.
+    #:
+    #: Recorded even when the draft passes, which is the whole point. The cap
+    #: is a ceiling and nothing raises a verdict toward it, so an over-confident
+    #: draft fails loudly while an under-confident one is indistinguishable from
+    #: a correct cautious call — and the first three articles were all "weak"
+    #: against ceilings that permitted "supported", with a clean report each
+    #: time. Storing the ceiling beside the verdict is what lets a reviewer see
+    #: the gap; without it this class of failure has no signal anywhere.
+    #:
+    #: Optional because reports written before this field existed do not carry
+    #: it, and a missing ceiling must read as "not recorded" rather than as
+    #: ``no_evidence``, which is a real verdict and the falsest thing a default
+    #: could say here.
+    verdict_ceiling: Verdict | None = None
     failures: list[ValidationFailure] = Field(default_factory=list)
 
     @property

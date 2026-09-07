@@ -176,6 +176,25 @@ class QueryStrategy(Protocol):
         """
         ...
 
+    def broaden(
+        self, claim: str, product: str, ingredients: list[str]
+    ) -> list[SearchQuery]:
+        """Produce a wider set of queries for a claim the first pass ran thin on.
+
+        **Broadening drops the outcome, never the subject.** The result is a
+        query that still names the substance and asks less about what it does,
+        which is what a librarian does when a search returns four papers. Doing
+        it the other way round — keeping the outcome and relaxing the substance
+        — is the exact shape of the failure ``UnanchoredQuery`` exists to
+        refuse: a creatine run that searched ``(workout AND performance)``
+        retrieved fifty real papers, cited two, and produced a ``supported``
+        verdict on a product none of them mention.
+
+        So this must stay *more* anchored than ``build``, never less, and it
+        raises ``UnanchoredQuery`` on the same input for the same reason.
+        """
+        ...
+
 
 class TemplateQueryStrategy:
     """MeSH-aware boolean query construction. No model call."""
@@ -199,6 +218,35 @@ class TemplateQueryStrategy:
                 reviews_only=False,
                 max_results=GENERAL_PASS_MAX_RESULTS,
                 min_year=self._min_year,
+            ),
+        ]
+
+    def broaden(
+        self, claim: str, product: str, ingredients: list[str]
+    ) -> list[SearchQuery]:
+        """The same subject group, with the outcome clause dropped entirely.
+
+        No model call and no new vocabulary: this is ``_compose`` minus its
+        second half, so a broadened query cannot introduce a term the narrow one
+        would not have been allowed to use. ``min_year`` is dropped too, since a
+        claim thin on recent work is exactly the case where an older trial is
+        worth having.
+        """
+        subject = self._subject_group(ingredients or [product])
+        if not subject:
+            raise UnanchoredQuery(claim, product, ingredients)
+        return [
+            SearchQuery(
+                claim=claim,
+                terms=subject,
+                reviews_only=True,
+                max_results=REVIEW_PASS_MAX_RESULTS,
+            ),
+            SearchQuery(
+                claim=claim,
+                terms=subject,
+                reviews_only=False,
+                max_results=GENERAL_PASS_MAX_RESULTS,
             ),
         ]
 
@@ -274,4 +322,9 @@ class LLMQueryStrategy:
     """
 
     def build(self, claim: str, product: str, ingredients: list[str]) -> list[SearchQuery]:
+        raise NotImplementedError("LLM query generation is deferred; see DESIGN.md §5")
+
+    def broaden(
+        self, claim: str, product: str, ingredients: list[str]
+    ) -> list[SearchQuery]:
         raise NotImplementedError("LLM query generation is deferred; see DESIGN.md §5")

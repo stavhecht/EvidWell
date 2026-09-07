@@ -133,7 +133,7 @@ def _suppression_note(suppressed: list[tuple[str, str]]) -> str:
         parts.append(f"{dismissed} dismissed{soonest}")
     return (
         f"{len(suppressed)} candidate(s) suppressed by an earlier decision "
-        f"({'; '.join(parts)}). Run the CLI for the per-topic list."
+        f"({'; '.join(parts)})."
     )
 
 
