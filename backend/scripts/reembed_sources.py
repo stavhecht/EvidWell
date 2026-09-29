@@ -1,4 +1,7 @@
-"""Re-embed cached `sources` whose vectors came from a different model.
+"""Re-chunk and re-embed cached `sources` whose chunks are out of date.
+
+Out of date means embedded by a different model, or cut with different chunk
+settings (``retrieval/chunking.py::CHUNK_SETTINGS``).
 
 Vectors from two models are not comparable. They are not *wrong* in a way
 anything can detect — ``mxbai-embed-large`` and ``voyage-4`` are both 1024-d, so
@@ -8,12 +11,14 @@ exists: a provider switch degrades retrieval silently, and the only signal is
 ``sources.embedding_model`` disagreeing with the live provider.
 
 ``SourceCache`` already handles the rows it touches — ``had_embedding`` compares
-the recorded model against ``embedder.model_id`` and re-embeds on a mismatch. So
-a paper that gets retrieved again repairs itself. This is for the rest: rows
-nobody has fetched since the switch, which is most of them, and which keep
-polluting every re-rank they are eligible for.
+the recorded model and chunk settings against the live ones and re-makes the
+chunks on a mismatch. So a paper that gets retrieved again repairs itself. This
+is for the rest: rows nobody has fetched since the change, which is most of
+them, and which keep polluting every re-rank they are eligible for.
 
-Run it after changing ``EMBEDDING_PROVIDER`` or the embedding model::
+Run it after changing ``EMBEDDING_PROVIDER``, the embedding model, or the chunk
+size, and once after migrations 0002 and 0003, which moved vectors into
+overlapping chunks (``source_chunks``) and then changed their size::
 
     python -m scripts.reembed_sources            # report only
     python -m scripts.reembed_sources --apply    # write
@@ -28,7 +33,10 @@ Point the settings at the provider you want *first*, then run this.
 
 Rows with no abstract are reported and skipped: ``ensure_embeddings`` embeds the
 abstract alone, so there is nothing to embed and a title would be a different
-text in the same column — the subtler version of the bug this repairs.
+text in the same space — the subtler version of the bug this repairs.
+
+Chunks are written by ``retrieval/cache.py::write_chunks``, the same function
+the pipeline uses, so a re-embedded paper is chunked exactly like a new one.
 """
 
 from __future__ import annotations
@@ -38,18 +46,20 @@ import asyncio
 import sys
 from collections import Counter
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, select
 
 from app.config import get_settings
 from app.db import dispose_engine, get_session_factory
 from app.domain.models import Source
 from app.llm.embeddings.base import EmbeddingError
 from app.llm.embeddings.factory import build_embedding_provider
+from app.retrieval.cache import write_chunks
+from app.retrieval.chunking import CHUNK_SETTINGS
 
-#: How many abstracts to embed and write per transaction chunk. The provider
-#: batches internally (Ollama at 64); this bounds how much work a failure
-#: halfway through throws away, since each chunk is committed as it lands.
-CHUNK = 64
+#: How many abstracts to embed and write per transaction. The provider batches
+#: internally (Ollama at 64); this bounds how much work a failure halfway
+#: through throws away, since each batch is committed as it lands.
+BATCH = 64
 
 
 async def main() -> int:
@@ -81,25 +91,24 @@ async def _run() -> int:
     async with factory() as session:
         spread = (
             await session.execute(
-                select(Source.embedding_model, func.count())
-                .group_by(Source.embedding_model)
+                select(Source.embedding_model, Source.chunk_settings, func.count())
+                .group_by(Source.embedding_model, Source.chunk_settings)
                 .order_by(func.count().desc())
             )
         ).all()
 
-        print(f"live provider: {target} ({embedder.dimension}-d)\n")
-        print("cache by recorded model:")
-        for model, count in spread:
-            mark = "  <- current" if model == target else ""
-            print(f"  {count:5d}  {model or 'NULL (never embedded)'}{mark}")
+        print(f"live provider: {target} ({embedder.dimension}-d), chunks {CHUNK_SETTINGS}\n")
+        print("cache by recorded model and chunk settings:")
+        for model, chunking, count in spread:
+            mark = "  <- current" if (model, chunking) == (target, CHUNK_SETTINGS) else ""
+            label = f"{model}, {chunking}" if model else "NULL (never embedded)"
+            print(f"  {count:5d}  {label}{mark}")
 
         # IS DISTINCT FROM, so NULL counts as a mismatch: a row that was never
         # embedded is exactly as unusable as one embedded by another model.
         stale = select(Source.id, Source.abstract).where(
-            or_(
-                Source.embedding_model.is_distinct_from(target),
-                Source.embedding.is_(None),
-            )
+            Source.embedding_model.is_distinct_from(target)
+            | Source.chunk_settings.is_distinct_from(CHUNK_SETTINGS)
         )
         if args.limit is not None:
             stale = stale.limit(args.limit)
@@ -108,7 +117,7 @@ async def _run() -> int:
         embeddable = [(r.id, r.abstract) for r in rows if (r.abstract or "").strip()]
         skipped = [r.id for r in rows if not (r.abstract or "").strip()]
 
-        print(f"\n{len(rows)} row(s) not in the live space")
+        print(f"\n{len(rows)} row(s) out of date")
         print(f"  {len(embeddable):5d} will be re-embedded")
         if skipped:
             print(f"  {len(skipped):5d} skipped — no abstract to embed")
@@ -124,25 +133,20 @@ async def _run() -> int:
 
         done = 0
         failures: Counter[str] = Counter()
-        for start in range(0, len(embeddable), CHUNK):
-            chunk = embeddable[start : start + CHUNK]
+        for start in range(0, len(embeddable), BATCH):
+            batch = dict(embeddable[start : start + BATCH])
             try:
-                vectors = await embedder.embed_documents([text for _id, text in chunk])
+                await write_chunks(session, embedder, batch)
             except EmbeddingError as exc:
-                # Reported per chunk rather than fatal: a transient provider
-                # failure should not discard the chunks that already landed,
+                # Reported per batch rather than fatal: a transient provider
+                # failure should not discard the batches that already landed,
                 # and re-running picks up exactly what is still stale.
-                failures[str(exc)[:120]] += len(chunk)
+                # write_chunks embeds before it writes, so nothing is half-written.
+                failures[str(exc)[:120]] += len(batch)
                 continue
 
-            for (source_id, _text), vector in zip(chunk, vectors, strict=True):
-                await session.execute(
-                    update(Source)
-                    .where(Source.id == source_id)
-                    .values(embedding=vector, embedding_model=target)
-                )
             await session.commit()
-            done += len(chunk)
+            done += len(batch)
             print(f"  re-embedded {done}/{len(embeddable)}")
 
         print(f"\nRe-embedded {done} row(s) into {target}.")

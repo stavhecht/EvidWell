@@ -1,31 +1,17 @@
-"""Cross-provider identity: deciding which records are the same paper.
+"""Decide which records from different providers are the same paper.
 
-The same study routinely arrives from three providers carrying three different
-identifier *subsets* — Europe PMC knows its PMID, Semantic Scholar knows its
-DOI, PubMed knows both. Keying each record on a single preferred identifier
-(DOI, else PMID, else title) cannot unify those: the DOI-only record and the
-PMID-only record produce different keys and survive as two candidates, become
-two ``sources`` rows, and are handed to the model under two handles.
+Providers know different identifiers for the same paper: Europe PMC may send
+only the PMID, Semantic Scholar only the DOI, PubMed both. Keying each record
+on one identifier would keep the DOI-only and PMID-only records apart, and the
+model would then cite one study as two independent findings.
 
-That is not a cosmetic duplicate. ``rerank.assign_handles`` already guards the
-same failure from the other direction — one paper seen twice under two names is
-cited as two independent findings, manufacturing corroboration out of a single
-study — in a product whose entire proposition is that its citations are real.
+So records are grouped with a union-find over *every* identifier they carry:
+a record with both a DOI and a PMID links the two, and any record carrying
+either one joins that group.
 
-So identity is computed as a **union-find over every identifier a record
-carries**, not as one key per record. A record holding both a DOI and a PMID
-joins those two identifiers into one group, and any record carrying either one
-then belongs to that group. One PubMed hit is enough to bridge the Europe PMC
-and Semantic Scholar records of the same paper.
-
-**Titles do not join groups.** A normalised title is used as an identity key
-only for a record carrying no identifier at all (which the provider adapters
-already refuse to emit, so it is a floor rather than a path). Bridging on title
-would merge erratum notices with their parent paper and conference abstracts
-with the full study — both of which repeat the title verbatim — and a wrong
-merge is invisible afterwards, because the result simply looks like one paper.
-Under-merging costs a duplicated prompt slot; over-merging silently deletes a
-distinct study. The asymmetry decides it.
+Titles never link records that have identifiers. Errata and conference
+abstracts repeat their parent's title, and merging those would silently delete
+a real study. A title is used only for a record with no identifier at all.
 """
 
 from __future__ import annotations
@@ -35,14 +21,9 @@ from collections.abc import Iterable, Sequence
 from app.domain.contracts import CandidatePaper
 from app.domain.enums import EVIDENCE_RANK, SourceApi
 
-#: Whose abstract to keep when a group disagrees, highest first.
-#:
-#: Length is the wrong primary rule. OpenAlex does not ship abstracts as text —
-#: it ships an inverted index that ``_reconstruct_abstract`` rebuilds, so lost
-#: punctuation and tokenisation artefacts are normal rather than exceptional,
-#: and a reconstructed abstract is often *longer* than the clean one. That text
-#: is both what gets embedded and what the model reads as evidence, so the
-#: cleanest wins and length is only the tiebreaker.
+#: Whose abstract to keep when duplicates disagree, highest first. Cleanest
+#: text wins, not longest: OpenAlex rebuilds abstracts from a word index, so
+#: its version is often longer and damaged.
 PROVIDER_TRUST: dict[SourceApi, int] = {
     SourceApi.PUBMED: 3,
     SourceApi.EUROPE_PMC: 2,
@@ -52,34 +33,31 @@ PROVIDER_TRUST: dict[SourceApi, int] = {
 
 
 def identity_keys(paper: CandidatePaper) -> list[str]:
-    """Every identifier this record can be recognised by.
-
-    All of them, not the best one — carrying both a DOI and a PMID is exactly
-    what lets a record bridge two groups that would otherwise stay apart.
-    """
+    """Every identifier this record can be recognised by (not just the best one)."""
     keys = []
     if paper.doi:
         keys.append(f"doi:{paper.doi.strip().lower()}")
     if paper.pmid:
         keys.append(f"pmid:{paper.pmid.strip()}")
-    # Title only when there is nothing better; see the module docstring on why
-    # it must never join two records that do carry identifiers.
-    return keys or [paper.dedup_key]
+    return keys or [paper.dedup_key]  # the title, only when there is nothing else
 
 
 class _UnionFind:
-    """Disjoint sets over identifier strings, with path compression."""
+    """Groups of identifier strings. ``union`` joins two groups; ``find`` names a group."""
 
     def __init__(self) -> None:
         self._parent: dict[str, str] = {}
 
     def find(self, key: str) -> str:
-        self._parent.setdefault(key, key)
-        root = key
+        """The group's root key. Also points every key on the way straight at
+        the root, so the next lookup is one step."""
+        root = self._parent.setdefault(key, key)
         while self._parent[root] != root:
             root = self._parent[root]
-        while self._parent[key] != root:
-            self._parent[key], key = root, self._parent[key]
+        while key != root:
+            next_key = self._parent[key]
+            self._parent[key] = root
+            key = next_key
         return root
 
     def union(self, left: str, right: str) -> None:
@@ -91,70 +69,53 @@ class _UnionFind:
 def merge_candidates(
     papers_by_claim: dict[str, list[CandidatePaper]],
 ) -> dict[str, list[CandidatePaper]]:
-    """Collapse duplicates across every claim at once, preserving claim order.
+    """Collapse duplicates across every claim at once, keeping each claim's order.
 
-    Grouping is global rather than per claim on purpose. A paper answering two
-    claims must end up as the *same object* in both lists, because everything
-    downstream — the cache upsert, ``RankStage``'s id lookup, handle assignment
-    — keys on ``dedup_key``, and a paper merged in one claim but not another
-    would carry two different keys through the rest of the pipeline.
-
-    Returns one merged record per group per claim, in the order that claim's
-    candidates first appeared.
+    Global rather than per claim, so a paper answering two claims comes out as
+    the same merged record (and the same ``dedup_key``) in both lists.
     """
     all_papers = [paper for papers in papers_by_claim.values() for paper in papers]
 
-    union = _UnionFind()
+    groups = _UnionFind()
     for paper in all_papers:
-        keys = identity_keys(paper)
-        for key in keys[1:]:
-            union.union(keys[0], key)
+        first, *rest = identity_keys(paper)
+        for key in rest:
+            groups.union(first, key)
 
-    grouped: dict[str, list[CandidatePaper]] = {}
+    def group_of(paper: CandidatePaper) -> str:
+        return groups.find(identity_keys(paper)[0])
+
+    members: dict[str, list[CandidatePaper]] = {}
     for paper in all_papers:
-        grouped.setdefault(union.find(identity_keys(paper)[0]), []).append(paper)
-
-    merged = {root: merge_group(group) for root, group in grouped.items()}
+        members.setdefault(group_of(paper), []).append(paper)
+    merged = {root: merge_group(group) for root, group in members.items()}
 
     result: dict[str, list[CandidatePaper]] = {}
     for claim, papers in papers_by_claim.items():
-        seen: set[str] = set()
-        kept: list[CandidatePaper] = []
-        for paper in papers:
-            root = union.find(identity_keys(paper)[0])
-            if root in seen:
-                continue
-            seen.add(root)
-            kept.append(merged[root])
-        result[claim] = kept
+        roots = dict.fromkeys(group_of(paper) for paper in papers)  # ordered, unique
+        result[claim] = [merged[root] for root in roots]
     return result
 
 
 def unique_papers(papers_by_claim: dict[str, list[CandidatePaper]]) -> list[CandidatePaper]:
     """Every distinct paper across all claims, in first-seen order.
 
-    Safe to call only on the output of ``merge_candidates``: it relies on one
-    merged record per group, so ``dedup_key`` is a complete identity.
+    Call only on ``merge_candidates`` output, where ``dedup_key`` is a full identity.
     """
-    seen: set[str] = set()
-    unique: list[CandidatePaper] = []
+    unique: dict[str, CandidatePaper] = {}
     for papers in papers_by_claim.values():
         for paper in papers:
-            if paper.dedup_key in seen:
-                continue
-            seen.add(paper.dedup_key)
-            unique.append(paper)
-    return unique
+            unique.setdefault(paper.dedup_key, paper)
+    return list(unique.values())
 
 
 def merge_group(group: Sequence[CandidatePaper]) -> CandidatePaper:
-    """Fold one group of duplicate records into a single candidate.
+    """Fold one group of duplicate records into a single paper.
 
-    Takes the most trusted record as the base — which settles ``abstract`` and
-    ``source_api`` together, so the stored provenance names the provider whose
-    text we actually kept — then fills every field it is missing from the rest.
-    Strongest-wins on study type is deliberate: one provider knowing a paper is
-    an RCT is informative, another not knowing is not.
+    The most trusted provider's record is the base (its abstract and
+    ``source_api`` are kept together); missing fields are filled from the
+    others. The strongest study type wins: one provider knowing a paper is an
+    RCT is informative, another not knowing is not.
     """
     if len(group) == 1:
         return group[0]
@@ -172,13 +133,10 @@ def merge_group(group: Sequence[CandidatePaper]) -> CandidatePaper:
             "journal": _first(paper.journal for paper in ordered),
             "year": _first(paper.year for paper in ordered),
             "raw_study_type": _first(paper.raw_study_type for paper in ordered),
-            "citation_count": max(
-                (paper.citation_count or 0 for paper in ordered), default=0
-            )
+            "citation_count": max((paper.citation_count or 0 for paper in ordered), default=0)
             or None,
             "study_type": max(
-                (paper.study_type for paper in ordered),
-                key=lambda study: EVIDENCE_RANK[study],
+                (paper.study_type for paper in ordered), key=lambda study: EVIDENCE_RANK[study]
             ),
         }
     )

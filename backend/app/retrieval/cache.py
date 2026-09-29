@@ -1,13 +1,14 @@
-"""The sources cache — pgvector as a persistent library, not a search index.
+"""The sources cache: every paper we fetch is stored once and reused forever.
 
-Once a paper is fetched and embedded it is kept forever and reused by every
-future article. The tenth ashwagandha article costs almost no embedding calls.
-This is the whole reason the vector store exists; searching it is secondary.
+Two steps, always in this order:
 
-Ordering rule, and it matters: **upsert first, embed second.** Upsert reports
-which rows already carry a current vector, so only genuinely new abstracts are
-sent to the embedding provider. Embedding first and then upserting works, and
-quietly pays to re-embed the entire candidate set on every run.
+1. ``upsert_many`` saves the papers. Each paper is matched to an existing row
+   by DOI *or* PMID; matched rows are refreshed, new papers are inserted.
+2. ``ensure_embeddings`` chunks and embeds only the papers that have no
+   vectors from the current model yet.
+
+Upserting first is what keeps a warm cache cheap: it reports which papers are
+already embedded, so only new abstracts are sent to the embedding provider.
 """
 
 from __future__ import annotations
@@ -17,14 +18,16 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import Integer, Text, column, func, or_, select, update, values
+from sqlalchemy import Integer, Text, column, delete, func, or_, select, update, values
 from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.contracts import CandidatePaper
-from app.domain.models import Source
+from app.domain.models import Source, SourceChunk
 from app.llm.embeddings.base import EmbeddingProvider
+from app.retrieval.chunking import CHUNK_SETTINGS, chunk_text
 
 logger = logging.getLogger(__name__)
 
@@ -33,27 +36,26 @@ logger = logging.getLogger(__name__)
 class CachedSource:
     source_id: str
     paper: CandidatePaper
+    #: True when the row's chunks were cut with the current settings and
+    #: embedded by the live model, so they can be reused as they are.
     had_embedding: bool
 
 
 @dataclass(frozen=True, slots=True)
 class _ExistingRow:
-    """A ``sources`` row already in the cache, matched by one of its ids."""
-
     id: str
     pmid: str | None
     doi: str | None
     embedding_model: str | None
+    chunk_settings: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class _Match:
-    """The cached row an incoming paper resolves to."""
-
     row: _ExistingRow
-    #: True when the paper's *other* identifier belongs to a different row —
-    #: the cache is holding one paper twice. The row is still usable; what it
-    #: cannot do is adopt the contested identifier.
+    #: The paper's DOI and PMID point at two *different* rows: the cache holds
+    #: this paper twice. We use the DOI row but must not copy the PMID onto it,
+    #: because the other row already owns that PMID.
     split: bool
 
 
@@ -63,56 +65,32 @@ class SourceCache:
         self._embedder = embedder
 
     async def upsert_many(self, papers: list[CandidatePaper]) -> list[CachedSource]:
-        """Insert or refresh candidates, returning their ids and cache state.
+        """Save papers to ``sources``; return one entry per distinct paper.
 
-        **Resolve first, then write.** A paper's identity spans two partial
-        unique indexes — ``lower(doi)`` and ``pmid`` — and Postgres accepts one
-        inference clause per statement, so no single ``ON CONFLICT`` can see
-        both. Routing by whichever identifier the incoming record happens to
-        carry is what the previous two-pass version did, and it breaks the
-        moment a record arrives *more complete* than the row it matches: a
-        paper first seen PMID-only, met again later carrying a DOI, takes the
-        DOI pass, infers against an index with no matching entry, attempts an
-        INSERT and violates ``sources_pmid_key``. That is an IntegrityError
-        that kills the run, and cross-provider merging
-        (``retrieval/dedup.py``) makes newly-complete records the normal case
-        rather than a rare one.
+        Why not a single ``INSERT ... ON CONFLICT``: a paper is identified by
+        two unique indexes (DOI and PMID) and Postgres checks only one per
+        statement. A paper first cached with a PMID only, and seen again with a
+        DOI too, would miss on DOI, get inserted, and violate the PMID index.
+        So we read the matching rows first, update them by primary key, and
+        insert only the papers that matched nothing.
 
-        So existing rows are read once, matched on *every* identifier at once,
-        and updated by primary key — against which no conflict target exists.
-        Only genuinely new papers are inserted.
-
-        This is a read-then-write, which DESIGN.md §9 originally ruled out. The
-        race it opens is two workers inserting the same new paper between our
-        read and our write; it surfaces as an IntegrityError and is retried
-        once, by which point the row exists and the retry resolves it as an
-        ordinary match.
-
-        On refresh a row is never replaced: citation count, last-seen and any
-        newly-available identifier are updated, while ``embedding`` and
-        ``abstract`` are left alone. Overwriting the embedding would discard
-        the cache benefit this class exists to provide.
-
-        Callers may pass the same paper twice — candidates are collected per
-        claim, and one paper routinely answers several claims — so the batch is
-        collapsed on ``dedup_key`` rather than trusting every caller.
+        Two workers can insert the same new paper between our read and our
+        write. That raises ``IntegrityError``; we retry once inside a savepoint,
+        and the retry finds the row the other worker wrote. The savepoint undoes
+        only this batch, not the rest of the stage's transaction.
         """
         if not papers:
             return []
 
-        by_dedup_key: dict[str, CandidatePaper] = {}
+        # One paper often answers several claims, so it can arrive twice.
+        unique: dict[str, CandidatePaper] = {}
         for paper in papers:
-            by_dedup_key.setdefault(paper.dedup_key, paper)
-        papers = list(by_dedup_key.values())
+            unique.setdefault(paper.dedup_key, paper)
+        papers = list(unique.values())
 
         results: list[CachedSource] = []
         for attempt in range(2):
             try:
-                # A savepoint, not the outer transaction: a retry must discard
-                # only this batch, and the stage's transaction already holds
-                # work that must survive it. (The orchestrator commits per
-                # stage, so "the outer transaction" is one stage's, not the
-                # whole run's — the savepoint is needed either way.)
                 async with self._session.begin_nested():
                     results = await self._write(papers)
                 break
@@ -121,24 +99,37 @@ class SourceCache:
                     raise
                 logger.warning("source cache: concurrent insert; retrying once")
 
-        cached = sum(1 for entry in results if entry.had_embedding)
         logger.info(
             "source cache: %d papers -> %d rows (%d already embedded)",
             len(papers),
             len(results),
-            cached,
+            sum(1 for entry in results if entry.had_embedding),
         )
         return results
 
+    async def ensure_embeddings(self, cached: list[CachedSource]) -> None:
+        """Chunk and embed every source whose chunks are missing or out of date.
+
+        Only the abstract is embedded, not the title: titles carry marketing
+        phrasing that pulls the vector toward the claim's wording rather than
+        toward what the study found.
+        """
+        pending = {entry.source_id: entry.paper.abstract for entry in cached if not entry.had_embedding}
+        if pending:
+            count = await write_chunks(self._session, self._embedder, pending)
+            logger.info(
+                "embedded %d new abstracts as %d chunks (%s)",
+                len(pending),
+                count,
+                self._embedder.model_id,
+            )
+
     async def _write(self, papers: list[CandidatePaper]) -> list[CachedSource]:
-        """Match against what is already cached, then refresh or insert."""
+        """Match each paper to a cached row, then refresh or insert."""
         existing = await self._load_existing(papers)
 
         results: list[CachedSource] = []
         new_papers: list[CandidatePaper] = []
-        # Split by whether the row may adopt the paper's other identifier: the
-        # two groups need different SET clauses, so they are two statements
-        # rather than N.
         adopting: list[tuple[_ExistingRow, CandidatePaper]] = []
         contested: list[tuple[_ExistingRow, CandidatePaper]] = []
 
@@ -152,10 +143,11 @@ class SourceCache:
                 CachedSource(
                     source_id=match.row.id,
                     paper=paper,
-                    # A vector from a different model occupies a different
-                    # space, so it is not reusable — treat it as absent.
+                    # Vectors from another model are in a different space, and
+                    # chunks cut another way no longer match chunk_text.
                     had_embedding=(
                         match.row.embedding_model == self._embedder.model_id
+                        and match.row.chunk_settings == CHUNK_SETTINGS
                     ),
                 )
             )
@@ -165,13 +157,10 @@ class SourceCache:
         results.extend(await self._insert(new_papers))
         return results
 
-    async def _load_existing(
-        self, papers: list[CandidatePaper]
-    ) -> dict[str, _ExistingRow]:
-        """Every cached row matching any identifier in the batch, keyed by id.
+    async def _load_existing(self, papers: list[CandidatePaper]) -> dict[str, _ExistingRow]:
+        """Every cached row matching any DOI or PMID in the batch, in one query.
 
-        One query covering both partial unique indexes. Indexed on either side,
-        and a batch is a few hundred identifiers at most.
+        Keyed ``doi:<doi>`` and ``pmid:<pmid>``, so a row is findable by either.
         """
         dois = [paper.doi.strip().lower() for paper in papers if paper.doi]
         pmids = [paper.pmid.strip() for paper in papers if paper.pmid]
@@ -185,9 +174,13 @@ class SourceCache:
             return {}
 
         result = await self._session.execute(
-            select(Source.id, Source.pmid, Source.doi, Source.embedding_model).where(
-                or_(*conditions)
-            )
+            select(
+                Source.id,
+                Source.pmid,
+                Source.doi,
+                Source.embedding_model,
+                Source.chunk_settings,
+            ).where(or_(*conditions))
         )
 
         index: dict[str, _ExistingRow] = {}
@@ -197,6 +190,7 @@ class SourceCache:
                 pmid=row.pmid,
                 doi=row.doi,
                 embedding_model=row.embedding_model,
+                chunk_settings=row.chunk_settings,
             )
             if entry.doi:
                 index[f"doi:{entry.doi.strip().lower()}"] = entry
@@ -210,26 +204,13 @@ class SourceCache:
         *,
         adopt_identifiers: bool,
     ) -> None:
-        """Refresh every matched row in **one** statement, joined to a VALUES list.
+        """Refresh every matched row in one ``UPDATE ... FROM (VALUES ...)``.
 
-        One UPDATE per row is the obvious way to write this and it is a hundred
-        round trips on a warm cache — which is the common case, since the cache
-        exists precisely so a repeat topic re-matches everything. Joining
-        against a VALUES list does the same work in one.
-
-        Identifiers COALESCE in both directions: adopt one we did not have, and
-        keep one the incoming record lacks. The same paper arrives from
-        different providers with different identifier subsets, so merging beats
-        overwriting.
-
-        ``adopt_identifiers=False`` for rows where the paper's other identifier
-        belongs to a *different* row (see ``_match``). Adopting it would write a
-        value another row already owns and the partial unique index would reject
-        the statement — turning a duplicate that merely needs cleaning up into a
-        failed run. Those rows are still touched, so ``last_seen_at`` and the
-        citation count stay current while the split is reported. They are a
-        separate statement rather than a separate SET expression because the
-        difference is which columns are written at all.
+        Updates ``last_seen_at`` and the citation count. With
+        ``adopt_identifiers`` it also fills in a DOI or PMID the row was
+        missing; it never overwrites one the row already has. The abstract and
+        the vectors are never touched, since reusing them is the point of the
+        cache.
         """
         if not matched:
             return
@@ -240,21 +221,13 @@ class SourceCache:
             column("doi", Text),
             column("citation_count", Integer),
             name="incoming",
-        ).data(
-            [
-                (row.id, paper.pmid, paper.doi, paper.citation_count)
-                for row, paper in matched
-            ]
-        )
+        ).data([(row.id, paper.pmid, paper.doi, paper.citation_count) for row, paper in matched])
 
         assignments: dict[str, Any] = {
             "last_seen_at": datetime.now(UTC),
-            # The cast is load-bearing, not decoration. Postgres types a VALUES
-            # column from its literals, and a batch where no paper carries a
-            # citation count is a column of bare NULLs — inferred as `text`,
-            # which then fails to COALESCE with an integer column. The text
-            # columns below are immune for the same reason: their fallback type
-            # is already the right one.
+            # The cast matters: a batch where no paper has a citation count is
+            # a column of bare NULLs, which Postgres types as text, and text
+            # does not COALESCE with an integer column.
             "citation_count": func.coalesce(
                 incoming.c.citation_count.cast(Integer), Source.citation_count
             ),
@@ -268,7 +241,7 @@ class SourceCache:
         )
 
     async def _insert(self, papers: list[CandidatePaper]) -> list[CachedSource]:
-        """Insert papers that matched nothing. A new row never has a vector."""
+        """Insert papers that matched nothing. A new row has no vectors yet."""
         if not papers:
             return []
 
@@ -298,64 +271,66 @@ class SourceCache:
             .returning(Source.id)
         )
 
-        # RETURNING preserves the order of the VALUES list for a plain INSERT.
+        # RETURNING keeps the order of the VALUES list for a plain INSERT.
         return [
             CachedSource(source_id=str(row.id), paper=paper, had_embedding=False)
             for row, paper in zip(result.all(), papers, strict=True)
         ]
 
-    async def ensure_embeddings(self, cached: list[CachedSource]) -> None:
-        """Embed and store vectors for any source lacking a current one.
 
-        Embeds the abstract alone — not title + abstract concatenated. Titles
-        carry marketing-adjacent phrasing that pulls the vector toward the
-        claim's wording rather than the study's findings, which is exactly the
-        similarity we don't want to reward.
-        """
-        pending = [entry for entry in cached if not entry.had_embedding]
-        if not pending:
-            return
+async def write_chunks(
+    session: AsyncSession, embedder: EmbeddingProvider, abstracts: dict[str, str]
+) -> int:
+    """Chunk, embed and store each source's abstract, keyed by source id.
 
-        vectors = await self._embedder.embed_documents(
-            [entry.paper.abstract for entry in pending]
+    Replaces any chunks the source already had (they may come from another
+    model, or from a different chunk size), then records the model and
+    ``CHUNK_SETTINGS`` on the source. Returns how many chunks were written.
+    Shared with ``scripts/reembed_sources.py``, so both write chunks the same way.
+    """
+    chunks = [
+        (source_id, ordinal, text)
+        for source_id, abstract in abstracts.items()
+        for ordinal, text in enumerate(chunk_text(abstract))
+    ]
+    vectors = await embedder.embed_documents([text for _, _, text in chunks])
+    source_ids = list(abstracts)
+
+    await session.execute(delete(SourceChunk).where(SourceChunk.source_id.in_(source_ids)))
+    if chunks:
+        statement = pg_insert(SourceChunk).values(
+            [
+                {"source_id": source_id, "ordinal": ordinal, "content": text, "embedding": vector}
+                for (source_id, ordinal, text), vector in zip(chunks, vectors, strict=True)
+            ]
         )
-
-        for entry, vector in zip(pending, vectors, strict=True):
-            await self._session.execute(
-                update(Source)
-                .where(Source.id == entry.source_id)
-                .values(embedding=vector, embedding_model=self._embedder.model_id)
-            )
-
-        logger.info(
-            "embedded %d new abstracts (%s)", len(pending), self._embedder.model_id
+        # Another worker may be embedding the same new paper at the same time.
+        statement = statement.on_conflict_do_update(
+            index_elements=[SourceChunk.source_id, SourceChunk.ordinal],
+            set_={"content": statement.excluded.content, "embedding": statement.excluded.embedding},
         )
+        await session.execute(statement)
+    await session.execute(
+        update(Source)
+        .where(Source.id.in_(source_ids))
+        .values(embedding_model=embedder.model_id, chunk_settings=CHUNK_SETTINGS)
+    )
+    return len(chunks)
 
 
 def _match(paper: CandidatePaper, existing: dict[str, _ExistingRow]) -> _Match | None:
-    """The cached row this paper already has, if any.
+    """The cached row this paper already has, looked up by DOI and by PMID.
 
-    Looks up *both* identifiers. Each index is unique, so a paper matches at
-    most one row per identifier — and when it matches two *different* rows, the
-    cache is holding one paper twice, split under two identifier subsets by the
-    keying this module used to do.
-
-    Splits are reported, not repaired. Repair means re-pointing
-    ``article_sources`` and deleting a row that ``ON DELETE RESTRICT`` exists
-    to protect, so doing it here would let a cache refresh rewrite the
-    provenance of already-published articles as a side effect of fetching
-    abstracts. That is a maintenance job with its own transaction.
-
-    The DOI row wins, DOI being the more portable identifier and the one the
-    next run resolves to as well — so the choice is stable rather than
-    arbitrary, and the same article keeps citing the same source id.
+    When the two lookups find two different rows, the cache holds this paper
+    twice. That is logged, not repaired here: merging rows would mean
+    rewriting ``article_sources`` for published articles, which is a
+    maintenance job, not something a cache refresh should do on the side. The
+    DOI row wins, so the choice is stable from run to run.
     """
     by_doi = existing.get(f"doi:{paper.doi.strip().lower()}") if paper.doi else None
     by_pmid = existing.get(f"pmid:{paper.pmid.strip()}") if paper.pmid else None
 
-    split = by_doi is not None and by_pmid is not None and by_doi.id != by_pmid.id
-    if split:
-        assert by_doi is not None and by_pmid is not None
+    if by_doi is not None and by_pmid is not None and by_doi.id != by_pmid.id:
         logger.warning(
             "sources %s (doi=%s) and %s (pmid=%s) are the same paper held twice; "
             "using the DOI row. The duplicate needs merging out of band.",
@@ -364,6 +339,7 @@ def _match(paper: CandidatePaper, existing: dict[str, _ExistingRow]) -> _Match |
             by_pmid.id,
             by_pmid.pmid,
         )
+        return _Match(row=by_doi, split=True)
 
     row = by_doi or by_pmid
-    return None if row is None else _Match(row=row, split=split)
+    return None if row is None else _Match(row=row, split=False)

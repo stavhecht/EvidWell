@@ -16,8 +16,8 @@ producing two articles from 92 real cached papers. The caveat is now narrower an
 README → *Verification status*: the **hosted** providers (Claude, Voyage) have never been
 called, so their clients and the token accounting remain written-against-documentation.
 
-Deliberately deferred, per §11 of the brief: full-text retrieval and chunking, and the AWS
-deployment. The agentic query-refinement loop shipped 2026-09-07 as a LangGraph cycle around
+Deliberately deferred, per §11 of the brief: full-text retrieval, and the AWS
+deployment. (Abstracts are chunked for ranking — §4 — but full text is never fetched.) The agentic query-refinement loop shipped 2026-09-07 as a LangGraph cycle around
 RETRIEVE and RANK (§3.2); it is deterministic, so `LLMQueryStrategy` is still a declared seam
 that raises — the template strategy is still what runs.
 
@@ -930,9 +930,16 @@ they would lose a raw relevance race against fifty primary studies.
 ### Pass 2 — semantic re-rank (pgvector)
 
 1. Upsert each candidate into `sources` (cache hit → reuse the stored embedding).
-2. Embed any new abstracts. **Whole abstract, one vector, no chunking** — abstracts are short.
+2. Embed any new abstracts **in overlapping chunks**: 300-word windows, each repeating the last
+   30 words of the one before (`retrieval/chunking.py`), one vector per chunk in
+   `source_chunks`. The size is what fits the embedding model's 512-token window, so most
+   abstracts are one chunk and are embedded whole; a longer one is split instead of silently
+   truncated at the window, which would drop its results. The overlap means a sentence that
+   straddles a boundary still appears whole in the next chunk.
 3. Embed the claim text.
-4. Cosine-rank candidates against the claim embedding.
+4. Score each candidate by its **best** chunk's cosine similarity to the claim — one passage
+   that answers the claim is enough, and the rest of a long abstract cannot dilute it. The
+   model is still shown the whole abstract; chunks exist only for ranking.
 5. Apply metadata filters: evidence grade floor, recency window, minimum abstract length.
 6. Apply the review bonus, then take top-k (default k=8).
 
@@ -952,7 +959,7 @@ candidates: **206 statements per warm run before, 4 after.**
 The final score is deliberately not pure cosine similarity:
 
 ```
-score = cosine_similarity
+score = best_chunk_cosine_similarity
       + grade_bonus[study_type]     # meta-analysis/SR: +0.15, RCT: +0.08, obs: 0, in-vitro: -0.10
       + recency_bonus               # ≤5y: +0.03, tapering to 0 at 15y
 ```
@@ -1464,9 +1471,13 @@ The keyset cursor encodes the tier as well as `(published_at, id)`, so signing i
 mid-scroll hands back a cursor the other mode can still read. If personalised paging ever
 becomes hot the fix is a materialised tier column, not a different sort.
 - **`sources`** — `pmid`, `doi`, `title`, `abstract`, `journal`, `year`, `study_type`,
-  `citation_count`, `url`, `source_api`, `embedding vector(N)`, `last_seen_at`, plus the
+  `citation_count`, `url`, `source_api`, `embedding_model`, `chunk_settings`, `last_seen_at`, plus the
   retraction record: `retracted_at`, `concern_at`, `retraction_checked_at`, `retraction_note`
   (§4 — a NULL `retraction_checked_at` means *nobody successfully asked*, not "clean").
+- **`source_chunks`** — `(source_id, ordinal)`, `content`, `embedding vector(N)`. One row per
+  overlapping chunk of a source's abstract (§4, migration 0002); `sources.embedding_model`
+  and `sources.chunk_settings` (migration 0003) name the model that embedded them and how they
+  were cut.
 - **`article_sources`** — `(article_id, source_id, claim, citation_handle)`. Provenance.
 - **`pipeline_runs`** / **`pipeline_stage_runs`** — observability, plus the retry state
   (`attempts`, `next_attempt_at` on the run; `attempt` on each stage row, so a retry adds a
@@ -1502,7 +1513,8 @@ demonstrate either.
 whose status claims a human dealt with it has to name the human, so reopening a request must
 clear `handled_by` and `handled_at` or the row is refused.
 
-**There is deliberately no HNSW index on `sources.embedding`.** An earlier draft of the schema
+**There is deliberately no HNSW index on the vectors** — `sources.embedding` then,
+`source_chunks.embedding` since migration 0002, for the same reason. An earlier draft of the schema
 created one and nothing could ever use it. The only vector query is
 `rank_for_claim`, whose score is cosine + grade + recency, so top-k is applied in Python and no
 `LIMIT` reaches SQL; with a restrictive `id = ANY(...)` filter over one run's ~100 candidates,
@@ -1662,7 +1674,7 @@ the login throttle must keep reading the socket peer), and secrets from somewher
 `.env` file mounted into compose.
 
 ### Later, explicitly deferred
-Full-text retrieval + chunking (v2 §4); *model-generated* query refinement (the deterministic
+Full-text retrieval and full-text passages (v2 §4); *model-generated* query refinement (the deterministic
 broadening loop shipped 2026-09-07, see §3.2); multi-reviewer roles and invites; SerpApi
 fallback; Next.js port if SEO becomes a priority.
 

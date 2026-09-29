@@ -11,13 +11,17 @@ All backend commands run from `backend/` with the venv active (`source .venv/bin
 docker compose up -d db                  # pgvector/pgvector:pg16 on :5432
 pip install -e ".[dev]"
 python -m scripts.migrate                # applies migrations via asyncpg; no psql needed
-                                         # one file, 0001_initial.sql — squashed 2026-09-06,
+                                         # 0001_initial.sql — squashed 2026-09-06,
                                          # folding in what had been 0002–0006 (readers and the
                                          # contact inbox, subject and card image, generated
                                          # imagery, media_objects, trend discovery). Squashing
                                          # is only free while every database holding the schema
                                          # can be dropped and rebuilt; the file's header states
-                                         # that condition. From here, a schema change is 0002.
+                                         # that condition. 0002_source_chunks.sql moved the
+                                         # vectors into overlapping abstract chunks, and
+                                         # 0003_chunk_settings.sql records how each paper was
+                                         # cut (run reembed_sources --apply after either).
+                                         # Next is 0004.
 python -m scripts.migrate --status
 python -m scripts.seed_admin --email you@example.com --name "Your Name"
 
@@ -25,7 +29,8 @@ python -m scripts.seed_admin --email you@example.com --name "Your Name"
 python -m scripts.reclassify_sources          # after any classifier change
 python -m scripts.check_retractions           # re-check cited sources
 python -m scripts.check_retractions --scope all
-python -m scripts.reembed_sources             # after any EMBEDDING_PROVIDER / model change
+python -m scripts.reembed_sources             # after any EMBEDDING_PROVIDER / model /
+                                              # chunk-size change, and after 0002 and 0003
 python -m scripts.scan_trends                 # trend discovery; dry run makes the API calls
                                               # (same code as the console's Run scan button)
 python -m scripts.scan_trends --bootstrap --apply   # one-time, ~3 min: build the baseline
@@ -88,11 +93,11 @@ query planner. A green `pytest` with the DB down is a much weaker signal than it
 | Suite | What goes unverified when skipped |
 |---|---|
 | `test_db_invariants.py` | the CHECK constraint and the immutability trigger — invariants #1 and #4 |
-| `test_source_cache.py` | resolve-then-update, the `SAVEPOINT` retry, split-row reporting |
+| `test_source_cache.py` | resolve-then-update, the `SAVEPOINT` retry, split-row reporting, re-embedding replacing stale chunks, a new chunk size counting as stale |
 | `test_orchestrator_transactions.py` | per-stage commit, and persist+completion being atomic |
 | `test_worker_claim.py` | the claim `UPDATE`, and `attempts` counted at claim time |
 | `test_stale_recovery.py` | heartbeat sweep, requeue-vs-fail on a spent budget |
-| `test_rerank_plan.py` | the `EXPLAIN` assertion that no approximate scan is chosen |
+| `test_rerank_plan.py` | the `EXPLAIN` assertion that no approximate scan is chosen, and a paper scoring as its best chunk |
 | `test_reader_accounts.py` | the composite FK on `reader_saves`, the save-is-a-move primary key, folder-name uniqueness, and the contact `CHECK` |
 | `test_discovery_db.py` | the one-live-proposal-per-substance index, the observation ledger's idempotence, the three decision CHECKs, the descriptor FK that forces the scan's write order, and `pipeline_runs.origin` defaulting |
 
@@ -202,9 +207,37 @@ requeueing it once the budget is gone.
 
 **Retrieval: the scholarly APIs are the index; pgvector is re-rank plus cache.** Pass 1 fans
 out per claim across PubMed, Europe PMC, Semantic Scholar and OpenAlex, normalising into
-`CandidatePaper`. Pass 2 upserts into `sources`, embeds new abstracts whole (no chunking), and
-ranks by cosine + grade bonus + recency bonus. Those bonus constants in `retrieval/rerank.py`
-are explicitly tunable starting values, not settled numbers.
+`CandidatePaper`. Pass 2 upserts into `sources`, embeds new abstracts in overlapping chunks, and
+ranks by best-chunk cosine + grade bonus + recency bonus. Those bonus constants in
+`retrieval/rerank.py` are explicitly tunable starting values, not settled numbers.
+
+**Chunking is one function, `retrieval/chunking.py::chunk_text`: 300-word windows, each
+repeating the last 30 words of the one before.** The size is set by the embedding model, not
+chosen to force a split: 300 words is ~420 tokens, inside `mxbai-embed-large`'s 512-token
+window — and past that window Ollama truncates **silently**, dropping the end of a long
+abstract, which is usually its results. It was 120 words for a day (2026-09-29), which split
+94% of cached abstracts for no gain: the median is ~250 words and fits whole. At 300, three in
+four are one chunk and rank exactly as a whole-abstract vector did; only the long ones split.
+Every chunk gets its own vector in `source_chunks` (migration 0002), and a paper's similarity
+to a claim is its **best** chunk's — not the mean, which lets the rest of a long abstract
+dilute the one passage that answers the claim, and not the sum, which rewards length. The
+model is still shown the whole abstract; chunks exist only for ranking.
+
+`sources.embedding_model` and `sources.chunk_settings` (migration 0003) record which model
+embedded a paper's chunks and how they were cut, and a paper is current only when **both**
+match the live values — so editing `CHUNK_WORDS` re-chunks the cache instead of leaving it cut
+the old way forever. `cache.py::write_chunks` is the only writer: the pipeline and
+`scripts/reembed_sources.py` both go through it, and it deletes a paper's old chunks before
+writing new ones, so a shorter re-chunk cannot leave stale ordinals behind.
+
+**When full text arrives, rank on the abstract anyway.** Europe PMC serves full text for
+open-access papers — measured 2026-09-29, 144 of the 309 cached papers, one of them ~19,600
+words against ~250 for an abstract. That is where chunking is genuinely needed (the synthesis
+window cannot hold twelve full papers), but only half the papers have it, and best-chunk
+scoring over sixty chunks against three is a length bias: ranking would reward being open
+access, not being good evidence. Rank every paper on its abstract, then pull full-text
+passages only for the papers that already made the cut — the split `source_passages` in
+`0001_initial.sql` was sketched for.
 
 **Every query must name a substance, and failing to is a stage failure — not a warning.**
 `QueryStrategy.build()` takes `product` and `ingredients` separately: ingredients name the
@@ -248,11 +281,12 @@ long-lived and a bare rollback would discard the rest of the run. Matched-row re
 `UPDATE ... FROM (VALUES ...)` per batch, not per row; warm is the normal case, and the per-row
 loop made it the most expensive path instead of the cheapest.
 
-**The re-rank is an exact sort and there is no HNSW index.** Top-k
+**The re-rank is exact and there is no HNSW index.** Top-k
 is applied in Python after the grade bonus, so no `LIMIT` reaches SQL and the planner cannot
-choose an approximate scan — `tests/test_rerank_plan.py` pins this with `EXPLAIN`. Recreating
-the index means revisiting `rank_for_claim` first; `0001_initial.sql` records the statement and
-the condition that would justify it, commented beside the index it declines to create.
+choose an approximate scan — `tests/test_rerank_plan.py` pins this with `EXPLAIN`. That holds
+for `source_chunks` exactly as it did for the old `sources.embedding`: creating an index there
+means revisiting `rank_for_claim` first. `0001_initial.sql` records the statement and the
+condition that would justify one, commented beside the index it declines to create.
 
 **A throttled search must never look like an empty one.** Providers sit behind
 `retrieval/throttle.py` (per-provider token bucket + bounded retries honouring `Retry-After`),
@@ -1011,10 +1045,11 @@ generated by a separate model call, so card and article cannot contradict each o
 
 ## Deliberately out of scope
 
-Full-text retrieval and chunking, the agentic query-refinement loop, and the AWS deployment are
-deferred (DESIGN.md §11). `LLMQueryStrategy` is a declared seam that raises —
-`TemplateQueryStrategy` is what runs. A `source_passages` table sits commented in the migration
-so the FK direction is already settled.
+Full-text retrieval, the agentic query-refinement loop, and the AWS deployment are deferred
+(DESIGN.md §11). Abstracts are chunked (see Retrieval above); full text is not fetched at all.
+`LLMQueryStrategy` is a declared seam that raises — `TemplateQueryStrategy` is what runs. A
+`source_passages` table for full-text passages sits commented in `0001_initial.sql` so the FK
+direction is already settled.
 
 **What has and has not met a real response** (checked 2026-08-21; keep this honest, it is what
 tells you which code to trust):

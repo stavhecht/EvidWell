@@ -27,6 +27,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Integer,
     LargeBinary,
+    SmallInteger,
     String,
     Text,
     func,
@@ -124,7 +125,7 @@ class User(Base):
 
 
 class Source(Base):
-    """A cached paper. Also a row in the vector store."""
+    """A cached paper. Its vectors live in ``SourceChunk``, one per chunk."""
 
     __tablename__ = "sources"
 
@@ -140,13 +141,12 @@ class Source(Base):
     citation_count: Mapped[int | None] = mapped_column(Integer)
     url: Mapped[str | None] = mapped_column(Text)
     source_api: Mapped[str] = mapped_column(Text, nullable=False)
-    #: Null until the abstract has been embedded, or after a provider change
-    #: invalidates the old vector. Deliberately **not** indexed: the only
-    #: vector query re-ranks one run's candidates by id and sorts exactly, so
-    #: an ANN index cannot be chosen. The measurements are in
-    #: ``migrations/0001_initial.sql``, beside the index it declines to create.
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM))
+    #: The model that embedded this paper's chunks, and how they were cut
+    #: (``retrieval/chunking.py::CHUNK_SETTINGS``). Null until they are
+    #: embedded. If either differs from the live value, the chunks are
+    #: out of date and get re-made.
     embedding_model: Mapped[str | None] = mapped_column(Text)
+    chunk_settings: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -181,6 +181,24 @@ class Source(Base):
         if self.doi:
             return f"https://doi.org/{self.doi}"
         return f"https://pubmed.ncbi.nlm.nih.gov/{self.pmid}/"
+
+
+class SourceChunk(Base):
+    """One overlapping piece of a source's abstract, with its own vector.
+
+    Written by ``retrieval/cache.py``, read by ``retrieval/rerank.py``, which
+    scores a paper by its best chunk. Deliberately not ANN-indexed; see
+    ``migrations/0002_source_chunks.sql``.
+    """
+
+    __tablename__ = "source_chunks"
+
+    source_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("sources.id", ondelete="CASCADE"), primary_key=True
+    )
+    ordinal: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIM), nullable=False)
 
 
 class Article(Base):
