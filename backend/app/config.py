@@ -14,6 +14,10 @@ from functools import lru_cache
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+#: Weakest to strongest. Mirrored by ``research/contracts.py::EvidenceStatus``;
+#: kept as strings here so config does not import the research package.
+_EVIDENCE_STATUSES = ("none", "limited", "emerging", "moderate", "strong")
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -115,6 +119,11 @@ class Settings(BaseSettings):
     retrieval_top_k: int = 12
     retrieval_max_candidates_per_claim: int = 50
     retrieval_min_year: int | None = None
+    #: How many open-access papers per article get full-text excerpts in the
+    #: synthesis prompt (pipeline/steps/full_text.py). 0 turns full text off.
+    #: Six papers at two ~300-word excerpts each is about 5,000 prompt tokens;
+    #: raising it eats into the same Ollama context window as `retrieval_top_k`.
+    full_text_max_papers: int = 6
 
     # --- pipeline ---
     worker_poll_interval_seconds: float = 5.0
@@ -263,6 +272,97 @@ class Settings(BaseSettings):
     #: window that will end up owning them, and re-reading a covered window is
     #: free (`discovery_observations` is ON CONFLICT DO NOTHING).
     discovery_scan_interval_hours: int = 24
+    #: How long an observation stays in the ledger, by entrez_date. The scorer
+    #: reads the current window plus `discovery_baseline_windows` before it
+    #: (98 days at the defaults) and angles read `discovery_angle_lookback_days`
+    #: (90); nothing reads further back, so a succeeded scan deletes older rows.
+    #: Measured 2026-09-30: 51% of the ledger was past this and never read. The
+    #: validator below keeps it above what the scorer needs.
+    discovery_observation_retention_days: int = 120
+
+    # --- research agent (internet trends -> evidence-scored proposals) ---
+    # See app/research/ and DESIGN.md "Research agent". A research run
+    # *proposes*: it never enqueues a pipeline run, exactly like the MeSH scan
+    # above. These are the only definitions of these values — the graph, the
+    # scorer and the API read them from here.
+    #: How many topics a run selects for the desk. Clamped to [min, max] when a
+    #: request asks for a specific number.
+    research_target_article_count: int = 5
+    research_min_article_count: int = 4
+    research_max_article_count: int = 6
+    #: Candidates kept after clustering and the wellness filter, and the number
+    #: that get the cheap signals (trend, news, science counts).
+    research_max_candidates: int = 50
+    #: Candidates given a web search (~8 s each). The shortlist is drawn from
+    #: these, so it must be at least `research_shortlist_size`.
+    research_web_pool_size: int = 20
+    #: Candidates that get deep research: extraction plus the anchored query
+    #: the article pipeline will actually run.
+    research_shortlist_size: int = 10
+    research_trend_window_days: int = 7
+    research_news_window_days: int = 7
+    research_scientific_window_days: int = 365
+    #: Scoring weights. Must sum to 1 (checked below). A component with no data
+    #: is dropped and the rest renormalised — never filled in.
+    research_weight_trend: float = 0.30
+    research_weight_news: float = 0.15
+    research_weight_evidence: float = 0.25
+    research_weight_source_quality: float = 0.10
+    research_weight_reader_interest: float = 0.15
+    research_weight_novelty: float = 0.05
+    #: The weakest evidence a selected topic may rest on:
+    #: none < limited < emerging < moderate < strong.
+    research_min_evidence_status: str = "emerging"
+    #: Relevant web results + news articles below which a topic has too little
+    #: material to research. Applied only when either signal was available.
+    research_min_sources: int = 5
+    #: Cosine similarity at which two trend queries are one topic.
+    research_cluster_threshold: float = 0.88
+    #: Cosine similarity at which a candidate repeats a recent article or an
+    #: earlier decision and is discarded rather than re-proposed.
+    research_duplicate_threshold: float = 0.92
+    #: How far back "recent" reaches for that check.
+    research_novelty_lookback_days: int = 180
+    #: A stable, mid-popularity term put in every Google Trends comparison so
+    #: interest levels from different 5-term requests share one scale.
+    research_trends_anchor: str = "vitamin d"
+    #: Seconds between Google Trends requests. It 429s readily; be patient.
+    research_trends_request_interval_seconds: float = 4.0
+    #: Rising queries whose own related queries are fetched as an expansion.
+    research_expand_top: int = 5
+    research_geo: str = "US"
+    research_language: str = "en"
+    #: Domains whose results count toward `source_quality`. A suffix match, so
+    #: ".gov" covers every US government site.
+    research_authoritative_domains: list[str] = [
+        ".gov",
+        ".edu",
+        "nih.gov",
+        "who.int",
+        "nhs.uk",
+        "cdc.gov",
+        "mayoclinic.org",
+        "clevelandclinic.org",
+        "hopkinsmedicine.org",
+        "health.harvard.edu",
+        "examine.com",
+        "cochrane.org",
+        "bmj.com",
+        "thelancet.com",
+        "jamanetwork.com",
+        "nature.com",
+        "sciencedirect.com",
+        "europepmc.org",
+    ]
+    #: newsapi.org key. Empty means the keyless DuckDuckGo news fallback.
+    news_api_key: str = ""
+    #: Candidates nobody promoted or dismissed are deleted this long after their
+    #: run finished. Novelty reads only decided candidates, so undecided ones
+    #: from an old run are never read again — and a run writes ~45 of them.
+    research_retention_days: int = 60
+    #: Shared secret for /api/automation/* (n8n). Empty disables that router
+    #: entirely — it answers 404 — so an unconfigured deployment exposes nothing.
+    research_trigger_token: str = ""
 
     # --- article media ---
     #: Per-file ceiling. Generous for a photo, small enough that a stray upload
@@ -309,9 +409,18 @@ class Settings(BaseSettings):
     #: severe one on half of them.
     image_cover_width: int = 864
     image_cover_height: int = 1152
+    #: 'crop' | 'render'. 'crop' renders the lead once and centre-crops the
+    #: cover out of it (to the cover's aspect ratio): one billed render per
+    #: article instead of two, and the two frames are provably one photograph.
+    #: 'render' draws the cover as a second generation at the cover size.
+    image_cover_mode: str = "crop"
 
     @field_validator(
-        "cors_origins", "enabled_providers", "discovery_seeds", mode="before"
+        "cors_origins",
+        "enabled_providers",
+        "discovery_seeds",
+        "research_authoritative_domains",
+        mode="before",
     )
     @classmethod
     def _split_csv(cls, value: object) -> object:
@@ -380,6 +489,77 @@ class Settings(BaseSettings):
                 "single missed scan leaves a permanent hole in the baseline that "
                 "reads as a surge."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _research_settings_are_consistent(self) -> Settings:
+        """Refuse a research configuration that cannot mean what it says.
+
+        Weights not summing to one would make ``overall`` a number on no
+        particular scale; a min above the max, or a shortlist larger than the
+        pool it is drawn from, would silently shrink every run.
+        """
+        weights = (
+            self.research_weight_trend
+            + self.research_weight_news
+            + self.research_weight_evidence
+            + self.research_weight_source_quality
+            + self.research_weight_reader_interest
+            + self.research_weight_novelty
+        )
+        if abs(weights - 1.0) > 1e-6:
+            raise ValueError(f"research_weight_* must sum to 1, got {weights:.4f}")
+        if not (
+            1
+            <= self.research_min_article_count
+            <= self.research_target_article_count
+            <= self.research_max_article_count
+        ):
+            raise ValueError(
+                "research article counts must satisfy 1 <= min <= target <= max, got "
+                f"{self.research_min_article_count} / {self.research_target_article_count}"
+                f" / {self.research_max_article_count}"
+            )
+        if self.research_shortlist_size > self.research_web_pool_size:
+            raise ValueError(
+                f"research_shortlist_size ({self.research_shortlist_size}) must not "
+                f"exceed research_web_pool_size ({self.research_web_pool_size})"
+            )
+        if self.research_min_evidence_status not in _EVIDENCE_STATUSES:
+            raise ValueError(
+                f"research_min_evidence_status must be one of {_EVIDENCE_STATUSES}, "
+                f"got {self.research_min_evidence_status!r}"
+            )
+        if self.research_trigger_token and len(self.research_trigger_token) < 32:
+            raise ValueError(
+                "research_trigger_token must be at least 32 characters; it is the "
+                "only thing guarding /api/automation/*"
+            )
+        if self.image_cover_mode not in ("crop", "render"):
+            raise ValueError(
+                f"image_cover_mode must be 'crop' or 'render', got {self.image_cover_mode!r}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _retention_covers_what_is_read(self) -> Settings:
+        """Pruning must never delete a row the scorer or the angle lookup reads.
+
+        Too short, and the baseline silently loses its oldest buckets — every
+        substance's mean drops, and the next window reads as a surge.
+        """
+        needed = max(
+            self.discovery_window_days * (self.discovery_baseline_windows + 1),
+            self.discovery_angle_lookback_days,
+        )
+        if self.discovery_observation_retention_days < needed:
+            raise ValueError(
+                f"discovery_observation_retention_days "
+                f"({self.discovery_observation_retention_days}) must be at least {needed}: "
+                "the baseline windows and the angle lookback read that far back"
+            )
+        if self.research_retention_days < 1:
+            raise ValueError("research_retention_days must be at least 1")
         return self
 
     def validate_embedding_dim(self, provider_dimension: int) -> None:

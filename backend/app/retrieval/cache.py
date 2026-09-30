@@ -114,7 +114,9 @@ class SourceCache:
         phrasing that pulls the vector toward the claim's wording rather than
         toward what the study found.
         """
-        pending = {entry.source_id: entry.paper.abstract for entry in cached if not entry.had_embedding}
+        pending = {
+            entry.source_id: entry.paper.abstract for entry in cached if not entry.had_embedding
+        }
         if pending:
             count = await write_chunks(self._session, self._embedder, pending)
             logger.info(
@@ -221,7 +223,9 @@ class SourceCache:
             column("doi", Text),
             column("citation_count", Integer),
             name="incoming",
-        ).data([(row.id, paper.pmid, paper.doi, paper.citation_count) for row, paper in matched])
+        ).data(
+            [(row.id, paper.pmid, paper.doi, paper.citation_count) for row, paper in matched]
+        )
 
         assignments: dict[str, Any] = {
             "last_seen_at": datetime.now(UTC),
@@ -300,14 +304,14 @@ async def write_chunks(
     if chunks:
         statement = pg_insert(SourceChunk).values(
             [
-                {"source_id": source_id, "ordinal": ordinal, "content": text, "embedding": vector}
-                for (source_id, ordinal, text), vector in zip(chunks, vectors, strict=True)
+                {"source_id": source_id, "ordinal": ordinal, "embedding": vector}
+                for (source_id, ordinal, _), vector in zip(chunks, vectors, strict=True)
             ]
         )
         # Another worker may be embedding the same new paper at the same time.
         statement = statement.on_conflict_do_update(
             index_elements=[SourceChunk.source_id, SourceChunk.ordinal],
-            set_={"content": statement.excluded.content, "embedding": statement.excluded.embedding},
+            set_={"embedding": statement.excluded.embedding},
         )
         await session.execute(statement)
     await session.execute(

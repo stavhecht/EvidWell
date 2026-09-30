@@ -75,25 +75,9 @@ def build_providers(
     for name in settings.enabled_providers:
         match name.strip().lower():
             case "pubmed":
-                api_key = settings.pubmed_api_key or None
-                providers.append(
-                    PubMedProvider(
-                        throttled_client(
-                            settings,
-                            http,
-                            "pubmed",
-                            PUBMED_KEYED_RPS if api_key else PUBMED_ANONYMOUS_RPS,
-                            detect_throttle=detect_throttle,
-                        ),
-                        api_key,
-                    )
-                )
+                providers.append(build_pubmed_provider(settings, http))
             case "europe_pmc":
-                providers.append(
-                    EuropePMCProvider(
-                        throttled_client(settings, http, "europe_pmc", EUROPE_PMC_RPS)
-                    )
-                )
+                providers.append(build_europe_pmc_provider(settings, http))
             case "semantic_scholar":
                 api_key = settings.semantic_scholar_api_key or None
                 if not api_key:
@@ -138,6 +122,43 @@ def build_providers(
 
     logger.info("retrieval providers: %s", ", ".join(p.source_api for p in providers))
     return providers
+
+
+def build_pubmed_provider(settings: Settings, http: httpx.AsyncClient) -> PubMedProvider:
+    """PubMed behind its own throttle, keyed or anonymous.
+
+    Also used by the research agent, which counts papers per topic. Built per
+    caller, so each gets its own limiter — safe only because the worker runs a
+    research run and a pipeline run one after the other, never together.
+    """
+    api_key = settings.pubmed_api_key or None
+    return PubMedProvider(
+        throttled_client(
+            settings,
+            http,
+            "pubmed",
+            PUBMED_KEYED_RPS if api_key else PUBMED_ANONYMOUS_RPS,
+            detect_throttle=detect_throttle,
+        ),
+        api_key,
+    )
+
+
+def build_europe_pmc_provider(
+    settings: Settings, http: httpx.AsyncClient
+) -> EuropePMCProvider:
+    return EuropePMCProvider(throttled_client(settings, http, "europe_pmc", EUROPE_PMC_RPS))
+
+
+def build_europe_pmc_client(settings: Settings, http: httpx.AsyncClient) -> HttpClient:
+    """The throttled client behind the PMID lookup and the full-text client.
+
+    One limiter for both, and separate from the Europe PMC *search* provider's.
+    Safe because none of the three overlap: RETRIEVE fills in PMIDs after its
+    searches have returned, FULL_TEXT runs after RETRIEVE has finished, and a
+    worker runs one pipeline at a time.
+    """
+    return throttled_client(settings, http, "europe_pmc", EUROPE_PMC_RPS)
 
 
 def throttled_client(

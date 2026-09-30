@@ -48,6 +48,26 @@ from app.pipeline.stages import PipelineContext, Stage, StageName
 #: already produces, not a third query.
 MAX_REFINE_ROUNDS = 1
 
+#: How many times a draft that failed validation is sent back to SYNTHESIZE
+#: with its failures. One: the failures are specific ("S9 was never provided",
+#: "beat 2 cites nothing"), so a model that can fix them does so on the first
+#: try, and a second failure is a draft that stays ``validation_failed`` — the
+#: invariant is that a failing draft never reaches the queue, not that every
+#: topic produces one.
+MAX_REVISE_ROUNDS = 1
+
+#: Failure codes a rewrite can fix. ``unresolvable_source`` is not one: it
+#: means a cited handle's ``sources`` row is missing, which is ours to fix.
+REVISABLE_FAILURES = frozenset(
+    {
+        "hallucinated_handle",
+        "uncited_beat",
+        "uncited_section",
+        "verdict_exceeds_grade",
+        "malformed_body",
+    }
+)
+
 #: Extra supersteps allowed beyond the stages themselves, covering the refine
 #: node and the re-run of RETRIEVE and RANK on each round. Set from the shape of
 #: the graph rather than left at LangGraph's default, so that adding a stage
@@ -85,6 +105,7 @@ def build_pipeline_graph(
     runner: StageRunner,
     *,
     max_refine_rounds: int = MAX_REFINE_ROUNDS,
+    max_revise_rounds: int = MAX_REVISE_ROUNDS,
 ) -> Any:
     """Compile the stage list into a graph, with the refinement cycle if it fits.
 
@@ -109,6 +130,15 @@ def build_pipeline_graph(
         and max_refine_rounds > 0
     )
 
+    synthesize_at = _index_of(stages, StageName.SYNTHESIZE)
+    validate_at = _index_of(stages, StageName.VALIDATE)
+    revises = (
+        synthesize_at is not None
+        and validate_at is not None
+        and synthesize_at < validate_at
+        and max_revise_rounds > 0
+    )
+
     for index in range(len(stages)):
         following = names[index + 1] if index + 1 < len(stages) else END
         if loops and index == rank_at:
@@ -119,18 +149,44 @@ def build_pipeline_graph(
                 _router(max_refine_rounds),
                 {_REFINE: _REFINE, _CONTINUE: following},
             )
+        elif revises and index == validate_at:
+            graph.add_node(_REVISE, _revise_node)
+            graph.add_edge(_REVISE, names[synthesize_at])  # type: ignore[index]
+            graph.add_conditional_edges(
+                names[index],
+                _revise_router(max_revise_rounds),
+                {_REVISE: _REVISE, _CONTINUE: following},
+            )
         else:
             graph.add_edge(names[index], following)
 
     return graph.compile()
 
 
-def recursion_limit(stages: list[Stage], max_refine_rounds: int) -> int:
-    """Enough supersteps for every stage plus each refinement pass, and no more."""
-    return len(stages) + max_refine_rounds * _STEPS_PER_REFINEMENT + 2
+def recursion_limit(
+    stages: list[Stage], max_refine_rounds: int, max_revise_rounds: int = MAX_REVISE_ROUNDS
+) -> int:
+    """Enough supersteps for every stage plus each loop's passes, and no more.
+
+    A revision re-runs everything from SYNTHESIZE to VALIDATE, plus its own node.
+    """
+    synthesize_at = _index_of(stages, StageName.SYNTHESIZE)
+    validate_at = _index_of(stages, StageName.VALIDATE)
+    per_revision = (
+        validate_at - synthesize_at + 2
+        if synthesize_at is not None and validate_at is not None
+        else 0
+    )
+    return (
+        len(stages)
+        + max_refine_rounds * _STEPS_PER_REFINEMENT
+        + max_revise_rounds * per_revision
+        + 2
+    )
 
 
 _REFINE = "refine"
+_REVISE = "revise"
 _CONTINUE = "continue"
 
 
@@ -169,6 +225,32 @@ def _router(max_refine_rounds: int) -> Callable[[GraphState], str]:
         ctx = state["ctx"]
         if ctx.thin_claims and ctx.refine_round < max_refine_rounds:
             return _REFINE
+        return _CONTINUE
+
+    return route
+
+
+async def _revise_node(state: GraphState) -> dict[str, PipelineContext]:
+    """Bump the revision counter; SYNTHESIZE reads the failed report off ``ctx``.
+
+    Like ``_refine_node``: no stage row, no commit, no model call.
+    """
+    ctx = state["ctx"]
+    return {"ctx": ctx.model_copy(update={"revise_round": ctx.revise_round + 1})}
+
+
+def _revise_router(max_revise_rounds: int) -> Callable[[GraphState], str]:
+    def route(state: GraphState) -> str:
+        ctx = state["ctx"]
+        report = ctx.validation
+        if (
+            report is not None
+            and not report.passed
+            and ctx.revise_round < max_revise_rounds
+            and report.failures
+            and all(failure.code in REVISABLE_FAILURES for failure in report.failures)
+        ):
+            return _REVISE
         return _CONTINUE
 
     return route

@@ -6,7 +6,9 @@ For each claim:
   3. Drop trial protocols and retracted papers.
 Then, across all claims:
   4. Merge duplicate papers (``retrieval/dedup.py``).
-  5. Save them to the cache and embed new abstracts in chunks
+  5. Fill in the PMID of any paper that arrived with only a DOI, when Europe
+     PMC knows one (``retrieval/identifiers.py``), and merge again.
+  6. Save them to the cache and embed new abstracts in chunks
      (``retrieval/cache.py``).
 
 Three outcomes for a claim, deliberately kept apart:
@@ -32,9 +34,10 @@ from app.domain.contracts import CachedCandidate, CandidatePaper, ExtractionOutp
 from app.domain.enums import SourceApi
 from app.evidence.grading import is_protocol, is_retracted
 from app.pipeline.stages import PipelineContext, StageError, StageName
-from app.retrieval.base import RateLimited, ScholarlyProvider, SearchQuery
+from app.retrieval.base import ProviderError, RateLimited, ScholarlyProvider, SearchQuery
 from app.retrieval.cache import CachedSource, SourceCache
 from app.retrieval.dedup import merge_candidates, unique_papers
+from app.retrieval.identifiers import PmidResolver
 from app.retrieval.query_builder import QueryStrategy, UnanchoredQuery
 
 logger = logging.getLogger(__name__)
@@ -62,11 +65,13 @@ class RetrieveStage:
         strategy: QueryStrategy,
         cache: SourceCache,
         max_candidates_per_claim: int = 50,
+        resolver: PmidResolver | None = None,
     ) -> None:
         self._providers = providers
         self._strategy = strategy
         self._cache = cache
         self._max_candidates = max_candidates_per_claim
+        self._resolver = resolver
 
     async def run(self, ctx: PipelineContext) -> PipelineContext:
         if ctx.extraction is None:
@@ -100,10 +105,12 @@ class RetrieveStage:
 
         # Step 4. Across all claims at once, so a paper answering two claims
         # is the same merged record in both lists.
-        candidates = {
-            claim: papers[: self._max_candidates]
-            for claim, papers in merge_candidates(found).items()
-        }
+        merged = merge_candidates(found)
+
+        # Step 5. Before the cap, so a paper that turns out to be a duplicate
+        # frees its slot for the next one.
+        merged, pmid_metrics = await self._fill_pmids(merged)
+        candidates = {claim: papers[: self._max_candidates] for claim, papers in merged.items()}
         for claim, papers in candidates.items():
             logger.info(
                 "claim %r: %d raw -> %d deduped candidates",
@@ -112,7 +119,7 @@ class RetrieveStage:
                 len(papers),
             )
 
-        # Step 5.
+        # Step 6.
         unique = unique_papers(candidates)
         cached = await self._cache.upsert_many(unique)
         await self._cache.ensure_embeddings(cached)
@@ -140,9 +147,59 @@ class RetrieveStage:
                 "cache_hits": sum(1 for entry in cached if entry.had_embedding),
                 "refine_round": ctx.refine_round,
                 "claims_searched": len(claims),
+                **pmid_metrics,
             },
         )
         return ctx.model_copy(update={"candidates": paired})
+
+    async def _fill_pmids(
+        self, merged: dict[str, list[CandidatePaper]]
+    ) -> tuple[dict[str, list[CandidatePaper]], dict[str, object]]:
+        """Step 5. Give a DOI-only paper its PMID, when one exists.
+
+        Without it the paper is invisible to the full-text lookup and to the
+        retraction sweep, and a PubMed-only record of the same paper stays a
+        second candidate that the model would cite as independent support. So
+        the merge runs again once PMIDs are in: a DOI-only and a PMID-only
+        record of one paper only unify when something carries both.
+
+        Never fails the stage. A lookup that could not run leaves every paper
+        exactly as its provider reported it, which is how retrieval worked
+        before this step existed; ``pmid_lookup_failed`` records it.
+        """
+        dois = sorted(
+            {
+                paper.doi.strip().lower()
+                for papers in merged.values()
+                for paper in papers
+                if paper.doi and not paper.pmid
+            }
+        )
+        if self._resolver is None or not dois:
+            return merged, {"dois_without_pmid": len(dois), "pmids_filled": 0}
+
+        try:
+            found = await self._resolver.pmids_for_dois(dois)
+        except ProviderError as exc:
+            logger.warning("PMID lookup for %d DOI-only papers failed: %s", len(dois), exc)
+            return merged, {
+                "dois_without_pmid": len(dois),
+                "pmids_filled": 0,
+                "pmid_lookup_failed": str(exc),
+            }
+
+        def filled(paper: CandidatePaper) -> CandidatePaper:
+            if paper.pmid or not paper.doi:
+                return paper
+            pmid = found.get(paper.doi.strip().lower())
+            return paper.model_copy(update={"pmid": pmid}) if pmid else paper
+
+        if found:
+            logger.info("filled PMIDs for %d of %d DOI-only papers", len(found), len(dois))
+            merged = merge_candidates(
+                {claim: [filled(paper) for paper in papers] for claim, papers in merged.items()}
+            )
+        return merged, {"dois_without_pmid": len(dois), "pmids_filled": len(found)}
 
     def _build_queries(
         self, compose: ComposeQueries, claim: str, extraction: ExtractionOutput

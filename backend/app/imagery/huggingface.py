@@ -21,26 +21,15 @@ anyway.
 from __future__ import annotations
 
 import asyncio
-import io
 import logging
 from typing import Any, cast
 
 from app.imagery.base import ImageError, ImageRequest, RenderedImage
+from app.imagery.encode import WEBP_CONTENT_TYPE, encode_webp
 
 logger = logging.getLogger(__name__)
 
 PROVIDER = "huggingface"
-
-#: WebP, at a quality that is visually indistinguishable from the PNG the
-#: provider returns and roughly a tenth the size. It matters twice: these files
-#: are served from our own origin on every feed render, and ``store_image``
-#: caps a file at ``media_max_bytes``. ``method=6`` is the slowest, smallest
-#: encoder setting — worth it here because encoding happens once and the result
-#: is content-addressed forever.
-WEBP_QUALITY = 82
-WEBP_METHOD = 6
-WEBP_CONTENT_TYPE = "image/webp"
-
 
 def qualified(model: str) -> str:
     """``huggingface/black-forest-labs/FLUX.1-schnell``.
@@ -86,7 +75,7 @@ class HuggingFaceImageClient:
                 likely first-run failure and reads nothing like a timeout.
         """
         image = await self._generate(request)
-        data, width, height = await asyncio.to_thread(_encode_webp, image)
+        data, width, height = await asyncio.to_thread(encode_webp, image)
         if (width, height) != (request.width, request.height):
             # Not fatal: the picture is fine, it is just not the shape asked
             # for, and the caller decides whether a mis-shaped cover is worth
@@ -144,27 +133,3 @@ class HuggingFaceImageClient:
                     await close()
                 except Exception:
                     logger.debug("closing the inference client failed", exc_info=True)
-
-
-def _encode_webp(image: Any) -> tuple[bytes, int, int]:
-    """PIL image -> (webp bytes, width, height). Runs off the event loop.
-
-    Dimensions are read off the decoded image rather than echoed from the
-    request, so a provider that rounded to its own grid is caught rather than
-    believed.
-    """
-    from PIL import Image
-
-    if not isinstance(image, Image.Image):
-        raise ImageError(f"expected an image from the provider, got {type(image).__name__}")
-
-    # WebP has no alpha problem, but a P- or LA-mode image encodes poorly and a
-    # CMYK one not at all. RGB is what every one of these renders is anyway.
-    prepared = image if image.mode == "RGB" else image.convert("RGB")
-
-    buffer = io.BytesIO()
-    try:
-        prepared.save(buffer, format="WEBP", quality=WEBP_QUALITY, method=WEBP_METHOD)
-    except Exception as exc:
-        raise ImageError(f"could not encode the render as WebP: {exc}") from exc
-    return buffer.getvalue(), prepared.width, prepared.height

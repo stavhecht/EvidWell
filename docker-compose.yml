@@ -175,6 +175,42 @@ services:
     depends_on:
       - backend
 
+  # When research runs happen: a weekly schedule and a manual webhook, both
+  # calling POST /api/automation/research/runs. The research itself (trends,
+  # scoring, evidence checks) is in app/research — n8n only decides *when*.
+  # Behind a profile so `docker compose up` is unchanged:
+  #
+  #   docker compose --profile automation up -d n8n
+  #   docker compose exec n8n n8n import:workflow --separate --input=/workflows
+  #
+  # See n8n/README.md. RESEARCH_TRIGGER_TOKEN must match the backend's; both
+  # read it from the repo-root .env. Not the whole .env as an env_file: n8n has
+  # no business holding the Anthropic, Voyage or Hugging Face keys.
+  n8n:
+    image: n8nio/n8n:2.41.4
+    profiles: ["automation"]
+    ports:
+      # Loopback only: the manual webhook starts a research run for anyone who
+      # can reach it.
+      - "127.0.0.1:5678:5678"
+    environment:
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-UTC}
+      TZ: ${GENERIC_TIMEZONE:-UTC}
+      # The workflows read the API URL, the token and the cron from $env.
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      N8N_SECURE_COOKIE: "false"
+      # The backend service in this stack; set it to
+      # http://host.docker.internal:8000 when the API runs in a host venv.
+      EVIDWELL_API_URL: ${EVIDWELL_API_URL:-http://backend:8000}
+      RESEARCH_TRIGGER_TOKEN: ${RESEARCH_TRIGGER_TOKEN:-}
+      RESEARCH_WEEKLY_CRON: ${RESEARCH_WEEKLY_CRON:-0 8 * * 0}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - evidwell_n8n:/home/node/.n8n
+      - ./n8n/workflows:/workflows:ro
+
 volumes:
   evidwell_pgdata:
   evidwell_node_modules:
+  evidwell_n8n:

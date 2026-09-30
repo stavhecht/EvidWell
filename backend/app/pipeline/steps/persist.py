@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.contracts import ValidationFailure
+from app.domain.contracts import SynthesisInput, ValidationFailure
 from app.domain.enums import ArticleStatus
 from app.domain.models import Article, ArticleSource
 from app.evidence.validation import summarise_failures, validate_draft
@@ -87,7 +87,9 @@ class PersistStage:
         report = ctx.validation
 
         # A body we cannot render is a draft problem, not a system problem —
-        # record it as a validation failure rather than raising.
+        # record it as a validation failure rather than raising. VALIDATE
+        # already runs this parse (`check_body_parses`), so the report normally
+        # carries the failure already; this is the backstop, not the check.
         try:
             content = body_text_to_doc(
                 ctx.draft.body,
@@ -104,15 +106,20 @@ class PersistStage:
             )
         except MalformedBodyError as exc:
             content = {"type": "doc", "content": []}
-            report = report.model_copy(
-                update={
-                    "passed": False,
-                    "failures": [
-                        *report.failures,
-                        ValidationFailure(code="malformed_body", message=str(exc)),
-                    ],
-                }
-            )
+            if not any(failure.code == "malformed_body" for failure in report.failures):
+                report = report.model_copy(
+                    update={
+                        "passed": False,
+                        "failures": [
+                            *report.failures,
+                            ValidationFailure(
+                                code="malformed_body",
+                                message=str(exc),
+                                detail={"where": exc.where, "text": exc.text},
+                            ),
+                        ],
+                    }
+                )
 
         article_status = (
             ArticleStatus.PENDING_REVIEW if report.passed else ArticleStatus.VALIDATION_FAILED
@@ -122,7 +129,6 @@ class PersistStage:
             slug=_slugify(ctx.draft.headline),
             status=article_status,
             topic=ctx.topic,
-            source_blurb=ctx.blurb,
             product=ctx.extraction.product,
             target_claims=ctx.extraction.target_claims,
             ingredients=ctx.extraction.ingredients,
@@ -160,6 +166,7 @@ class PersistStage:
         # union is still right where it is used: hallucination and resolution
         # checks must see every handle the model emitted anywhere.
         cited = ctx.draft.body.cited_handles()
+        excerpts = excerpts_shown(ctx.synthesis_input)
         seen: set[tuple[str, str]] = set()
         for claim, ranked in ctx.ranked.items():
             for entry in ranked:
@@ -179,6 +186,7 @@ class PersistStage:
                         # catch.
                         was_cited=entry.citation_handle in cited,
                         relevance_score=entry.final_score,
+                        excerpts=excerpts.get(entry.source_id),
                     )
                 )
 
@@ -203,6 +211,25 @@ class PersistStage:
         )
 
         return ctx.model_copy(update={"article_id": article.id, "validation": report})
+
+
+def excerpts_shown(
+    synthesis_input: SynthesisInput | None,
+) -> dict[str, list[dict[str, str | None]]]:
+    """The full-text excerpts each source carried in the prompt, by source id.
+
+    Read from ``synthesis_input`` — exactly what the model saw — rather than
+    from ``ctx.excerpts``, for the same reason VALIDATE checks handles against
+    it: a second reconstruction is free to drift from the first. Sources shown
+    without excerpts are absent, so their column stays NULL.
+    """
+    if synthesis_input is None:
+        return {}
+    return {
+        source.source_id: [excerpt.model_dump() for excerpt in source.excerpts]
+        for source in synthesis_input.sources
+        if source.excerpts
+    }
 
 
 def _slugify(headline: str) -> str:

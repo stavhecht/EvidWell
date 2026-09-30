@@ -13,6 +13,8 @@ import type {
   Subject,
   MediaUpload,
   QueueItem,
+  ResearchRun,
+  ResearchRunRequest,
   Reviewer,
   RunPage,
   TipTapDoc,
@@ -32,6 +34,9 @@ export const consoleKeys = {
   candidates: ["console", "candidates"] as const,
   /** The manual scan's state. Polled only while one is running. */
   trendScan: ["console", "trend-scan"] as const,
+  /** Research runs, newest first; and one run with its candidates. */
+  researchRuns: ["console", "research-runs"] as const,
+  researchRun: (id: string) => ["console", "research-run", id] as const,
 };
 
 /**
@@ -274,4 +279,40 @@ export async function fetchTrendScan(): Promise<TrendScan> {
  */
 export async function startTrendScan(): Promise<TrendScan> {
   return apiFetch("/console/discovery/scan", { method: "POST" });
+}
+
+// --- research agent ----------------------------------------------------------
+
+/**
+ * Find trending topics now. The same call n8n's weekly schedule makes.
+ *
+ * 202: a run is minutes of Google Trends, search, news and PubMed requests, so
+ * the caller polls `fetchResearchRun`. It proposes topics and generates no
+ * drafts. A 409 means a research run is already queued or running.
+ */
+export async function startResearchRun(request: ResearchRunRequest = {}): Promise<ResearchRun> {
+  return apiFetch("/console/research/runs", {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+}
+
+export async function fetchResearchRuns(limit = 5): Promise<ResearchRun[]> {
+  return apiFetch(`/console/research/runs${qs({ limit })}`);
+}
+
+export async function fetchResearchRun(id: string): Promise<ResearchRun> {
+  return apiFetch(`/console/research/runs/${id}`);
+}
+
+/** Turn a proposed topic into a queued generation run — the step that spends. */
+export async function promoteResearchCandidate(id: string): Promise<{ id: string }> {
+  return apiFetch(`/console/research/candidates/${id}/promote`, { method: "POST" });
+}
+
+export async function dismissResearchCandidate(id: string, reason: string): Promise<void> {
+  return apiFetch(`/console/research/candidates/${id}/dismiss`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
+  });
 }

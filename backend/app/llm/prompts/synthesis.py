@@ -64,10 +64,17 @@ STUDY_TYPE_LABELS: dict[StudyType, str] = {
 # The two dash characters in the "never use an em dash" rule are written as
 # \u escapes because ruff's RUF001 rejects a literal en dash as an ambiguous
 # character. Python resolves them at parse time, so the model sees the glyphs.
+#
+# The opening line called these "short" articles until 2026-09-29. It was the
+# first thing the model read on every call, and the same kind of brevity cue
+# that cost sections when it reached the model through the contracts'
+# docstrings (see CLAUDE.md). Length is still governed by the evidence rules
+# under "Structure and length", which are unchanged. The effect of dropping the
+# word is not measured yet.
 SYNTHESIS_SYSTEM_PROMPT = """\
-You write short, evidence-checked articles about wellness products and \
-trends for a general audience. Each article states what something claims, \
-what the research actually shows, and an honest bottom line.
+You write evidence-checked articles about wellness products and trends for \
+a general audience. Each article states what something claims, works \
+through what the research actually shows, and gives an honest bottom line.
 
 # Grounding: the absolute constraint
 
@@ -82,6 +89,11 @@ commas: "three trials reported the same effect [S1, S5, S8]". Adjacent \
 brackets ("[S1][S5]") mean the same thing and are equally fine. Do not use \
 ranges ("[S1-S8]"), and do not put anything other than handles inside the \
 brackets.
+- **Square brackets are for handles and nothing else.** Anything else in \
+square brackets, such as a confidence interval, a range or a paper's own \
+reference numbers, gets the whole article discarded. Write a confidence \
+interval in words: "95% confidence interval -3.83 to -0.55". Leave out \
+reference numbers entirely. For any other aside, use round brackets.
 - You may only use handles that appear in the provided sources. Never invent \
 a handle, never cite a source that is not in the list, and never renumber \
 them.
@@ -176,7 +188,7 @@ is not.
 - Give each section one job. A section restating the previous one is \
 padding.
 
-**Be specific.** When an abstract states a number, use it: the design and \
+**Be specific.** When an abstract or excerpt states a number, use it: the design and \
 sample size, the duration, the dose, who was studied, and which way the \
 result went and by how much. "Three trials of 20 to 45 people, run for four \
 to eight weeks, found around 15 minutes' difference in time to fall asleep \
@@ -184,6 +196,14 @@ to eight weeks, found around 15 minutes' difference in time to fall asleep \
 But **only numbers the sources actually state**. Never estimate a sample \
 size, round a figure, convert a dose or infer a duration. An invented \
 specific is far worse than a general sentence.
+
+**Some sources also carry full-text excerpts**: passages from the paper \
+itself, labelled with the section they come from. An excerpt is part of its \
+source: cite it with that source's handle, and treat its numbers exactly as \
+you treat the abstract's. Only some papers have excerpts, because only some \
+are freely available. A source without excerpts is not weaker evidence, and \
+having excerpts is not a reason to lean on a source more than its study type \
+and findings deserve.
 
 **A source counts as used only when a sentence in the body carries its \
 handle.** Listing it under `citations` is not using it. Every source bearing \
@@ -199,7 +219,7 @@ like "scam", "hype", or "snake oil". "The evidence does not support this \
 claim" is the strongest thing you should say about any product.
 - **Plain language, for someone with no medical training reading on a \
 phone.** Explain every technical term and every acronym the first time it \
-appears, either in brackets straight after it or in one or two short \
+appears, either in round brackets straight after it or in one or two short \
 sentences: "a randomised controlled trial (people are put into groups at \
 random, so the groups can be compared fairly)". Write the words out before \
 the short form, "randomised controlled trial (RCT)", and only then use the \
@@ -210,7 +230,7 @@ take more than two sentences to explain, drop the term and say the finding \
 in ordinary words instead.
 - **Never use an em dash (\u2014) or an en dash (\u2013).** They read as academic, and \
 this is written for everyday readers. Use a comma, a colon, a full stop, or \
-brackets instead. This applies to every field you return, including the \
+round brackets instead. This applies to every field you return, including the \
 headline, the summary and section headings. Write ranges out in words: "four \
 to eight weeks", "20 to 45 people".
 - This is information, not advice. Never tell the reader to take, stop, or \
@@ -266,13 +286,40 @@ def render_source_block(payload: SynthesisInput) -> str:
         year = source.year or "year unknown"
         journal = source.journal or "journal unknown"
         label = STUDY_TYPE_LABELS.get(source.study_type, "study type unclear")
-        lines.append(
-            f"[{source.handle}] {source.title}\n"
+        block = (
+            f"[{source.handle}] {_round(source.title)}\n"
             f"Type: {label} | {journal}, {year}\n"
             f"Retrieved for: {'; '.join(source.claims)}\n"
-            f"Abstract: {source.abstract}"
+            f"Abstract: {_round(source.abstract)}"
         )
+        # Only the few open-access papers FULL_TEXT chose have these.
+        if source.excerpts:
+            block += "\nFull-text excerpts:" + "".join(
+                f"\n({_round(excerpt.section or 'Untitled section')}) {_round(excerpt.text)}"
+                for excerpt in source.excerpts
+            )
+        lines.append(block)
     return "\n\n---\n\n".join(lines)
+
+
+#: Square brackets in source text, turned round before the model sees them.
+_SQUARE_TO_ROUND = str.maketrans("[]", "()")
+
+
+def _round(text: str) -> str:
+    """``text`` with its square brackets made round.
+
+    In the body a square bracket means a citation, and anything else inside one
+    fails the draft. Sources are full of them: a confidence interval written
+    "95% CI [-3.83 to -0.55]", a translated title PubMed wraps in brackets, a
+    paper's own "[34, 35]". Measured 2026-09-29: a draft copied such an interval
+    out of an abstract into beat 2 and was discarded. A small model copies
+    what it is shown more reliably than it follows a rule about it, so the
+    brackets are made round here as well as forbidden in the rules. Only the
+    rendering changes. What is stored, and what VALIDATE checks, is the
+    source's own text.
+    """
+    return text.translate(_SQUARE_TO_ROUND)
 
 
 def build_synthesis_user_prompt(

@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from app.domain.contracts import (
     CachedCandidate,
+    Excerpt,
     ExtractionOutput,
     Illustration,
     RankedSource,
@@ -43,10 +44,12 @@ class StageName(StrEnum):
 
     That first sentence is true of rows written from now on. ``ILLUSTRATE`` was
     inserted at position 4, so runs recorded before it existed carry
-    ``validate`` at ordinal 4 and ``persist`` at 5 rather than 5 and 6. Nothing
-    joins the number to the name — the column only orders a single run's stages
-    for display — so the old rows are correct about the pipeline they ran on.
-    Do not backfill them into a claim about a pipeline that did not exist yet.
+    ``validate`` at ordinal 4 and ``persist`` at 5 rather than 5 and 6.
+    ``FULL_TEXT`` was then inserted at position 3 (2026-09-29), shifting every
+    later stage up by one again. Nothing joins the number to the name — the
+    column only orders a single run's stages for display — so the old rows are
+    correct about the pipeline they ran on. Do not backfill them into a claim
+    about a pipeline that did not exist yet.
 
     **PERSIST must stay last.** Its write commits together with the run's
     completion row (``orchestrator._finish_run``); a stage after it reopens the
@@ -57,6 +60,7 @@ class StageName(StrEnum):
     EXTRACT = "extract"
     RETRIEVE = "retrieve"
     RANK = "rank"
+    FULL_TEXT = "full_text"
     SYNTHESIZE = "synthesize"
     ILLUSTRATE = "illustrate"
     VALIDATE = "validate"
@@ -115,6 +119,12 @@ class PipelineContext(BaseModel):
     #: the grade floor, which RETRIEVE cannot see from its own candidate list.
     thin_claims: list[str] = Field(default_factory=list)
 
+    # FULL_TEXT
+    #: Full-text passages for the few open-access papers chosen, keyed by
+    #: source id. Empty when none were chosen or Europe PMC could not be
+    #: reached — an ordinary outcome: the article is then written from abstracts.
+    excerpts: dict[str, list[Excerpt]] = Field(default_factory=dict)
+
     # SYNTHESIZE
     #: The exact payload rendered into the synthesis prompt. Carried forward
     #: rather than rebuilt, because VALIDATE must check against the handle set
@@ -135,6 +145,12 @@ class PipelineContext(BaseModel):
 
     # VALIDATE
     validation: ValidationReport | None = None
+
+    # VALIDATE -> SYNTHESIZE revision loop
+    #: Which draft this is. 0 is the first; 1 is the one re-written after the
+    #: first failed validation, with the failures fed back. SYNTHESIZE tells a
+    #: revision pass apart by this and by ``validation`` holding a failed report.
+    revise_round: int = 0
 
     # PERSIST
     article_id: str | None = None

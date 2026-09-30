@@ -39,13 +39,20 @@ from app.pipeline.stages import (
     StageUsage,
 )
 from app.pipeline.steps.extract import ExtractStage
+from app.pipeline.steps.full_text import FullTextStage
 from app.pipeline.steps.illustrate import IllustrateStage, IllustrationConfig
 from app.pipeline.steps.persist import PersistStage, ValidateStage
 from app.pipeline.steps.rank import RankStage
 from app.pipeline.steps.retrieve import RetrieveStage
 from app.pipeline.steps.synthesize import SynthesizeStage
 from app.retrieval.cache import SourceCache
-from app.retrieval.factory import build_http_client, build_providers
+from app.retrieval.factory import (
+    build_europe_pmc_client,
+    build_http_client,
+    build_providers,
+)
+from app.retrieval.full_text import EuropePMCFullText
+from app.retrieval.identifiers import EuropePMCIdentifiers
 from app.retrieval.query_builder import TemplateQueryStrategy
 from app.retrieval.rerank import RerankConfig, SemanticReranker
 
@@ -197,13 +204,21 @@ class PipelineOrchestrator:
         sorts on. On ``refine_round`` 0 this is exactly the list position, so an
         ordinary run records precisely the ordinals it always did.
 
+        The VALIDATE -> SYNTHESIZE revision loop adds its round to the same
+        offset. Refinement always happens before revision (RANK precedes
+        VALIDATE), so the sum still only grows in execution order: a run that
+        does both writes its second SYNTHESIZE at 4 + 2 * len(stages).
+
         The *commit* boundary still keys on the list position, because "is this
         the last stage" is a question about the pipeline's shape and not about
         how many times it has looped.
         """
         run_id = ctx.run_id
         stage_run_id = await self._record_stage_start(
-            run_id, stage.name, ordinal + ctx.refine_round * len(self._stages), attempt
+            run_id,
+            stage.name,
+            ordinal + (ctx.refine_round + ctx.revise_round) * len(self._stages),
+            attempt,
         )
         try:
             new_ctx = await stage.run(ctx)
@@ -514,7 +529,7 @@ class PipelineOrchestrator:
 
 
 def build_default_pipeline(session: AsyncSession, settings: Settings) -> list[Stage]:
-    """Assemble the seven stages with their dependencies.
+    """Assemble the eight stages with their dependencies.
 
     The single place where concrete clients (Ollama or Claude, an embedding
     provider, PubMed) are bound to the Protocols the stages depend on — so
@@ -525,6 +540,7 @@ def build_default_pipeline(session: AsyncSession, settings: Settings) -> list[St
     embedder = build_embedding_provider(settings)
     http = build_http_client(settings)
     providers = build_providers(settings, http)
+    europe_pmc = build_europe_pmc_client(settings, http)
 
     extraction_client, synthesis_client = build_generative_clients(settings)
     cache = SourceCache(session, embedder)
@@ -542,8 +558,13 @@ def build_default_pipeline(session: AsyncSession, settings: Settings) -> list[St
             TemplateQueryStrategy(min_year=settings.retrieval_min_year),
             cache,
             settings.retrieval_max_candidates_per_claim,
+            resolver=EuropePMCIdentifiers(europe_pmc),
         ),
         RankStage(reranker, rerank_config),
+        # After RANK so it reads only papers that already made the cut, and
+        # after the refinement loop for the same reason: RANK's conditional
+        # edge sends a thin run back to RETRIEVE before this ever runs.
+        FullTextStage(EuropePMCFullText(europe_pmc), embedder, settings.full_text_max_papers),
         SynthesizeStage(synthesis_client),
         # After SYNTHESIZE because it illustrates the draft, and before PERSIST
         # because PERSIST has to stay last: its write commits together with the
@@ -563,6 +584,7 @@ def build_default_pipeline(session: AsyncSession, settings: Settings) -> list[St
                 cover_size=(settings.image_cover_width, settings.image_cover_height),
                 enabled=settings.image_provider.strip().lower()
                 not in ("", "none", "off"),
+                cover_from_lead=settings.image_cover_mode == "crop",
             ),
             session,
         ),

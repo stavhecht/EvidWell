@@ -361,6 +361,13 @@ async def regenerate_illustration(
     when the provider failed.
     """
     requested = frozenset(payload.frames) if payload is not None else BOTH_FRAMES
+    # Crop mode draws both frames from one render, always: a cover cut from a
+    # lead the article does not carry would break the pairing rule. So a
+    # one-frame press redraws both, and is billed (and budgeted) as one render.
+    cover_from_lead = settings.image_cover_mode == "crop"
+    if cover_from_lead:
+        requested = BOTH_FRAMES
+    renders = 1 if cover_from_lead else len(requested)
 
     service = ReviewService(session)
     try:
@@ -427,6 +434,7 @@ async def regenerate_illustration(
             seed=fresh_seed(),
             frames=requested,
             keep=keep,
+            cover_from_lead=cover_from_lead,
         )
     except ImageError as exc:
         # 502, not 500: the failure is upstream and the reviewer's next useful
@@ -438,7 +446,7 @@ async def regenerate_illustration(
             detail=f"The image provider did not answer: {exc}",
         ) from exc
 
-    throttle.record(reviewer.id, len(requested))
+    throttle.record(reviewer.id, renders)
     await service.set_illustration(
         article_id, illustration.model_dump(mode="json"), reviewer.id
     )

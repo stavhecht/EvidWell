@@ -236,6 +236,17 @@ export interface ReviewSource extends Source {
   concern: boolean;
   /** Which provider said so, e.g. "pubmed: retracted publication". */
   retractionNote: string | null;
+  /**
+   * Full-text passages the synthesis model was shown beside the abstract.
+   * Empty for most sources; only a few open-access papers get them.
+   */
+  excerpts: Excerpt[];
+}
+
+/** A passage from a paper's full text. `section` is its heading, e.g. "Results". */
+export interface Excerpt {
+  section: string | null;
+  text: string;
 }
 
 export interface ValidationFailure {
@@ -524,4 +535,141 @@ export interface SuppressedTopic {
   topic: string;
   /** Verbatim from the server: "promoted 2026-09-07", or a dismissal + cooloff. */
   reason: string;
+}
+
+// --- research agent -----------------------------------------------------------
+
+export type ResearchRunMode = "weekly" | "manual";
+export type ResearchRunStatus = "queued" | "running" | "completed" | "failed";
+export type ResearchCandidateStatus =
+  | "candidate"
+  | "discarded"
+  | "shortlisted"
+  | "selected"
+  | "promoted"
+  | "dismissed";
+export type EvidenceStatus = "none" | "limited" | "emerging" | "moderate" | "strong";
+export type ResearchCategory =
+  | "fitness"
+  | "exercise"
+  | "nutrition"
+  | "supplements"
+  | "sleep"
+  | "recovery"
+  | "lifestyle"
+  | "preventive_health"
+  | "general_health"
+  | "wellness";
+
+/** Optional overrides; anything omitted uses the server's settings. */
+export interface ResearchRunRequest {
+  targetArticleCount?: number;
+  categories?: ResearchCategory[];
+  trendWindowDays?: number;
+  geo?: string;
+  language?: string;
+}
+
+/**
+ * The stored scoring record, verbatim — so its keys are snake_case.
+ * `unavailable` lists components with no data; they are left out, never zeroed.
+ */
+export interface ResearchScores {
+  components: Record<string, number>;
+  unavailable: string[];
+  weights_used: Record<string, number>;
+  overall: number | null;
+}
+
+export interface ResearchEvidenceCounts {
+  source: string;
+  query: string;
+  total: number;
+  recent: number;
+  reviews_or_meta: number;
+  rcts: number;
+}
+
+/** Provider data as the run recorded it (snake_case, like `ResearchScores`). */
+export interface ResearchSignals {
+  subject: string;
+  outcome: string;
+  reader_question: string | null;
+  trend: {
+    source: string;
+    growth_percent: number | null;
+    rising_percent: number | null;
+    is_breakout: boolean;
+    related_queries: string[];
+  } | null;
+  web: {
+    source: string;
+    results_found: number;
+    relevant_results: number;
+    distinct_domains: number;
+    authoritative_results: number;
+    top_results: { title: string; url: string }[];
+  } | null;
+  news: {
+    source: string;
+    articles_found: number;
+    recent: number;
+    previous: number | null;
+    top_articles: { title: string; url: string; source: string | null }[];
+  } | null;
+  science: {
+    primary: ResearchEvidenceCounts | null;
+    cross_check: ResearchEvidenceCounts | null;
+    deep: {
+      product: string;
+      claims: string[];
+      counts: ResearchEvidenceCounts;
+      top_papers: { pmid: string | null; title: string; year: number | null; study_type: string }[];
+    } | null;
+    failures: string[];
+  };
+}
+
+export interface ResearchCandidate {
+  id: string;
+  canonicalTopic: string;
+  category: ResearchCategory | null;
+  queries: string[];
+  status: ResearchCandidateStatus;
+  discardReason: string | null;
+  evidenceStatus: EvidenceStatus | null;
+  overall: number | null;
+  rank: number | null;
+  scores: ResearchScores;
+  signals: ResearchSignals;
+  pipelineRunId: string | null;
+  decidedAt: string | null;
+  dismissReason: string | null;
+}
+
+export interface ResearchProviderStatus {
+  status: "ok" | "partial" | "failed" | "unavailable";
+  detail: string | null;
+  calls: number;
+  failures: number;
+}
+
+export interface ResearchRun {
+  id: string;
+  /** e.g. `research_2026_09_30_a84f` */
+  label: string;
+  mode: ResearchRunMode;
+  status: ResearchRunStatus;
+  /** The stage it is on, or the last one reached. */
+  stage: string | null;
+  params: ResearchRunRequest;
+  providerStatus: Record<string, ResearchProviderStatus>;
+  stageLog: { stage: string; duration_ms: number; metrics: Record<string, unknown> }[];
+  notes: string[];
+  error: { message: string } | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  /** Filled on the single-run read, empty on the list. */
+  candidates: ResearchCandidate[];
 }

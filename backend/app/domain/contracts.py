@@ -46,6 +46,17 @@ from app.domain.enums import SourceApi, StudyType, Verdict
 CITATION_MARKER_PATTERN = r"\[S\d+(?:\s*,\s*S\d+)*\]"
 CITATION_MARKER_RE = re.compile(CITATION_MARKER_PATTERN)
 
+#: A run of adjacent markers, which the article renders as **one** citation
+#: chip: ``[S1][S5]`` exactly as much as ``[S1, S5]``, because a row of separate
+#: chips reads as two findings when it is one. ``tiptap.py`` splits prose on it,
+#: and SYNTHESIZE counts coverage by it. Defined once, beside the marker
+#: it is built from, for the same reason the marker is: if the renderer and the
+#: coverage count disagreed about what one citation is, a draft could satisfy
+#: the count with a row of chips the reader sees as a single citation.
+#:
+#: The capturing group is for ``re.split``, which keeps the runs it splits on.
+CITATION_RUN_RE = re.compile(rf"((?:{CITATION_MARKER_PATTERN})+)")
+
 #: A handle within a marker. Only ever applied to ``CITATION_MARKER_RE``
 #: matches, so it does not need to guard against prose ("the S1 group").
 _HANDLE_IN_MARKER_RE = re.compile(r"S\d+")
@@ -206,6 +217,18 @@ class RankedSource(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class Excerpt(BaseModel):
+    """A passage from a paper's full text, shown to the model beside its abstract.
+
+    Chosen by ``pipeline/steps/full_text.py`` for its closeness to the claims
+    the paper was retrieved for. ``section`` is the heading it sits under
+    ("Results"), or None for text outside any section.
+    """
+
+    section: str | None
+    text: str
+
+
 class PromptSource(BaseModel):
     """One source exactly as it is rendered into the synthesis prompt.
 
@@ -235,6 +258,9 @@ class PromptSource(BaseModel):
     #: missing field. Fail-closed is the right direction, but a required field
     #: fails at construction instead, where the actual mistake is.
     claims: list[str] = Field(min_length=1)
+    #: Full-text passages, for the few open-access papers FULL_TEXT chose.
+    #: Empty for every other source — which says nothing about its quality.
+    excerpts: list[Excerpt] = Field(default_factory=list)
 
 
 class SynthesisInput(BaseModel):

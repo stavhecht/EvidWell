@@ -242,6 +242,12 @@ async def _chat(
                 MAX_ATTEMPTS,
                 _validation_feedback(exc).replace("\n", "; "),
             )
+            # Scoped to the named fields since 2026-09-29; it said only "Shorten
+            # rather than rewrite". When the failure is one section over its
+            # 8-sentence cap, an unscoped instruction to shorten invites a small
+            # model to cut the whole article to fix one field, and longer drafts
+            # hit that cap more often. Not measured: nothing records a draft's
+            # length before its repair.
             messages = [
                 *messages[:2],
                 {"role": "assistant", "content": content},
@@ -251,11 +257,13 @@ async def _chat(
                         "That response broke these constraints:\n"
                         f"{_validation_feedback(exc)}\n\n"
                         "Return the same content corrected to satisfy every one "
-                        "of them. Shorten rather than rewrite, and do not swap "
-                        "in different sources or renumber the ones you used. "
-                        "If a constraint above names a citation handle, that "
-                        "handle is the thing to fix: write one handle per entry "
-                        '("S1", "S2"), never a range like "S1-S8".'
+                        "of them. Change only the fields named above and leave "
+                        "every other field exactly as it was. Where a field is "
+                        "over a limit, shorten that field rather than rewriting "
+                        "it. Do not swap in different sources or renumber the "
+                        "ones you used. If a constraint above names a citation "
+                        "handle, that handle is the thing to fix: write one "
+                        'handle per entry ("S1", "S2"), never a range like "S1-S8".'
                     ),
                 },
             ]
@@ -374,3 +382,34 @@ def build_ollama_client(base_url: str, timeout_seconds: float) -> AsyncClient:
     here is a real failure.
     """
     return AsyncClient(host=base_url, timeout=timeout_seconds)
+
+
+async def structured_chat(
+    client: AsyncClient,
+    *,
+    call: str,
+    model: str,
+    system: str,
+    user: str,
+    output_format: type[BaseModel],
+    num_ctx: int,
+    max_tokens: int,
+    temperature: float = 0.0,
+) -> LLMResult[Any]:
+    """One structured-output turn for a caller outside the two pipeline calls.
+
+    The same grammar, validation-repair retry and usage accounting as
+    extraction and synthesis. Used by the research agent's triage call
+    (``research/triage.py``), which has its own schema and prompt.
+    """
+    return await _chat(
+        client,
+        call=call,
+        model=model,
+        system=system,
+        user=user,
+        output_format=output_format,
+        num_ctx=num_ctx,
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )

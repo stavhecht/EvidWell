@@ -146,7 +146,10 @@ async def _run() -> int:
     # deeper backfill writes hundreds of thousands of rows nothing reads and
     # spends a proportional amount of somebody else's API budget to do it.
     # Raise it only alongside that setting.
-    parser.add_argument("--backfill-months", type=int, default=6)
+    # Four months: the ledger keeps `discovery_observation_retention_days` (120)
+    # and a succeeded scan prunes the rest, so a deeper backfill is deleted as
+    # soon as it is written.
+    parser.add_argument("--backfill-months", type=int, default=4)
     parser.add_argument(
         "--seed",
         action="append",

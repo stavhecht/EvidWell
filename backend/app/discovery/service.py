@@ -233,7 +233,7 @@ class DiscoveryService:
         await self._session.flush()
 
     async def record_observations(
-        self, scan_id: str, records: list[MeshRecord], kinds: dict[str, DiscoveryDescriptorKind]
+        self, records: list[MeshRecord], kinds: dict[str, DiscoveryDescriptorKind]
     ) -> int:
         """Write one row per (descriptor, paper). Returns rows actually inserted.
 
@@ -257,10 +257,8 @@ class DiscoveryService:
                         "pmid": record.pmid,
                         "entrez_date": record.entrez_date,
                         "is_substance": kind is DiscoveryDescriptorKind.SUBSTANCE,
-                        "major_topic": hit.major_topic,
                         "intervention_qualifier": hit.intervention_qualifier,
                         "study_type": record.study_type,
-                        "scan_id": scan_id,
                     }
                 )
         if not rows:
@@ -279,10 +277,24 @@ class DiscoveryService:
             written += len((await self._session.execute(statement)).all())
         return written
 
+    async def prune_observations(self, before: date) -> int:
+        """Delete ledger rows with an entrez_date before ``before``. Returns how many.
+
+        Nothing reads them: the scorer's oldest bucket and the angle lookback
+        are both newer (``discovery_observation_retention_days`` is validated
+        against both). The partial window index does not cover this predicate,
+        so it is a sequential scan — once a day over a table that pruning keeps
+        at a few months of rows.
+        """
+        result = await self._session.execute(
+            sa.delete(DiscoveryObservation).where(DiscoveryObservation.entrez_date < before)
+        )
+        return int(getattr(result, "rowcount", 0) or 0)
+
     async def upsert_descriptors(
         self, names: dict[str, str], kinds: dict[str, DiscoveryDescriptorKind]
     ) -> None:
-        """Record the vocabulary, refreshing ``kind`` and ``last_seen_at``.
+        """Record the vocabulary, refreshing ``name`` and ``kind``.
 
         ``kind`` is deliberately overwritten rather than kept: it is our
         classification of a descriptor, and retuning ``vocab.py`` should take
@@ -304,11 +316,7 @@ class DiscoveryService:
             await self._session.execute(
                 statement.on_conflict_do_update(
                     index_elements=["ui"],
-                    set_={
-                        "name": statement.excluded.name,
-                        "kind": statement.excluded.kind,
-                        "last_seen_at": sa.func.now(),
-                    },
+                    set_={"name": statement.excluded.name, "kind": statement.excluded.kind},
                 )
             )
 

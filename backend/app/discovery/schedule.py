@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 
@@ -101,10 +102,15 @@ class ScanScheduler:
         factory: async_sessionmaker[AsyncSession],
         *,
         tick_seconds: float = TICK_SECONDS,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._settings = settings
         self._factory = factory
         self._tick = tick_seconds
+        # Injected so a test can pin "now" beside the ledger timestamps it
+        # fakes. Reading the real clock there made a test pinned to 2026-09-07
+        # start failing a day later, once real time had moved past it.
+        self._clock = clock
         self._task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
 
@@ -153,7 +159,7 @@ class ScanScheduler:
             return
         async with self._factory() as session:
             last = await last_succeeded_at(session)
-        if not is_due(last, interval, now=datetime.now(UTC)):
+        if not is_due(last, interval, now=self._clock()):
             return
         try:
             manual_scan.start(settings=self._settings, factory=self._factory)

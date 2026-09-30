@@ -16,8 +16,8 @@ producing two articles from 92 real cached papers. The caveat is now narrower an
 README → *Verification status*: the **hosted** providers (Claude, Voyage) have never been
 called, so their clients and the token accounting remain written-against-documentation.
 
-Deliberately deferred, per §11 of the brief: full-text retrieval, and the AWS
-deployment. (Abstracts are chunked for ranking — §4 — but full text is never fetched.) The agentic query-refinement loop shipped 2026-09-07 as a LangGraph cycle around
+Deliberately deferred, per §11 of the brief: full text for paywalled papers, and the AWS
+deployment. (Open-access full text is excerpted for up to six papers per article — §4.) The agentic query-refinement loop shipped 2026-09-07 as a LangGraph cycle around
 RETRIEVE and RANK (§3.2); it is deterministic, so `LLMQueryStrategy` is still a declared seam
 that raises — the template strategy is still what runs.
 
@@ -87,8 +87,8 @@ a reviewer may redraw either alone, so they need not even come from one generati
                     │
         ┌───────────┴────────────────────────────────────┐
         │  Pipeline worker (local process)               │
-        │  extract → retrieve → rank → synthesize        │
-        │          → illustrate → validate → persist     │
+        │  extract → retrieve → rank → full_text         │
+        │  → synthesize → illustrate → validate → persist│
         └───────────┬────────────────────────────────────┘
                     │
      ┌──────────────┴───────────────┐
@@ -469,8 +469,17 @@ every shape `tileRatio()` produces is 1:1 or taller, so `object-cover` fits a la
 to a tile by discarding its sides. §1's fifth rule survives through the pairing predicate
 described there.
 
-**The two frames are not the same photograph, and the docs said otherwise until it was
-measured.** A seed initialises latent noise shaped like the frame, so one seed at two sizes is
+**Since 2026-09-30 the default is `IMAGE_COVER_MODE=crop`: one render, the cover cut from
+it.** The landscape lead is rendered once, and the portrait cover is centre-cropped out of it to
+3:4. At the default sizes that is 624×832, ample for a 190px tile. That halves the cost to one
+billed render per article, and it makes the two frames provably one photograph. A Regenerate
+press in this mode always redraws both frames, for one render. `render` mode keeps the
+two-generation behaviour described below. A local FLUX provider (mflux, 4-bit) was measured on
+the target 16 GB M2 Pro and not built: 198 s and 18.4 GB of peak GPU memory for one 1216×832
+image, and swap grew from 6.2 to 16.8 GB.
+
+**In `render` mode the two frames are not the same photograph, and the docs said otherwise
+until it was measured.** A seed initialises latent noise shaped like the frame, so one seed at two sizes is
 two compositions — and the provider `auto` currently resolves to (`nscale`, reached through HF's
 OpenAI-shaped images endpoint, which has no seed field) ignores seeding altogether: two
 identical requests came back different on 2026-08-24. What survives is the useful half. Both
@@ -884,7 +893,7 @@ Provider roles:
 | Provider | Role | Notes |
 |---|---|---|
 | PubMed E-utilities | Primary recall for clinical evidence | MeSH terms + publication-type filters give the cleanest study-type signal |
-| Europe PMC | Breadth + open-access full text (v2) | Also the fallback when PubMed rate-limits |
+| Europe PMC | Breadth + open-access full text (the FULL_TEXT stage) | Also the fallback when PubMed rate-limits |
 | Semantic Scholar | Citation counts, cross-domain | |
 | OpenAlex | Broad coverage backstop | Used to fill gaps, not lead |
 
@@ -1126,12 +1135,30 @@ Nothing is deleted, either. A retracted source keeps its row: it may be referenc
 `article_sources`, and breaking a published article's provenance to tidy up a citation trades a
 real guarantee for a cosmetic one.
 
-### v2, designed for and deliberately deferred
+### Pass 3 — full-text excerpts (open access only)
 
-Full text for the 2–3 load-bearing sources a verdict rests on, via Europe PMC open access,
-chunked into ~500-token passages linked back to the paper. The schema anticipates this: a
-`source_passages` table is sketched in the migration as a commented block so the FK direction
-is settled now. Abstracts for breadth, full text for the pivotal few. **Not in the MVP.**
+Abstracts for breadth, full text for the pivotal few — built 2026-09-29 as the `full_text`
+stage, between RANK and SYNTHESIZE (`pipeline/steps/full_text.py`):
+
+1. Ask Europe PMC which ranked papers have an open-access full text (one request per article).
+2. Choose up to six. The claims take turns picking their highest-ranked open-access paper, so
+   every claim gets depth before any claim gets a second paper.
+3. Download each (JATS XML), keep the body sections that report the paper's own work — not
+   Introduction or Background, which summarise other papers — and split them with the same
+   `chunk_text` as abstracts.
+4. Give synthesis the two chunks closest to each paper's claims, under its abstract, as
+   "Full-text excerpts".
+
+**Ranking is not touched.** Only about half of cached papers are open access (144 of 309,
+measured), and scoring a 20,000-word paper by its best chunk against an abstract's one is a
+length bias that would reward open access over good evidence. The verdict cap is untouched too:
+it reads study types and counts, never text. The stage never fails a run — without excerpts the
+article is written from abstracts, as before — and records why in its metrics. The excerpts
+shown are saved on `article_sources.excerpts` and listed in the review desk, because an article
+can now quote a number its sources' abstracts do not contain.
+
+Still deferred: full text for paywalled papers, and caching full text. It is fetched per run;
+the `source_passages` table sketched in the migration is for when that becomes the bottleneck.
 
 ### Provenance
 
@@ -1141,6 +1168,173 @@ is one indexed query, and each claim in the editor renders with its backing cita
 attached rather than resolved client-side.
 
 ---
+
+## 4b. Topic discovery: the research agent
+
+Two things propose topics, and they answer different questions:
+
+- The **MeSH literature scan** (`app/discovery`, runs every 24 h in the API process) finds
+  substances whose *publishing rate* is accelerating.
+- The **research agent** (`app/research`, added 2026-09-30) finds what *people* are
+  increasingly searching for and reading about, then checks what the literature can
+  responsibly say about each topic.
+
+Both **propose and never enqueue**. A reviewer pressing *Generate draft* is what creates a
+pipeline run, and the draft still needs *Approve* to publish (invariant #1). This was an
+explicit decision when the research agent was specified as "generate 4–6 articles weekly":
+automatic research, human promotion.
+
+### Who does what
+
+```
+n8n weekly schedule ──┐                                 ┌── desk: "Find trending topics"
+n8n manual webhook ───┴→ POST /api/automation/research/runs   POST /api/console/research/runs ─┘
+                                   (X-Trigger-Token)            (reviewer JWT)
+                                          └──────────┬──────────┘
+                           research/service.py::start_research_run(mode, params)   ← one entry point
+                                                     │  research_runs row, status=queued
+                                   pipeline worker claims it (same process as article runs)
+                                                     │
+                                   research/graph.py — LangGraph StateGraph
+                                                     │
+                            research_candidates: selected / shortlisted / discarded + scores
+                                                     │
+                     reviewer: Generate draft → _enqueue_run(origin=research) → article pipeline
+```
+
+- **n8n decides when.** It holds a weekly cron and a webhook, and it calls the backend. It
+  contains no research logic. The workflows live in `n8n/workflows/`, and setup is in
+  `n8n/README.md`.
+- **The desk button calls the backend directly**, not n8n, so it works when n8n is down.
+- **`mode` (`weekly`/`manual`) is metadata.** Nothing in the graph branches on it.
+- **Runs are single-flight.** A trigger while a run is queued or running gets 409. Two runs a
+  minute apart would spend the same Trends, news and PubMed budget computing the same answer,
+  and News API's free plan allows 100 requests a day.
+- **Research runs execute in the pipeline worker, one thing at a time.** Both kinds of run
+  count papers against NCBI's per-IP ceiling, and that throttle is per process. The cost is
+  that a queued draft waits behind a research run, which measured about 8 minutes.
+
+### The graph
+
+```
+load_config → discover_trends → expand_queries → build_candidates → check_novelty
+  → research_news → research_science → score_and_pool → research_web → shortlist
+  → deep_research → select ─(fewer than min, reserve left, round 0)→ backfill → deep_research
+                          └→ END
+```
+
+- The graph has the same shape as `pipeline/graph.py`: a single state key replaced wholesale,
+  node functions that record themselves, and a router that ends the run the moment a node sets
+  `state.failed`. The one loop (backfill) is bounded at one round.
+- Every node checkpoints the run row and all candidates **at its start and at its end**, so
+  the desk shows the step a run is on, and a run that dies keeps what it had measured.
+
+It is a **funnel**, because the signals differ in cost by orders of magnitude:
+
+| Stage | Runs on | Cost |
+|---|---|---|
+| Google Trends rising queries | 22 seeds (`research/seeds.py`) + 5 expansions | ~4 min (paced; 429s are retried) |
+| Deterministic clean-up + one model call per 25 groups | all | ~1 min |
+| News, PubMed and Europe PMC counts | up to `research_max_candidates` (50) | ~1.5 min |
+| Web search | the best `research_web_pool_size` (20) | ~8 s each |
+| Deep research | the best `research_shortlist_size` (10) | one extraction call + 4 PubMed counts each |
+
+**Deep research asks what the article pipeline would ask, the way it would ask it.** It runs
+the pipeline's own extraction call on the topic, then `TemplateQueryStrategy.build` for the
+first two claims, then counts the result in PubMed. A topic whose query cannot be anchored
+(`UnanchoredQuery`) is discarded there. Promoted, that topic would have failed at RETRIEVE as
+a non-retryable stage error after spending a model call, which is the pipeline's sharpest
+documented risk.
+
+### Separate questions, separate scores
+
+| Question | Signals | Used as |
+|---|---|---|
+| Are people becoming interested? | Trends growth, news momentum, search-interest level | weighted components |
+| Is there material to research? | relevant web results + news articles | a **gate** (`research_min_sources`) |
+| Can we responsibly say anything? | PubMed/Europe PMC: total, last-year, reviews/meta-analyses, RCTs | a weighted component **and** a gate (`research_min_evidence_status`) |
+| Is it worth writing now? | authoritative-domain share, similarity to recent articles and decisions | weighted components; near-duplicates discarded |
+
+`overall = Σ wᵢ·scoreᵢ / Σ wᵢ`, taken over the **measured** components only. The weights are
+in `config.py` (trend 0.30, news 0.15, evidence 0.25, source quality 0.10, reader interest
+0.15, novelty 0.05), and a validator requires them to sum to 1.
+
+- **A component with no data is left out** and the others are renormalised. It is never
+  scored as zero or as a guess. `scores.unavailable` names what was left out, and the desk
+  shows it as "not measured: news".
+- **Evidence is the exception.** A topic nobody could check the literature for has no score
+  at all, rather than a score that looks like weak evidence.
+- **The component formulas** (`research/scoring.py`) are starting values, like the MeSH
+  scan's:
+  - **Growth scores** use a Laplace-smoothed log ratio: 50 when flat, +25 per doubling. The
+    spec's example, 40→80 against 90→93, scores 74.6 against 51.2.
+  - **Reader interest** is the topic's search level measured against an **anchor term** (`vitamin
+    d`) placed in every 5-term Trends request, because Trends scales each request
+    independently.
+  - **Evidence status** runs `none < limited < emerging < moderate < strong`, from counts
+    alone.
+- **Selection** takes at most one topic per subject: two creatine angles in one week's
+  proposals is one topic proposed twice.
+
+**Popularity is never evidence.** A breakout query with one paper behind it is discarded at
+the evidence gate however it trends. The tests pin exactly that case.
+
+### Providers
+
+Each signal is a protocol in `research/providers/base.py`. The graph depends on the
+protocols, and `research/factory.py` is the only place that knows the implementations.
+
+| Protocol | Implementation | Notes |
+|---|---|---|
+| `TrendProvider` | `GoogleTrendsProvider` (pytrends) | No free official API exists. pytrends is archived upstream, but `related_queries` and `interest_over_time` answered on 2026-09-30. Its own `retries` crash under urllib3 2 (`method_whitelist`), so retrying is ours: paced every 4 s, with a 15 s then 45 s backoff on a 429. |
+| `WebSearchProvider` | `SimpleWebSearchProvider` (ddgs, DuckDuckGo) | No key. Scraping-based, ~8 s per search. |
+| `NewsProvider` | `NewsApiProvider` → `FallbackNewsProvider` → `DuckDuckGoNewsProvider` | News API when `NEWS_API_KEY` is set. Its free plan is 100 requests a day, delayed 24 h, and licensed for development only. When it fails, DuckDuckGo news answers for the rest of the run. |
+| `ScientificEvidenceProvider` | `PubMedEvidenceProvider`, `EuropePMCEvidenceProvider` | Adapters over the pipeline's **existing** clients, which gained `count()`. There is no second HTTP client. Each is the other's fallback. |
+
+### Failure behaviour
+
+| Failure | Behaviour |
+|---|---|
+| Google Trends unreachable for every seed | Run fails `no_trend_data`. Nothing is invented. |
+| Web search or news down | The component is `unavailable` and the rest renormalised. Provider status is `partial` or `failed`. |
+| PubMed down, Europe PMC up (or the reverse) | The other source's counts are used and the fallback is recorded. |
+| Both literature sources down | Run fails `scientific_evidence_unavailable`. No topic is ranked unchecked. |
+| The triage model fails, skips groups, or makes a catch-all | Those groups fall back to their raw query, and the run's notes say so. |
+| Extraction fails in deep research | The stage-1 counts stand, and the failure is recorded on the candidate. |
+| Worker dies mid-run | The sweep marks the run `failed` (not requeued); the next trigger starts fresh. |
+
+### Measured on the first live runs (2026-09-30)
+
+**Google Trends' *rising* lists can be spam.** For "fitness" and "protein" over seven days,
+the rising list was mostly unrelated commercial queries at +7,000% or more: "learn golang",
+"online banking review", "cheap flights new york". The *top* lists were sane (planet fitness,
+whey protein), and "sleep" rising was real.
+
+The first run, before any defence, selected four product-review queries out of five. Three
+layers now stand between that and the desk:
+
+1. **Deterministic.** A query must share a word with its seed or with `WELLNESS_TERMS`, and
+   shopping, job and litigation words make it a non-topic. `review` and `comparison` are
+   shopping intent.
+2. **The triage model.** It works in batches of 25; a topic spanning more than 6 groups, or
+   with a subject like "various", is refused. Its output is then deduplicated across batches
+   (same topic, or the same subject and outcome), and a query equal to its own seed is
+   dropped. The second run had proposed "gut health" and "Gut Health" as two topics, and
+   "sleep" as a topic under the seed "sleep".
+3. **The evidence gate.**
+
+The same run showed why the first layer cannot be the evidence gate. Deep research gave
+"online banking review" *moderate* evidence: the extraction model invented plausible claims,
+and the anchored query found 14 papers. Any query can find some literature.
+
+### Assumptions
+
+- Google Trends is reached by scraping. It will break or throttle, and the provider interface
+  is the mitigation. SerpApi (paid) is the likeliest replacement.
+- "Reader interest" is search-interest level. Reddit and community signals are a future
+  `TrendProvider`.
+- A promoted research topic runs through the unchanged article pipeline with
+  `origin = research`. Its canonical topic string is what extraction reads.
 
 ## 5. The AI contracts
 
@@ -1203,6 +1397,21 @@ never give medical advice.
 Any failure → `validation_failed` with a structured reason. The draft does not enter the queue.
 Failures are visible in the console under a separate tab, because a persistent validation
 failure is a prompt bug you want to see, not silence.
+
+**One bounded rewrite comes first (2026-09-30).** The graph sends a failed draft back to
+SYNTHESIZE **once** (`MAX_REVISE_ROUNDS`), with the failures fed back verbatim and the verdict
+ceiling stated. It uses the same `synthesis_input`, so VALIDATE still checks against the exact
+handle set the model saw.
+
+- **Which failures qualify.** Only fixable ones: `hallucinated_handle`, `uncited_beat`,
+  `uncited_section`, `verdict_exceeds_grade` and `malformed_body`. `unresolvable_source` is
+  ours to fix, not the model's.
+- **The rewrite is validated like any draft.** A second failure is stored `validation_failed`
+  exactly as before. A rewrite that errors keeps the first draft, which then fails again the
+  same way. The invariant is unchanged: a failing draft never reaches the queue.
+- **ILLUSTRATE keeps the pictures already drawn.** They are claim-free, so the rewrite cannot
+  change what they should show, and redrawing would bill again.
+- **Stage-row ordinals stay unique.** They are offset by `refine_round + revise_round`.
 
 ### Call 2, zero-source branch — the `no evidence` article
 
@@ -1413,6 +1622,19 @@ every handler, schema, client method and test to change a string no reader ever 
 | `GET` | `/api/console/pipeline/runs/{id}` | One run, all stages, errors, token cost |
 | `GET` | `/api/console/contact` | The "Let us know" inbox. `?status=&limit=` |
 | `PATCH` | `/api/console/contact/{id}` | Mark answered / closed, or reopen |
+| `POST` | `/api/console/research/runs` | Start a research run (§4b); 202, 409 while one is active |
+| `GET` | `/api/console/research/runs` | Recent research runs |
+| `GET` | `/api/console/research/runs/{id}` | One run with every candidate, its signals and scores |
+| `POST` | `/api/console/research/candidates/{id}/promote` | Selected or shortlisted topic → queued pipeline run |
+| `POST` | `/api/console/research/candidates/{id}/dismiss` | Say no, with a reason |
+
+**Automation (shared secret, `X-Trigger-Token`).** For n8n. The whole router answers 404 while
+`RESEARCH_TRIGGER_TOKEN` is unset.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/automation/research/runs` | Start a research run; `mode` is `weekly` (default) or `manual` |
+| `GET` | `/api/automation/research/runs/{id}` | Status for n8n's polling loop |
 
 `subject` is a separate route from the content autosave, and is legal **after** publication —
 unlike the body — because it drives a colour and a browse listing rather than a word the reader
@@ -1474,11 +1696,13 @@ becomes hot the fix is a materialised tier column, not a different sort.
   `citation_count`, `url`, `source_api`, `embedding_model`, `chunk_settings`, `last_seen_at`, plus the
   retraction record: `retracted_at`, `concern_at`, `retraction_checked_at`, `retraction_note`
   (§4 — a NULL `retraction_checked_at` means *nobody successfully asked*, not "clean").
-- **`source_chunks`** — `(source_id, ordinal)`, `content`, `embedding vector(N)`. One row per
-  overlapping chunk of a source's abstract (§4, migration 0002); `sources.embedding_model`
-  and `sources.chunk_settings` (migration 0003) name the model that embedded them and how they
-  were cut.
+- **`source_chunks`** — `(source_id, ordinal)`, `embedding vector(N)`. One row per
+  overlapping chunk of a source's abstract (§4). No text column: ranking reads only the vector,
+  and a chunk can be re-cut from the abstract. `sources.embedding_model` and
+  `sources.chunk_settings` name the model that embedded them and how they were cut.
 - **`article_sources`** — `(article_id, source_id, claim, citation_handle)`. Provenance.
+  `excerpts` holds the full-text passages the model was shown for that source,
+  NULL for the many sources shown none (§4, Pass 3).
 - **`pipeline_runs`** / **`pipeline_stage_runs`** — observability, plus the retry state
   (`attempts`, `next_attempt_at` on the run; `attempt` on each stage row, so a retry adds a
   second set rather than colliding with the first). See §3.3. The stage row also carries the
@@ -1514,7 +1738,7 @@ whose status claims a human dealt with it has to name the human, so reopening a 
 clear `handled_by` and `handled_at` or the row is refused.
 
 **There is deliberately no HNSW index on the vectors** — `sources.embedding` then,
-`source_chunks.embedding` since migration 0002, for the same reason. An earlier draft of the schema
+`source_chunks.embedding` since chunking arrived, for the same reason. An earlier draft of the schema
 created one and nothing could ever use it. The only vector query is
 `rank_for_claim`, whose score is cosine + grade + recency, so top-k is applied in Python and no
 `LIMIT` reaches SQL; with a restrictive `id = ANY(...)` filter over one run's ~100 candidates,
@@ -1555,6 +1779,29 @@ One paper matching two *different* rows means the cache split it under the old k
 reported and resolved to the DOI row — never repaired inline, because repair means re-pointing
 `article_sources` and deleting a row `ON DELETE RESTRICT` exists to protect, and a cache refresh
 must not rewrite the provenance of published articles as a side effect of fetching abstracts.
+
+---
+
+### How much is stored, and for how long
+
+Audited 2026-09-30, against the live database. At that point it held 38 MB: 84k ledger rows,
+415 cached papers, 15 articles, 3 research runs. After the fifth squash and the retention
+rules below it held 21 MB with nothing lost that anything reads.
+
+- **Seven write-only columns were dropped:** `source_chunks.content`,
+  `articles.source_blurb` (a copy of the run's), and `discovery_observations.major_topic`,
+  `.scan_id` and `.first_seen_at`, and `discovery_descriptors.first_seen_at` and
+  `.last_seen_at`. Everything else is read somewhere. The one kept-but-unread column is
+  `sources.last_seen_at`, deliberately: it is the key a future cache-eviction rule would use.
+- **Growth is bounded where it was unbounded:**
+
+| Table | Growth | Rule |
+|---|---|---|
+| `discovery_observations` | ~thousands of rows per daily scan | a succeeded scan deletes rows older than `discovery_observation_retention_days` (120); 51% of rows were older than anything reads |
+| `research_candidates` | ~45 rows per run | undecided candidates of runs older than `research_retention_days` (60) are deleted; discarded ones are stored without examples |
+| `media_objects` | ~70 KB per render; every Regenerate orphans the old frames | `scripts/prune_media.py` (manual, dry by default, 7-day grace) |
+| `sources` / `source_chunks` | only with new topics | kept: the cache is what makes a repeat topic cheap |
+| `pipeline_stage_runs` | ~8 small rows per run | kept: it is the cost ledger |
 
 ---
 
@@ -1674,7 +1921,7 @@ the login throttle must keep reading the socket peer), and secrets from somewher
 `.env` file mounted into compose.
 
 ### Later, explicitly deferred
-Full-text retrieval and full-text passages (v2 §4); *model-generated* query refinement (the deterministic
+Full text for paywalled papers, and caching full-text passages (§4, Pass 3); *model-generated* query refinement (the deterministic
 broadening loop shipped 2026-09-07, see §3.2); multi-reviewer roles and invites; SerpApi
 fallback; Next.js port if SEO becomes a priority.
 
@@ -1687,7 +1934,7 @@ fallback; Next.js port if SEO becomes a priority.
 | Study-type metadata is inconsistent across providers | Classify from publication type + title/abstract heuristics in `evidence/grading.py`; store both raw and normalised. Unknown grades are treated as the *weakest* tier, so uncertainty caps confidence rather than inflating it. |
 | Abstract heuristics read the *surveyed* literature as the paper's own design | Measured on real data, not anticipated: a trial protocol and a narrative review both describe randomised trials at length, and three protocols scored `rct` (ceiling `supported`) on that basis. The text fallback now runs only when the publication types are genuinely uninformative — `NEGATIVE_PUBLICATION_TYPES` suppresses it — and a bare `Review` may be sharpened only within the review family, never into a trial. |
 | A grounded draft can still be misleading by omission | Human review is the backstop. The sources panel shows what was retrieved, not just what was cited, so a reviewer can see when something relevant was left out. |
-| Abstracts overstate findings relative to full text | Known limitation of an abstract-only MVP. Grade caps mitigate; full text for pivotal sources is the v2 answer. |
+| Abstracts overstate findings relative to full text | Partly addressed: excerpts from up to six open-access papers per article (§4, Pass 3). Paywalled papers stay abstract-only; grade caps still mitigate. |
 | Retrieval finds nothing for a fringe trend | `no evidence` is a first-class verdict with its own short-article path, not an error. |
 | PubMed rate limits | Per-provider token bucket keeps us under the ceiling; bounded retries honour `Retry-After`; the `sources` cache absorbs repeat topics; an API key raises the ceiling to 10 req/s. Europe PMC is available as a failover but is *not* used automatically — its weaker study-type metadata would quietly lower the verdict ceiling, so recovered recall would cost grade. |
 | A throttled search reads as "no literature exists" | The failure with no visible symptom, and the reason §4's pacing exists. Throttles are retried rather than parsed (including PubMed's 200-with-error-body form), and a claim whose every provider call failed fails the stage instead of reaching the `no evidence` path. |
@@ -1698,4 +1945,7 @@ fallback; Next.js port if SEO becomes a priority.
 | A retraction check that could not run reads as a clean bill of health | `RetractionVerdict` has three states and `retraction_checked_at` is written only when a provider actually answered. This caught a real bug: NCBI returns an `error` record rather than omitting an unresolvable id, and reading it as an empty publication-type list marked unlookuppable papers verified clean. |
 | A model call that fails is billed and reported as free | Truncation spends the whole 8K synthesis budget and returns nothing, so the most expensive failure would look like the cheapest run. `LLMError` carries its usage, the stage records it before raising, and the ledger write survives the rollback that discards the stage's own writes (§3.7). |
 | An unpriced model reads as a free one | A price lookup miss returns `null`, never `0`, and a run total is `null` if any consuming stage is unpriced. Model ids are provider-namespaced so a genuinely free local model stays distinguishable from one nobody has priced. A test asserts the clients' default models are all in the table, which is the likeliest way it goes stale. |
+| A trending topic has popularity but no evidence | The evidence gate discards it whatever its trend score (§4b). Trend data decides *what* to consider; PubMed and Europe PMC decide what can be proposed. |
+| Google Trends' rising lists carry spam | Measured on the first live run (§4b). A deterministic on-topic filter runs before the model, and the triage model is batched and cannot build catch-all topics. |
+| Google Trends access breaks (unofficial scraping) | A run fails `no_trend_data` rather than inventing topics; the provider sits behind `TrendProvider`, so a paid source is a one-file swap. |
 | Recovery requeues a run that is merely slow, and it executes twice | Why staleness is measured from the heartbeat rather than from `started_at`: a live run is never quiet, at any duration. The heartbeat never raises, the staleness window is validated at 3× the ping interval, and the sweep runs between polls so a worker cannot sweep its own run. |

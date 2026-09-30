@@ -21,6 +21,8 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.api import automation
+from app.api.console import research as console_research
 from app.api.console import routes as console_routes
 from app.api.public import contact as public_contact
 from app.api.public import feed as public_feed
@@ -29,6 +31,7 @@ from app.api.public import readers as public_readers
 from app.config import get_settings
 from app.db import dispose_engine, get_session_factory
 from app.discovery.schedule import ScanScheduler
+from app.logging_setup import configure_logging
 from app.security.auth import AuthError
 from app.services.reader import ReaderError
 from app.services.review import ReviewError
@@ -71,10 +74,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    logging.basicConfig(
-        level=logging.DEBUG if settings.debug else logging.INFO,
-        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-    )
+    configure_logging(logging.DEBUG if settings.debug else logging.INFO)
 
     app = FastAPI(title="You.th API", version="0.1.0", lifespan=lifespan)
 
@@ -101,6 +101,9 @@ def create_app() -> FastAPI:
     app.include_router(public_media.router, prefix="/api")                     # images
     app.include_router(console_routes.auth_router, prefix="/api/console")     # login
     app.include_router(console_routes.router, prefix="/api/console")           # reviewer
+    app.include_router(console_research.router, prefix="/api/console")        # research
+    # n8n. Shared-secret auth, and 404 throughout while no token is configured.
+    app.include_router(automation.router, prefix="/api")                       # n8n
 
     @app.exception_handler(ReviewError)
     async def _review_error(_: Request, exc: ReviewError) -> JSONResponse:

@@ -95,6 +95,8 @@ class ScanReport:
     suppressed: list[tuple[str, str]] = field(default_factory=list)
 
     observations_written: int = 0
+    #: Rows past `discovery_observation_retention_days`, deleted on success.
+    observations_pruned: int = 0
     candidates_proposed: int = 0
     candidates_expired: int = 0
 
@@ -287,7 +289,7 @@ async def run_scan(
     limit: int | None = None,
     max_records: int | None = None,
     seed_names: Sequence[str] = (),
-    backfill_months: int = 6,
+    backfill_months: int = 4,
     today: date | None = None,
     on_progress: Progress | None = None,
 ) -> ScanReport:
@@ -365,9 +367,7 @@ async def run_scan(
         # discovery_descriptors, so the vocabulary has to exist before anything
         # can reference it.
         await service.upsert_descriptors(names, kinds)
-        report.observations_written = await service.record_observations(
-            scan.id, records, kinds
-        )
+        report.observations_written = await service.record_observations(records, kinds)
 
         if not bootstrap:
             # Count the trend over the trailing `window_days` only, not over
@@ -471,6 +471,9 @@ async def run_scan(
             )
             if not bootstrap
             else 0
+        )
+        report.observations_pruned = await service.prune_observations(
+            window.end - timedelta(days=settings.discovery_observation_retention_days)
         )
         await service.finish_scan(
             scan,

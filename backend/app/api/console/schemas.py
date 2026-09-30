@@ -20,12 +20,16 @@ from app.domain.enums import (
     ContactStatus,
     DiscoveryCandidateStatus,
     ImageFrame,
+    ResearchCandidateStatus,
+    ResearchRunMode,
+    ResearchRunStatus,
     RunStatus,
     StudyType,
     Subject,
     UserRole,
     Verdict,
 )
+from app.research.contracts import Category, ResearchParams
 
 # --- auth ------------------------------------------------------------------
 
@@ -81,6 +85,13 @@ class QueuePageOut(CamelModel):
     next_cursor: str | None = None
 
 
+class ExcerptOut(CamelModel):
+    """A full-text passage the synthesis model was shown for a source."""
+
+    section: str | None
+    text: str
+
+
 class ReviewSourceOut(CamelModel):
     """A source in the review panel — richer than the public equivalent."""
 
@@ -111,6 +122,10 @@ class ReviewSourceOut(CamelModel):
     concern: bool = False
     #: Which provider said so, e.g. "pubmed: retracted publication".
     retraction_note: str | None = None
+    #: Full-text passages the model was shown beside the abstract. An article
+    #: may quote a number from one of these that the abstract does not state,
+    #: so the reviewer needs them to check it. Empty for most sources.
+    excerpts: list[ExcerptOut] = Field(default_factory=list)
 
 
 class ValidationFailureOut(CamelModel):
@@ -479,3 +494,69 @@ class TrendScanOut(CamelModel):
     error: str | None
     #: When a scan — cron or console — last succeeded. From the ledger.
     last_scan_at: datetime | None
+
+
+# --- research agent --------------------------------------------------------
+
+
+class ResearchRunRequest(CamelModel):
+    """Optional overrides for one research run; omitted fields use settings.
+
+    The desk button and n8n's automation call send the same shape, and both
+    become the same ``ResearchParams``.
+    """
+
+    target_article_count: int | None = Field(default=None, ge=1, le=10)
+    categories: list[Category] | None = None
+    trend_window_days: int | None = Field(default=None, ge=1, le=30)
+    geo: str | None = Field(default=None, min_length=2, max_length=2)
+    language: str | None = Field(default=None, min_length=2, max_length=2)
+
+    def to_params(self) -> ResearchParams:
+        return ResearchParams.model_validate(self.model_dump())
+
+
+class AutomationResearchRequest(ResearchRunRequest):
+    #: ``weekly`` from the scheduled workflow, ``manual`` from the webhook one.
+    mode: ResearchRunMode = ResearchRunMode.WEEKLY
+
+
+class ResearchCandidateOut(CamelModel):
+    """One topic a research run considered.
+
+    ``signals`` and ``scores`` are the stored JSON verbatim — provider data and
+    component scores — so their inner keys are snake_case.
+    """
+
+    id: str
+    canonical_topic: str
+    category: str | None
+    queries: list[str]
+    status: ResearchCandidateStatus
+    discard_reason: str | None
+    evidence_status: str | None
+    overall: float | None
+    rank: int | None
+    scores: dict
+    signals: dict
+    pipeline_run_id: str | None
+    decided_at: datetime | None
+    dismiss_reason: str | None
+
+
+class ResearchRunOut(CamelModel):
+    id: str
+    label: str
+    mode: ResearchRunMode
+    status: ResearchRunStatus
+    stage: str | None
+    params: dict
+    provider_status: dict
+    stage_log: list
+    notes: list
+    error: dict | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    #: Filled on the single-run read; empty on the list.
+    candidates: list[ResearchCandidateOut] = Field(default_factory=list)

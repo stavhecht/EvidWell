@@ -8,7 +8,7 @@
 -- match settings.embedding_dim in the application config.
 --
 -- ---------------------------------------------------------------------------
--- This file is a squashed baseline, collapsed four times. The first pass folded
+-- This file is a squashed baseline, collapsed five times. The first pass folded
 -- in retry bookkeeping, the removal of an unused HNSW index, and run
 -- heartbeats. The second (2026-08-21) folded in the `narrative_review` study
 -- type and the per-stage token ledger. The third, the same day, folded in
@@ -31,6 +31,18 @@
 -- ~3 minute rebuild (`scan_trends --bootstrap --apply`) and tens of thousands
 -- of rows. That is affordable for one developer and for nobody else.
 --
+-- The fifth (2026-09-30) folded in 0002–0005: abstracts embedded as
+-- overlapping chunks in `source_chunks`, `sources.chunk_settings`, the
+-- full-text excerpts on `article_sources`, and the research agent's
+-- `research_runs` / `research_candidates`. It also removed columns that were
+-- written and never read: `source_chunks.content` (the chunk text; ranking
+-- reads only the vector, and a chunk can be re-cut from the abstract),
+-- `articles.source_blurb` (a copy of `pipeline_runs.source_blurb`, reachable
+-- through `pipeline_run_id`), and `discovery_observations.major_topic`,
+-- `.scan_id` and `.first_seen_at`, and `discovery_descriptors.first_seen_at`
+-- and `.last_seen_at`. The existing data was copied across rather than
+-- discarded (the old database was kept, renamed, as the backup).
+--
 -- scripts/migrate.py records a sha256 per filename and refuses to re-run a file
 -- whose contents changed, which is what makes squashing a deliberate act rather
 -- than an accident. From here every schema change is a new numbered file,
@@ -39,8 +51,8 @@
 -- ORDERING. Two things move relative to where they were written. The shared
 -- trigger functions are defined before the first table that attaches a trigger,
 -- rather than after every table, so `readers` can carry its `touch_updated_at`
--- at its own definition site. And the discovery tables sit last, because they
--- carry foreign keys into `users`, `pipeline_runs` and `study_type`.
+-- at its own definition site. And the discovery and research tables sit last,
+-- because they carry foreign keys into `users`, `pipeline_runs` and `study_type`.
 -- ---------------------------------------------------------------------------
 
 \set ON_ERROR_STOP on
@@ -146,7 +158,8 @@ CREATE TYPE discovery_scan_status      AS ENUM ('running', 'succeeded', 'failed'
 CREATE TYPE discovery_scan_mode        AS ENUM ('scan', 'bootstrap');
 CREATE TYPE discovery_descriptor_kind  AS ENUM ('substance', 'outcome', 'stoplisted');
 CREATE TYPE discovery_candidate_status AS ENUM ('proposed', 'promoted', 'dismissed', 'expired');
-CREATE TYPE run_origin                 AS ENUM ('console', 'discovery');
+-- 'research': a reviewer promoting a topic the research agent proposed.
+CREATE TYPE run_origin                 AS ENUM ('console', 'discovery', 'research');
 
 -- ---------------------------------------------------------------------------
 -- Shared trigger functions
@@ -198,11 +211,11 @@ CREATE TABLE users (
 CREATE UNIQUE INDEX users_email_key ON users (lower(email));
 
 -- ---------------------------------------------------------------------------
--- sources — the growing library of cited literature. Also the vector store.
+-- sources — the growing library of cited literature.
 --
--- One row per paper, one embedding per abstract (no chunking in the MVP).
--- Metadata columns are stored but NOT embedded; they drive the evidence-grade
--- filter during re-ranking.
+-- One row per paper. Its vectors live in `source_chunks`, one per chunk of the
+-- abstract. Metadata columns are stored but NOT embedded; they drive the
+-- evidence-grade filter during re-ranking.
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE sources (
@@ -220,9 +233,16 @@ CREATE TABLE sources (
     citation_count INTEGER,
     url            TEXT,
     source_api     TEXT NOT NULL,          -- 'pubmed' | 'europe_pmc' | 's2' | 'openalex'
-    embedding      vector(:embedding_dim),
-    embedding_model TEXT,                  -- provider+model that produced the vector
+    -- Which provider+model embedded this paper's chunks, and how they were cut
+    -- (`CHUNK_SETTINGS` in app/retrieval/chunking.py, e.g. '300/30 words'). A
+    -- paper is current only when BOTH match the live values, so changing the
+    -- chunk size re-chunks the cache instead of leaving it cut the old way
+    -- forever. NULL means never embedded: `python -m scripts.reembed_sources`.
+    embedding_model TEXT,
+    chunk_settings TEXT,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- When a run last retrieved this paper. Not read yet: it is the key a
+    -- cache-eviction policy would use ("not seen in a year, never cited").
     last_seen_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
 
     -- Retraction record. A citation is a promise that a study says what we
@@ -282,7 +302,31 @@ CREATE UNIQUE INDEX sources_pmid_key ON sources (pmid)       WHERE pmid IS NOT N
 CREATE INDEX sources_study_type_year_idx ON sources (study_type, year DESC);
 
 -- ---------------------------------------------------------------------------
--- There is deliberately NO ANN index on sources.embedding. This is the second
+-- source_chunks — one vector per overlapping chunk of a paper's abstract.
+--
+-- app/retrieval/chunking.py cuts each abstract into 300-word windows that
+-- repeat the last 30 words of the one before (inside mxbai-embed-large's
+-- 512-token window, past which Ollama truncates silently). A paper's
+-- similarity to a claim is its BEST chunk's (app/retrieval/rerank.py).
+-- Written only by retrieval/cache.py::write_chunks, which replaces a paper's
+-- chunks wholesale so a shorter re-chunk leaves no stale ordinals.
+--
+-- No text column: ranking reads only the vector, the model is shown the whole
+-- abstract from `sources`, and a chunk can be re-cut from that abstract with
+-- `chunk_text` at any time. Storing the text as well was a second copy of
+-- every abstract that nothing read.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE source_chunks (
+    source_id  UUID     NOT NULL REFERENCES sources (id) ON DELETE CASCADE,
+    ordinal    SMALLINT NOT NULL,          -- 0, 1, 2… in reading order
+    embedding  vector(:embedding_dim) NOT NULL,
+    PRIMARY KEY (source_id, ordinal)
+);
+
+-- ---------------------------------------------------------------------------
+-- There is deliberately NO ANN index on the vectors (then sources.embedding,
+-- now source_chunks.embedding — the reasoning is unchanged). This is the second
 -- attempt at that decision: an earlier version of this schema created an HNSW
 -- index here and nothing could ever use it.
 --
@@ -312,8 +356,8 @@ CREATE INDEX sources_study_type_year_idx ON sources (study_type, year DESC);
 -- feature. Neither exists, and adding the index before one of them does is
 -- paying the 48x for a query nobody has written.
 --
---     CREATE INDEX CONCURRENTLY sources_embedding_hnsw
---         ON sources USING hnsw (embedding vector_cosine_ops)
+--     CREATE INDEX CONCURRENTLY source_chunks_embedding_hnsw
+--         ON source_chunks USING hnsw (embedding vector_cosine_ops)
 --         WITH (m = 16, ef_construction = 64);
 --
 -- CONCURRENTLY because by then the table will be large and the build slow. It
@@ -338,7 +382,6 @@ CREATE TABLE articles (
 
     -- Input that produced this article
     topic             TEXT NOT NULL,
-    source_blurb      TEXT,
     product           TEXT NOT NULL,
     target_claims     TEXT[] NOT NULL DEFAULT '{}',
     ingredients       TEXT[] NOT NULL DEFAULT '{}',
@@ -517,6 +560,13 @@ CREATE TABLE article_sources (
     -- left out — omission is the failure mode human review exists to catch.
     was_cited       BOOLEAN NOT NULL DEFAULT FALSE,
     relevance_score REAL,
+    -- The full-text excerpts the synthesis model was shown for this source, as
+    -- a JSON list of {"section", "text"}, copied from exactly what was rendered
+    -- into the prompt (app/pipeline/steps/full_text.py). An article can state a
+    -- number that is in the paper but not its abstract, and the reviewer
+    -- checking it needs the passage. NULL: none shown (not open access, not
+    -- chosen, or the article predates full text). Written once, at PERSIST.
+    excerpts        JSONB,
 
     PRIMARY KEY (article_id, source_id, claim)
 );
@@ -964,9 +1014,6 @@ CREATE TABLE discovery_descriptors (
     -- descriptor and decided it carries no signal.
     kind          discovery_descriptor_kind NOT NULL,
 
-    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-
     CONSTRAINT discovery_descriptors_ui_is_mesh CHECK (ui ~ '^[DCQ][0-9]{6,9}$')
 );
 
@@ -994,8 +1041,6 @@ CREATE TABLE discovery_observations (
     -- scan and a hash join per window.
     is_substance           BOOLEAN NOT NULL,
 
-    major_topic            BOOLEAN NOT NULL DEFAULT FALSE,
-
     -- Whether this paper tagged the descriptor with an intervention qualifier
     -- (/administration & dosage, /therapeutic use, /pharmacology, /adverse
     -- effects). Kept per observation rather than aggregated, because the
@@ -1007,13 +1052,9 @@ CREATE TABLE discovery_observations (
     -- Feeds the quality weight in the score.
     study_type             study_type NOT NULL DEFAULT 'unknown',
 
-    -- The scan that FIRST saw this pair. SET NULL, not CASCADE: observations are
-    -- the baseline and must outlive the scan that recorded them — cascading here
-    -- would let deleting one scan row silently rewrite history for every
-    -- descriptor it touched, and the resulting hole reads as a surge.
-    scan_id                UUID REFERENCES discovery_scans (id) ON DELETE SET NULL,
-
-    first_seen_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- No scan_id: nothing asked which scan first saw a pair, and without the
+    -- FK the ledger cannot be rewritten by deleting a scan row either. No
+    -- major_topic or first_seen_at either — both were written and never read.
 
     -- This is the dedup. Writes are ON CONFLICT DO NOTHING, which is what makes
     -- re-reading an overlapping window free and the script idempotent.
@@ -1032,6 +1073,13 @@ COMMENT ON TABLE discovery_observations IS
     'One row per (MeSH descriptor, paper). Every trend count is a COUNT(DISTINCT '
     'pmid) over this table, never an incremented counter — which is what lets '
     'successive scans re-read overlapping windows without double counting.';
+
+-- Retention: a succeeded scan deletes rows whose entrez_date is older than
+-- `discovery_observation_retention_days` (app/discovery/service.py::prune).
+-- The scorer reads the current window plus `discovery_baseline_windows`
+-- before it, and angles read `discovery_angle_lookback_days`; everything older
+-- is written by a bootstrap and never read. Measured 2026-09-30: 51% of the
+-- ledger (42,895 of 84,327 rows) was older than that.
 
 -- ---------------------------------------------------------------------------
 -- discovery_candidates — what a reviewer is actually shown.
@@ -1160,6 +1208,95 @@ COMMENT ON TABLE discovery_candidates IS
     'A proposed article topic, ranked by how fast its literature is growing. A '
     'proposal only — promotion to a pipeline run is a reviewer action, and '
     'nothing here spends money on its own.';
+
+-- ---------------------------------------------------------------------------
+-- research_runs / research_candidates — the research agent (app/research).
+--
+-- A run reads internet trend signals (Google Trends, web search, news), checks
+-- each candidate topic against PubMed and Europe PMC, scores it, and proposes
+-- 4-6 topics for the desk. Like the MeSH scan it PROPOSES and never enqueues:
+-- a pipeline run is created only when a reviewer promotes a candidate
+-- (run_origin 'research'). DESIGN.md §4b.
+--
+-- Separate from discovery_candidates, whose identity is a MeSH descriptor
+-- (substance_ui NOT NULL); a trend query like "creatine before bed" has none.
+--
+-- research_candidates.id has no default: the graph assigns ids in Python when
+-- a candidate is first built and rewrites each row by primary key after every
+-- stage, so a run's progress is visible while it is still going.
+--
+-- Retention: when a run finishes, candidates nobody decided on from runs older
+-- than `research_retention_days` are deleted (novelty reads only promoted and
+-- dismissed rows), and a discarded candidate is stored without its example
+-- results and papers — the reason it was discarded is what the desk shows.
+-- ---------------------------------------------------------------------------
+
+CREATE TYPE research_run_mode AS ENUM ('weekly', 'manual');
+CREATE TYPE research_run_status AS ENUM ('queued', 'running', 'completed', 'failed');
+CREATE TYPE research_candidate_status AS ENUM (
+    'candidate', 'discarded', 'shortlisted', 'selected', 'promoted', 'dismissed'
+);
+
+CREATE TABLE research_runs (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    label            TEXT NOT NULL UNIQUE,
+    mode             research_run_mode NOT NULL,
+    status           research_run_status NOT NULL DEFAULT 'queued',
+    stage            TEXT,
+    params           JSONB NOT NULL,
+    config           JSONB NOT NULL,
+    provider_status  JSONB NOT NULL DEFAULT '{}'::jsonb,
+    stage_log        JSONB NOT NULL DEFAULT '[]'::jsonb,
+    notes            JSONB NOT NULL DEFAULT '[]'::jsonb,
+    error            JSONB,
+    requested_by     UUID REFERENCES users(id) ON DELETE SET NULL,
+    attempts         INTEGER NOT NULL DEFAULT 0,
+    heartbeat_at     TIMESTAMPTZ,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at       TIMESTAMPTZ,
+    finished_at      TIMESTAMPTZ
+);
+
+-- The worker's claim query: oldest queued first.
+CREATE INDEX research_runs_claimable_idx ON research_runs (created_at)
+    WHERE status = 'queued';
+
+CREATE TABLE research_candidates (
+    id               UUID PRIMARY KEY,
+    research_run_id  UUID NOT NULL REFERENCES research_runs(id) ON DELETE CASCADE,
+    canonical_topic  TEXT NOT NULL,
+    category         TEXT,
+    queries          JSONB NOT NULL,
+    signals          JSONB NOT NULL,
+    scores           JSONB NOT NULL,
+    evidence_status  TEXT,
+    overall          DOUBLE PRECISION,
+    rank             INTEGER,
+    status           research_candidate_status NOT NULL DEFAULT 'candidate',
+    discard_reason   TEXT,
+    pipeline_run_id  UUID REFERENCES pipeline_runs(id) ON DELETE SET NULL,
+    decided_by       UUID REFERENCES users(id) ON DELETE SET NULL,
+    decided_at       TIMESTAMPTZ,
+    dismiss_reason   TEXT,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    -- The same three guarantees discovery_candidates carries.
+    CONSTRAINT research_candidates_promoted_has_run CHECK (
+        status <> 'promoted' OR pipeline_run_id IS NOT NULL
+    ),
+    CONSTRAINT research_candidates_decided_has_reviewer CHECK (
+        status NOT IN ('promoted', 'dismissed')
+        OR (decided_by IS NOT NULL AND decided_at IS NOT NULL)
+    ),
+    CONSTRAINT research_candidates_dismissed_has_reason CHECK (
+        status <> 'dismissed' OR dismiss_reason IS NOT NULL
+    )
+);
+
+CREATE INDEX research_candidates_run_idx ON research_candidates (research_run_id, rank);
+-- Novelty reads every decided candidate of the last months.
+CREATE INDEX research_candidates_decided_idx ON research_candidates (decided_at DESC)
+    WHERE status IN ('promoted', 'dismissed');
 
 COMMIT;
 

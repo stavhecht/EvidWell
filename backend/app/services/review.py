@@ -415,6 +415,7 @@ class ReviewService:
                 "retracted": source.retracted_at is not None,
                 "concern": source.concern_at is not None,
                 "retraction_note": source.retraction_note,
+                "excerpts": link.excerpts or [],
             }
             for link, source in result.all()
         ]

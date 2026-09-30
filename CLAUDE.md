@@ -11,17 +11,15 @@ All backend commands run from `backend/` with the venv active (`source .venv/bin
 docker compose up -d db                  # pgvector/pgvector:pg16 on :5432
 pip install -e ".[dev]"
 python -m scripts.migrate                # applies migrations via asyncpg; no psql needed
-                                         # 0001_initial.sql — squashed 2026-09-06,
-                                         # folding in what had been 0002–0006 (readers and the
-                                         # contact inbox, subject and card image, generated
-                                         # imagery, media_objects, trend discovery). Squashing
+                                         # 0001_initial.sql is the only file — squashed a fifth
+                                         # time on 2026-09-30, folding in source_chunks,
+                                         # chunk_settings, full-text excerpts and the research
+                                         # tables, and dropping 7 write-only columns. The data
+                                         # was COPIED into a fresh database, not discarded; the
+                                         # old one is kept as evidwell_backup_20260930. Squashing
                                          # is only free while every database holding the schema
-                                         # can be dropped and rebuilt; the file's header states
-                                         # that condition. 0002_source_chunks.sql moved the
-                                         # vectors into overlapping abstract chunks, and
-                                         # 0003_chunk_settings.sql records how each paper was
-                                         # cut (run reembed_sources --apply after either).
-                                         # Next is 0004.
+                                         # can be rebuilt; the file's header states that
+                                         # condition. Next is 0002.
 python -m scripts.migrate --status
 python -m scripts.seed_admin --email you@example.com --name "Your Name"
 
@@ -30,14 +28,22 @@ python -m scripts.reclassify_sources          # after any classifier change
 python -m scripts.check_retractions           # re-check cited sources
 python -m scripts.check_retractions --scope all
 python -m scripts.reembed_sources             # after any EMBEDDING_PROVIDER / model /
-                                              # chunk-size change, and after 0002 and 0003
+                                              # chunk-size change
+python -m scripts.prune_media                 # stored images no article references
+                                              # (7-day grace); Regenerate orphans them
 python -m scripts.scan_trends                 # trend discovery; dry run makes the API calls
                                               # (same code as the console's Run scan button)
 python -m scripts.scan_trends --bootstrap --apply   # one-time, ~3 min: build the baseline
+                                                    # (4 months; retention keeps 120 days)
 
 # run
 uvicorn app.main:app --reload            # API :8000, OpenAPI at /docs
-python -m app.pipeline.runner            # generation worker, separate terminal
+python -m app.pipeline.runner            # generation worker, separate terminal; also runs
+                                         # research runs (the desk's Find trending topics)
+
+# n8n (weekly research schedule + manual webhook), from the repo root — see n8n/README.md
+docker compose --profile automation up -d n8n
+docker compose exec n8n n8n import:workflow --separate --input=/workflows
 
 # check
 pytest tests/ -q
@@ -86,13 +92,13 @@ Two declared checks do not currently pass, so don't read a failure as something 
 
 ## Testing gotchas
 
-**Seven suites skip silently when no database is reachable**, and they are the ones covering
+**Nine suites skip silently when no database is reachable**, and they are the ones covering
 guarantees a fake session cannot express — SQL semantics, transaction boundaries, and the
 query planner. A green `pytest` with the DB down is a much weaker signal than it looks:
 
 | Suite | What goes unverified when skipped |
 |---|---|
-| `test_db_invariants.py` | the CHECK constraint and the immutability trigger — invariants #1 and #4 |
+| `test_db_invariants.py` | the CHECK constraint and the immutability trigger — invariants #1 and #4 — and SQL `NULL`, not JSON `null`, in the nullable JSON columns |
 | `test_source_cache.py` | resolve-then-update, the `SAVEPOINT` retry, split-row reporting, re-embedding replacing stale chunks, a new chunk size counting as stale |
 | `test_orchestrator_transactions.py` | per-stage commit, and persist+completion being atomic |
 | `test_worker_claim.py` | the claim `UPDATE`, and `attempts` counted at claim time |
@@ -100,6 +106,7 @@ query planner. A green `pytest` with the DB down is a much weaker signal than it
 | `test_rerank_plan.py` | the `EXPLAIN` assertion that no approximate scan is chosen, and a paper scoring as its best chunk |
 | `test_reader_accounts.py` | the composite FK on `reader_saves`, the save-is-a-move primary key, folder-name uniqueness, and the contact `CHECK` |
 | `test_discovery_db.py` | the one-live-proposal-per-substance index, the observation ledger's idempotence, the three decision CHECKs, the descriptor FK that forces the scan's write order, and `pipeline_runs.origin` defaulting |
+| `test_research_db.py` | the research candidates' three decision CHECKs, single-flight, the worker's claim, and checkpoint upserts by primary key (it deletes the rows it commits) |
 
 Point them elsewhere with `TEST_DATABASE_URL`; they otherwise use `database_url` from
 settings. `test_discovery_db.py` runs against a *populated* database on purpose — after a
@@ -126,15 +133,17 @@ the LLM generates under. If a stage's shape isn't in that file, it isn't defined
 (sentence counts, claim caps) are validators there rather than a global word count, so thin
 evidence yields a short article instead of padding.
 
-**The pipeline is seven ordered stages** — extract → retrieve → rank → synthesize →
+**The pipeline is eight ordered stages** — extract → retrieve → rank → full_text → synthesize →
 illustrate → validate → persist — in `pipeline/steps/`, driven by `pipeline/orchestrator.py`.
 Each stage is `(input, ctx) -> output` and maps 1:1 onto a future Step Functions state, so keep
 stages free of transport concerns. `ILLUSTRATE` sits where it does for a reason at both ends:
 it needs `ctx.draft`, so it must follow SYNTHESIZE, and **PERSIST must stay last** because its
-write commits atomically with the run-completion row (see below). `pipeline_stage_runs.ordinal`
-comes from list position *offset by the refinement round*, so runs recorded before illustrate
-existed carry `validate` at 4 and `persist` at 5 rather than 5 and 6 — correct about the pipeline
-they ran on, deliberately not backfilled. The orchestrator writes `pipeline_runs` / `pipeline_stage_runs` through
+write commits atomically with the run-completion row (see below). `FULL_TEXT` follows RANK so it
+reads only papers that made the cut, after the refinement loop has finished with them.
+`pipeline_stage_runs.ordinal` comes from list position *offset by the refinement round*, so runs
+recorded before illustrate existed carry `validate` at 4 and `persist` at 5 rather than 5 and 6,
+and runs before full_text (2026-09-29) carry everything from synthesize on one lower — correct
+about the pipeline they ran on, deliberately not backfilled. The orchestrator writes `pipeline_runs` / `pipeline_stage_runs` through
 a **separate session factory**, so bookkeeping survives a rolled-back article write.
 
 **Ordering is a LangGraph `StateGraph` (`pipeline/graph.py`); everything else stayed in the
@@ -152,15 +161,15 @@ attached and neither is expressible as a LangGraph feature. Three things are loa
   the only record of what a failed model call cost.
 - **Node names are positional (`stage_0`…).** Tests build orchestrators over a single fake
   stage; keying nodes on `StageName` would make the graph undefined for any list that is not the
-  full seven. `attempt` rides in the state rather than on the instance, so `run` stays reentrant.
+  full eight. `attempt` rides in the state rather than on the instance, so `run` stays reentrant.
 
 **`pipeline_stage_runs` is UNIQUE on `(run_id, attempt, ordinal)`, so a refinement pass cannot
 reuse RETRIEVE's list index.** `_run_stage` writes `ordinal + refine_round * len(stages)`. Get
 this wrong and the `IntegrityError` escapes the orchestrator entirely — it is raised by
 `_record_stage_start`, *before* the try block that converts stage failures — and crashes the
 worker's poll loop, leaving the run neither failed nor completed. The offset keeps ordinals
-monotonic in execution order (0..6, then 8, 9, then 10..13) and is a no-op on round 0, so an
-ordinary run records exactly what it always did. The **commit** boundary still keys on list
+monotonic in execution order (0..7 for an ordinary run; with one refinement 0..2, then 9, 10,
+then 11..15) and is a no-op on round 0, so an ordinary run records exactly what it always did. The **commit** boundary still keys on list
 position: "is this the last stage" is a question about the pipeline's shape, not about how many
 times it has looped. `tests/test_orchestrator_transactions.py::test_a_refinement_pass_does_not_collide_with_its_own_stage_row`
 fails with an `IntegrityError` without the offset.
@@ -218,26 +227,66 @@ window — and past that window Ollama truncates **silently**, dropping the end 
 abstract, which is usually its results. It was 120 words for a day (2026-09-29), which split
 94% of cached abstracts for no gain: the median is ~250 words and fits whole. At 300, three in
 four are one chunk and rank exactly as a whole-abstract vector did; only the long ones split.
-Every chunk gets its own vector in `source_chunks` (migration 0002), and a paper's similarity
+Every chunk gets its own vector in `source_chunks` (no text: a chunk is re-cut from the
+abstract when needed), and a paper's similarity
 to a claim is its **best** chunk's — not the mean, which lets the rest of a long abstract
 dilute the one passage that answers the claim, and not the sum, which rewards length. The
 model is still shown the whole abstract; chunks exist only for ranking.
 
-`sources.embedding_model` and `sources.chunk_settings` (migration 0003) record which model
+`sources.embedding_model` and `sources.chunk_settings` record which model
 embedded a paper's chunks and how they were cut, and a paper is current only when **both**
 match the live values — so editing `CHUNK_WORDS` re-chunks the cache instead of leaving it cut
 the old way forever. `cache.py::write_chunks` is the only writer: the pipeline and
 `scripts/reembed_sources.py` both go through it, and it deletes a paper's old chunks before
 writing new ones, so a shorter re-chunk cannot leave stale ordinals behind.
 
-**When full text arrives, rank on the abstract anyway.** Europe PMC serves full text for
-open-access papers — measured 2026-09-29, 144 of the 309 cached papers, one of them ~19,600
-words against ~250 for an abstract. That is where chunking is genuinely needed (the synthesis
-window cannot hold twelve full papers), but only half the papers have it, and best-chunk
-scoring over sixty chunks against three is a length bias: ranking would reward being open
-access, not being good evidence. Rank every paper on its abstract, then pull full-text
-passages only for the papers that already made the cut — the split `source_passages` in
-`0001_initial.sql` was sketched for.
+**Full text adds detail to ranked papers; it never ranks them.** `FULL_TEXT`
+(`pipeline/steps/full_text.py`) asks Europe PMC which ranked papers are open access, picks up to
+`full_text_max_papers` (6) with the claims taking turns so every claim gets one before any gets
+a second, downloads them (`retrieval/full_text.py`, JATS body only), splits them with the same
+`chunk_text`, and hands SYNTHESIZE the `EXCERPTS_PER_PAPER` (2) chunks closest to each paper's
+claims. Ranking stays on abstracts on purpose: measured 2026-09-29, only 144 of the 309 cached
+papers are open access, and best-chunk scoring over a ~20,000-word paper's sixty chunks
+against an abstract's one is a length bias — it would reward being open access, not being good
+evidence. Five things about it:
+
+- **It never fails a run**, like ILLUSTRATE and for the same reason: without excerpts the
+  article is written from abstracts, exactly as before the stage existed — the status quo, not a
+  hidden degradation. `metrics.full_text.cause` says why there were none (`disabled`,
+  `lookup_failed`, `no_open_access`, `download_failed`, `unexpected`). Europe PMC's search
+  endpoint was measured returning 503 for every query for a stretch of 2026-09-29, so
+  `lookup_failed` is a real state, not a theoretical one.
+- **Introduction and Background are never excerpted**, and this was measured, not guessed: the
+  first live run picked *both* its excerpts from a Background section, because background text
+  restates the claim's own wording. It also summarises *other* papers — "[3, 5, 21]" — so an
+  excerpt from it invites the model to credit this paper with its reference list's findings.
+  With them excluded the same paper yielded Methods (57 recruited, 25 per arm) and Conclusion.
+  Discussion is kept, though it too cites others; watch it.
+- **The prompt says a source without excerpts is not weaker evidence.** Handing the model more
+  detail about open-access papers pulls it toward them; that sentence and the cap of six are the
+  counterweight. The verdict cap is untouched — it reads study types and counts, never text — so
+  excerpts cannot raise how confident an article may sound.
+- **Excerpts are recorded from `synthesis_input`, not from `ctx.excerpts`** (`persist.py::
+  excerpts_shown`) — what the model saw, for the reason VALIDATE checks handles against it — onto
+  `article_sources.excerpts` (`NullableJSONB`), and shown in the desk's sources
+  panel. An article can quote a number that is in the paper but not its abstract, and the desk
+  shows no abstracts, so without that list a reviewer had to open the paper to check one.
+- **Full text is fetched per run, not cached.** Six downloads is cheap next to a synthesis call,
+  and there is nothing to keep fresh. `source_passages` in `0001_initial.sql` is still only a
+  sketch; build it if fetching becomes the bottleneck, not before.
+- **A paper with no PMID is looked up by its DOI**, in the same Europe PMC request
+  (`retrieval/identifiers.py`, `metrics.full_text.looked_up_by_doi`). It used to be skipped
+  before Europe PMC was asked. The paper's own reference numbers (`[34,35,36]`) are stripped
+  from excerpts in `parse_sections`: they point at a list the model never sees, and a copied
+  square bracket fails the draft (see the citation-marker paragraph below).
+- **Passages describing a review's literature search are never excerpted**
+  (`describes_literature_search`, `metrics.full_text.search_passages_skipped`). "The literature
+  search identified 4788 articles…" names the claim's words as search terms, so it scored 0.71
+  against a findings passage's 0.712 and was chosen. Ranking against `"<product>: <claim>"`
+  instead of the bare claim was measured the same day and made it worse: it chose two such
+  passages for the review and swapped an RCT's Discussion for an off-topic one. Keep the bare
+  claim. The filter needs two distinct search phrases and deliberately omits "were screened" and
+  "eligibility criteria", which also describe a trial's recruitment and its sample size.
 
 **Every query must name a substance, and failing to is a stage failure — not a warning.**
 `QueryStrategy.build()` takes `product` and `ingredients` separately: ingredients name the
@@ -262,6 +311,17 @@ carrying no identifier at all: errata and conference abstracts repeat their pare
 over-merging silently deletes a study while under-merging only costs a prompt slot. This is
 invisible with PubMed alone (its records carry both identifiers) and appears the day the other
 providers come online — watch `retrieve.duplicates_merged`.
+
+**A DOI-only paper is given its PMID when Europe PMC knows one**, in `RetrieveStage._fill_pmids`
+after the first merge and before the cap, and the merge then runs again, so a filled PMID bridges
+a DOI-only and a PMID-only record of one paper. A PMID is taken only from a record whose *own*
+DOI matches, and a DOI answering to two PMIDs is left alone: guessing would merge two papers. A
+lookup that fails never fails the stage (`retrieve.pmid_lookup_failed`), because the search
+itself worked. Expect `pmids_filled` to be low: OpenAlex already reports a PMID when one exists,
+and measured 2026-09-29 all nine DOI-only papers in the cache had none in PubMed, Europe PMC or
+NCBI's ID converter. They are in journals MEDLINE does not index, so there is nothing to assign.
+A cached DOI-only row picks up its PMID the next time a run retrieves it (the cache's
+`COALESCE`).
 
 `RetrieveStage` is the only stage that writes to the cache; it carries each candidate's row id
 forward as a `CachedCandidate` on `ctx.candidates`, so **`RankStage` takes no `SourceCache` and
@@ -339,10 +399,21 @@ which claim sent us looking is a fact about our query, and asserting the paper b
 hand the model its conclusion.
 
 **`SynthesizeStage` re-prompts once when a draft ignores its sources — and that is a coverage
-rule, not a length one.** The gate is `MIN_CITED_FRACTION` (0.5) of the offered sources, and only
+rule, not a length one.** The gate is `MIN_CITED_FRACTION` (0.75) of the offered sources, and only
 when `SECTIONS_EXPECTED_FROM` (6) or more were offered. A draft citing one of two sources has
 nothing more to say and is never asked; a draft handed 24 systematic reviews that wrote about
 three of them is.
+
+**A source counts only when it has a citation of its own**: a chip of at most
+`MAX_HANDLES_PER_CITATION` (3) handles, where a chip is a run of adjacent markers split by the same
+`CITATION_RUN_RE` the renderer uses, so `[S1][S2][S3][S4]` is one citation of four. Counting every
+handle in the body was gameable, and was gamed: a 109-word article counted as citing 22 of its 24
+sources because 19 of them sat in one bracket. Of the 57 citations in the database on 2026-09-29,
+54 carried one to three handles. Both changes landed together that day (the bar was 0.5 before),
+and against the twelve articles then in the database the new rule re-prompts every first draft, so
+expect it to fire on most runs; each firing is one more synthesis call. `handles_covered` and
+`first_draft_handles_covered` record the count beside `handles_cited`, which, like `was_cited` and
+validation, still counts every handle.
 
 **It was briefly a word-count floor aimed at a three-minute read, and that was wrong twice over.**
 It fired on essentially every run, because no local model this machine can hold writes 700 words
@@ -357,16 +428,20 @@ problem was found — but nothing branches on it.
 
 Three rules keep the nudge from becoming a floor by another name: a thin source set is never
 re-prompted, it asks exactly once, and a re-prompt that *raises* keeps the first draft rather than
-failing the run. The feedback names the unused handles and refuses padding explicitly, because an
-instruction to write more, handed to a model with nothing left to say, produces exactly the
-manufactured nuance §6 refuses.
+failing the run. The feedback names the unused handles, separating never-cited ones from those
+cited only inside a long list, states the three-handle limit, and refuses padding explicitly,
+because an instruction to write more, handed to a model with nothing left to say, produces exactly
+the manufactured nuance §6 refuses.
 
-**The second draft is kept only if it cites more sources, and that rule was written the hard
-way.** Keeping it unconditionally was tried. Live, a draft citing 3 of 13 came back citing 1; and
+**The second draft is kept only if it gives more sources a citation of their own, and that rule
+was written the hard way.** Keeping it unconditionally was tried. Live, a draft citing 3 of 13 came back citing 1; and
 separately a 152-word `mixed` draft came back at `no_evidence` *while citing all thirteen
 sources*. Nothing downstream catches the latter — `no_evidence` is exempt from the cited-beat rule
 and sits below every ceiling, so it validates clean and publishes. The test is coverage, not
-length: a second draft that says more about fewer papers is not what was asked for.
+length: a second draft that says more about fewer papers is not what was asked for. And it is the
+same count the gate uses, because raw handles would prefer a second draft that lists everything in
+one bracket. Nothing guards the `no_evidence` case directly: a second draft that gives more sources
+their own citation *and* drops to `no_evidence` is still kept.
 
 **A docstring in `domain/contracts.py` is prompt text.** Pydantic uses a class docstring as the
 JSON-schema `description`, and `ollama_client.py` passes that schema in as the **generation
@@ -385,6 +460,8 @@ evidence-to-count rule, whose low end is *none at all*, so thin evidence still y
 article. `test_the_generation_grammar_carries_no_developer_rationale` fails when a file name or a
 brevity argument reaches the grammar again. This is the same lever as the `STUDY_TYPE_LABELS`
 glosses: a local model mimics what it is handed far more reliably than it follows a rule about it.
+The synthesis prompt itself opened with "You write short, evidence-checked articles" until
+2026-09-29; the word went for the same reason. Its effect is not measured yet.
 
 **All of the above was one root cause: `LLM_PROVIDER` was unset, so synthesis ran on
 `llama3.1:8b`.** It was handed 13 systematic reviews, cited 2, wrote 110 words and said `weak`.
@@ -409,14 +486,23 @@ or move to the hosted path, which needs the workspace header fix in the config t
 **Article body is TipTap JSON, not markdown.** The model emits plain text with `[S1]` markers;
 `services/tiptap.py::body_text_to_doc()` parses them into typed citation nodes at assembly.
 Parse failure is a validation failure. **`CITATION_MARKER_PATTERN` in `domain/contracts.py` is
-the only definition of a marker** — `tiptap.py` builds its run regex from it, and
-`extract_handles()` uses it directly. Do not restate the pattern in either place: the parser and
+the only definition of a marker** — `CITATION_RUN_RE` beside it is built from it (the renderer
+splits on it and SYNTHESIZE counts coverage by it), and `extract_handles()` uses it directly. Do not restate the pattern in either place: the parser and
 the extractor disagreeing means `was_cited` is false for a source the article visibly cites, and
 `check_beats_are_cited` flags a beat that is cited on the page. Both `[S1][S5]` and `[S1, S5]`
 are accepted and collapse into one citation node; ranges (`[S1-S8]`) are not, inline. Anything
 bracketed that is not a marker is a parse failure — checked by stripping valid markers and
 looking for leftover brackets, because the old "not a valid marker" pattern missed unterminated
 runs like `[S1, S5` and let them through as literal text. Validation walks the tree rather than regexing prose.
+**Sources are full of square brackets, so the model is shown them round.** Measured 2026-09-29: a
+draft copied `95 % CI = [-3.83 to -0.55]` out of an abstract into beat 2 and was discarded.
+`render_source_block` turns every square bracket in a title, abstract or excerpt round (`_round`),
+and the prompt says square brackets are for handles only. Only the rendering changes. The stored
+text is the source's own. The parse runs in VALIDATE (`check_body_parses`), not only in PERSIST, so
+`metrics.validate.passed` is true only for a draft that will actually be stored as
+`pending_review`. Before this, PERSIST added the failure after VALIDATE had recorded `passed:
+true`. The failure's `detail` holds the offending block's raw text, because a draft that does not
+parse is stored with an empty document.
 
 **The pipeline writes three block types and reviewers can add two more.** `paragraph` and
 `heading` (always level 2, one per `ArticleBody` section — DESIGN.md §6) come out of
@@ -592,8 +678,12 @@ worth having: the tile's picture was drawn for this article under the same locke
 prompt builder, and is discarded the moment the article stops carrying its partner. Neither
 frame asserts anything, so neither can assert what the other does not — which is exactly why
 redrawing one and not the other is safe. If they ever need to be provably the same photograph,
-render portrait once and crop the landscape with Pillow — which also halves the bill. That
-predicate is also where the cover gets its `MEDIA_SRC_RE` check: it is not in the document, so
+set `IMAGE_COVER_MODE=crop` — **the default since 2026-09-30**. It renders the landscape
+lead once and centre-crops the 3:4 cover out of it (`imagery/encode.py::crop_to_ratio`). That
+is one billed render instead of two, and in that mode everything above about differing
+compositions stops being true. A Regenerate press in crop mode always redraws both frames and
+counts as one render against `REGENERATE_BUDGET`. That predicate is also where the cover gets
+its `MEDIA_SRC_RE` check: it is not in the document, so
 `assert_media_is_ours` — which walks the document — never sees it.
 
 **Because either frame can be redrawn alone, provenance lives on the frame, not the pair.**
@@ -859,6 +949,54 @@ extraction call. Topics are composed as `"<substance> for <outcome>"` with the s
 first for that reason, and `tests/test_discovery_topics.py` pins that every botanical still anchors
 a query. It fails *visibly* — the run shows `failed` — so it costs one call, not a wrong article.
 
+**The research agent (`app/research`) is the second proposer, and it proposes too.** The MeSH
+scan asks what researchers are publishing more of. The research agent asks what *people* are
+searching for more — Google Trends, DuckDuckGo web and news, News API — and then what PubMed
+and Europe PMC can responsibly say about it. It writes `research_candidates` and never
+enqueues: "generate 4–6 articles weekly" was specified, and the decision taken was automatic
+research with a human pressing Generate draft. DESIGN.md §4b has the design. What to know
+when editing:
+
+- **One entry point, two triggers.** `research/service.py::start_research_run` is called by
+  `POST /console/research/runs` (the desk button, reviewer JWT) and
+  `POST /api/automation/research/runs` (n8n, `X-Trigger-Token`). n8n holds the schedule and
+  nothing else. Do not put research logic in a workflow, and do not route the desk button
+  through n8n: it must work while n8n is down. `mode` (weekly/manual) is metadata only.
+- **Runs are single-flight (409), and they run in the pipeline worker.** Both kinds of run
+  count papers against NCBI's per-IP ceiling through per-process throttles. A separate
+  research process would double the draw, so a queued draft waits behind a research run
+  (~8 minutes measured).
+- **Trend data decides what to *consider*; the literature decides what may be *proposed*.**
+  The evidence gate (`research_min_evidence_status`, default `emerging`) discards a breakout
+  topic with no literature whatever its trend score. Scoring is plain arithmetic in
+  `research/scoring.py`, not a model's judgement. A component with no data goes into
+  `scores.unavailable` and the rest is renormalised. It is never zero and never a guess,
+  except evidence: an unchecked topic gets no score at all.
+- **Google Trends' rising lists carry spam, and that was measured, not guessed.** On
+  2026-09-30 "fitness" and "protein" rising queries over 7 days were mostly unrelated
+  commercial queries at +7,000% ("learn golang", "online banking review"). The first live run
+  selected four product-review queries out of five. The defences are, in order:
+  1. `normalize.is_on_topic` requires a word in common with the seed or `WELLNESS_TERMS`;
+     `review`, `comparison` and `quotes` are shopping intent.
+  2. The triage model runs in batches of 25 and cannot make a topic out of more than 6 groups
+     or with the subject "various". Handed 75 at once, qwen2.5:7b made "General Wellness and
+     Health" out of 58 queries.
+  3. The evidence gate.
+
+  **Do not rely on the evidence gate alone.** Deep research gave "online banking review"
+  *moderate* evidence: the extraction model invented plausible claims, and the anchored query
+  found 14 papers.
+- **Triage output is deduplicated afterwards** (`triage.merge_duplicates`: same topic key,
+  or the same subject and outcome). Batches cannot see each other, so one run proposed
+  "gut health" beside "Gut Health". A query equal to its own seed ("sleep" under "sleep") is
+  dropped as the category rather than a trend in it.
+- **Deep research reuses the article pipeline's extraction and `TemplateQueryStrategy`**, so an
+  `UnanchoredQuery` topic is discarded before anyone can promote it.
+- **pytrends is archived and its `retries=` option crashes under urllib3 2**
+  (`method_whitelist`). It is created with `retries=0`, and `GoogleTrendsProvider` does its own
+  pacing (4 s) and 429 backoff (15 s, 45 s). The first request after a quiet spell is often a
+  429 that clears within ~20 s. Only that file imports pytrends.
+
 ## Invariants — do not route around these
 
 The four are stated with their enforcement mechanisms in [DESIGN.md](./DESIGN.md) §1. What
@@ -873,6 +1011,11 @@ matters when editing:
    exemptions, and they are exempt because they carry no findings. When the body grows a new
    place prose can live, that place belongs in `check_beats_are_cited` — otherwise lengthening
    the article silently widens a three-sentence allowance into most of the page.
+   A draft failing only fixable checks is sent back to SYNTHESIZE **once**
+   (`graph.py::MAX_REVISE_ROUNDS`, `REVISABLE_FAILURES`) with the failures fed back, and the
+   rewrite is validated like any draft. That is a second chance, not a softening: a second
+   failure is stored `validation_failed` as before. Stage-row ordinals are offset by
+   `refine_round + revise_round`, for the same `IntegrityError` reason as refinement.
 3. Evidence grade **and quantity** cap verdict confidence (`evidence/grading.py`). Exceeding
    the cap is a validation failure, not a style note. Two rules, both **per claim**, with the
    article inheriting its weakest claim's ceiling: the study-type ceiling, and a quorum of
@@ -920,7 +1063,9 @@ generated by a separate model call, so card and article cannot contradict each o
 - **Ollama's `format` is a decoding grammar, not a validator.** It guarantees JSON of the
   right shape and nothing else — the Pydantic validators in `domain/contracts.py` (sentence
   ceilings, 12-word headline) are still checked in Python, and small local models break them
-  often, so `ollama_client.py` retries once with the errors fed back. Also: `num_ctx` is set
+  often, so `ollama_client.py` retries once with the errors fed back, telling the model to change
+  only the fields named: an unscoped "shorten" invites a small model to cut the whole article to
+  fix one over-long section (reasoned, not measured). Also: `num_ctx` is set
   explicitly on both calls because the server default is 4K and overflow silently drops the
   front of the prompt — for synthesis that means sources vanish while the instruction to cite
   them survives.
@@ -946,7 +1091,10 @@ generated by a separate model call, so card and article cannot contradict each o
   sources vanish while the instruction to cite them survives, and the run fails as
   `hallucinated_handle` with nothing pointing at the real cause. A 32K window on an 8B model is
   also several GB of KV cache; if local runs crawl, drop to top-k 10 and 24K rather than
-  leaving them mismatched.
+  leaving them mismatched. **`full_text_max_papers` draws on the same window**: six papers at
+  two ~300-word excerpts is about 5,000 tokens. Measured 2026-09-29, the largest synthesis
+  prompts ran ~15K input tokens, so with 8K reserved for output six still fits; raising it, or
+  top-k, eats the margin.
 - **`thinking` is passed explicitly on both Anthropic calls, and must stay that way.** Whether
   an omitted `thinking` means "think" varies across the range (Sonnet 5 / Opus 5 do, Opus 4.8 /
   4.7 do not), and the model is config — leaving it implicit lets `EXTRACTION_MODEL` silently
@@ -976,6 +1124,11 @@ generated by a separate model call, so card and article cannot contradict each o
   without one — the run just reports `estimatedCostUsd: null` forever, which is honest and
   easy to miss. `test_cost_accounting.py` asserts the clients' four default models are all in
   `PRICES`, so the defaults are covered; a value set only in `.env` is not.
+- **Credentials in logged URLs are masked** by `app/logging_setup.py`, which both the API and
+  the worker configure logging through. httpx logs every request URL at `INFO` and NCBI takes
+  its key as `api_key=` in the query string, so every PubMed call used to write the key in plain
+  text. The filter sits on the root *handlers*: a logger-level filter would not see records
+  propagated from `httpx`. A new entry point that calls `logging.basicConfig` itself loses it.
 - **Both LLM clients log full prompts at `INFO`.** Useful while the prompts are unexercised,
   but it puts every system prompt and source block in the log stream — reconsider the level
   before anything ships where logs are retained.
@@ -1034,6 +1187,25 @@ generated by a separate model call, so card and article cannot contradict each o
     stock Python install `.webp` is absent from the `mimetypes` table, so every generated
     illustration was served as `application/octet-stream`, and only browser sniffing in
     `<img>` kept it rendering.
+- **Three things prune themselves, one does not.** Measured 2026-09-30, the schema was lean —
+  almost every column is read — but three tables grew without bound. Now:
+  - A succeeded MeSH scan deletes ledger rows older than
+    `DISCOVERY_OBSERVATION_RETENTION_DAYS` (120). A validator keeps that at or above what the
+    baseline windows and the angle lookback read. Shortening it past them would quietly shrink
+    every baseline and turn the next window into a false surge.
+  - A finished research run deletes candidates nobody decided on from runs older than
+    `RESEARCH_RETENTION_DAYS` (60). Promoted and dismissed ones stay, because novelty reads
+    them. A discarded candidate is stored without its example results.
+  - Orphaned images do **not** prune themselves. Every Regenerate orphans the old frames, so
+    run `scripts.prune_media`. It deletes only what no article column mentions, after a grace
+    period.
+- **`RESEARCH_TRIGGER_TOKEN` must be the same for the backend and n8n**, and it lives in the
+  repo-root `.env`. Unset, `/api/automation/*` answers 404 throughout, so n8n cannot start a
+  run and nothing is exposed. It must be 32+ characters (validator). The n8n container gets
+  that variable, not the whole `.env`.
+- **`NEWS_API_KEY` is optional, and its free plan is for development only**: 100 requests a
+  day, delayed 24 h. A run uses up to 50. When it is unset or out of quota, DuckDuckGo news
+  answers instead, and the candidate's `signals.news.source` says which one.
 - **`IMAGE_GEN_KEY` must be a fine-grained HF token with "Make calls to Inference Providers".**
   A plain read token authenticates and then 403s on the first render, which reads nothing like
   a permissions problem until you see the message. No key at all is a supported state, not a
@@ -1045,11 +1217,11 @@ generated by a separate model call, so card and article cannot contradict each o
 
 ## Deliberately out of scope
 
-Full-text retrieval, the agentic query-refinement loop, and the AWS deployment are deferred
-(DESIGN.md §11). Abstracts are chunked (see Retrieval above); full text is not fetched at all.
-`LLMQueryStrategy` is a declared seam that raises — `TemplateQueryStrategy` is what runs. A
-`source_passages` table for full-text passages sits commented in `0001_initial.sql` so the FK
-direction is already settled.
+Full text for paywalled papers, caching full text, the agentic query-refinement loop, and the AWS
+deployment are deferred (DESIGN.md §11). Open-access full text is fetched per run for up to six
+papers (see Retrieval above). `LLMQueryStrategy` is a declared seam that raises —
+`TemplateQueryStrategy` is what runs. A `source_passages` table for cached full-text passages
+sits commented in `0001_initial.sql` so the FK direction is already settled.
 
 **What has and has not met a real response** (checked 2026-08-21; keep this honest, it is what
 tells you which code to trust):
@@ -1078,9 +1250,21 @@ tells you which code to trust):
   two historical runs are backfilled with tokens and a **NULL model**, so they report
   `estimatedCostUsd: null`: inventing an id would have priced them against a model they may
   never have run on.
+- **Exercised 2026-09-29: Europe PMC full text.** The open-access lookup and the JATS parser
+  ran live against real papers (an ashwagandha RCT parsed to Introduction / Methods / Results /
+  Discussion), and `FullTextStage` ran end to end on cached sources with the live Ollama
+  embedder. Not yet inside a full pipeline run.
+- **Exercised 2026-09-30: the research agent end to end.** Google Trends (pytrends), DuckDuckGo
+  web and news, PubMed and Europe PMC counts, qwen triage and deep research ran live in the
+  worker: 22 seeds returned 254 rising queries in ~4 minutes and the run took ~8 minutes. n8n
+  2.41.4 imported both workflows, published them, and its manual webhook reached the host API
+  through `host.docker.internal`. News API has not been called: no key is configured.
+- **Measured and not built 2026-09-30: local FLUX (mflux, 4-bit schnell).** On the 16 GB M2 Pro
+  it took 198 s and 18.4 GB of peak GPU memory for one 1216×832 image, with swap growing from
+  6.2 to 16.8 GB. Hosted FLUX with crop mode (one render per article) was chosen instead.
 - **Not exercised.** Anthropic: the client and its token accounting are written against
-  documented response shapes only. Europe PMC and Semantic Scholar are wired but have not been
-  enabled in a run (`ENABLED_PROVIDERS=pubmed`).
+  documented response shapes only. Europe PMC *search* and Semantic Scholar are wired as
+  retrieval providers but have not been enabled in a run (`ENABLED_PROVIDERS=pubmed`).
 - **Resolved 2026-09-04: FLUX.1-schnell.** It was blocked on a token permission, not code —
   `403 Forbidden: This authentication method does not have sufficient permissions to call
   Inference Providers` against a correctly routed call (HF's router reached `nscale`). A

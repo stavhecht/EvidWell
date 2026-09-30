@@ -89,6 +89,26 @@ class EuropePMCProvider:
     def source_api(self) -> SourceApi:
         return SourceApi.EUROPE_PMC
 
+    async def count(self, query: str) -> int:
+        """How many Europe PMC records match ``query`` (its ``hitCount``).
+
+        Used by the research agent to cross-check PubMed's count for a topic.
+
+        Raises:
+            RateLimited, ProviderError: a count that could not be made must
+                never read as zero papers.
+        """
+        payload = await _get_json(
+            self._http,
+            EUROPE_PMC_URL,
+            {"query": query, "format": "json", "resultType": "idlist", "pageSize": 1},
+            "europe_pmc",
+        )
+        hits = payload.get("hitCount")
+        if not isinstance(hits, int):
+            raise ProviderError("europe_pmc returned no hitCount")
+        return hits
+
     async def search(self, query: SearchQuery) -> list[CandidatePaper]:
         terms = query.terms
         if query.reviews_only:

@@ -33,6 +33,7 @@ import { VerdictMark } from "@/features/evidence/VerdictMark";
 import { GRADE_LABELS, VERDICT_LABELS } from "@/features/evidence/labels";
 import { subjectBorderLeft } from "@/features/evidence/subject";
 import type { ArticleStatus, PipelineRun, QueueItem } from "@/types/api";
+import { ResearchPanel } from "./ResearchPanel";
 import { TrendCandidates } from "./TrendCandidates";
 import { PRIMARY } from "./controls";
 import {
@@ -128,7 +129,10 @@ export function ReviewQueue() {
       </div>
 
       {/* Above the free-text box on purpose: both start a run, and the ranked
-          list is the evidence-backed version of typing a topic from memory. */}
+          lists are the evidence-backed version of typing a topic from memory.
+          Internet trends first (what readers are asking), then the literature
+          scan (what researchers are publishing). */}
+      <ResearchPanel />
       <TrendCandidates />
       <NewRunForm />
 

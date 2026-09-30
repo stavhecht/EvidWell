@@ -45,6 +45,9 @@ from app.domain.enums import (
     DiscoveryDescriptorKind,
     DiscoveryScanMode,
     DiscoveryScanStatus,
+    ResearchCandidateStatus,
+    ResearchRunMode,
+    ResearchRunStatus,
     RunOrigin,
     RunStatus,
     StudyType,
@@ -197,7 +200,8 @@ class SourceChunk(Base):
         UUID(as_uuid=False), ForeignKey("sources.id", ondelete="CASCADE"), primary_key=True
     )
     ordinal: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
+    #: No text column: ranking reads only the vector, and a chunk can be re-cut
+    #: from ``Source.abstract`` with ``chunk_text``. See 0001_initial.sql.
     embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIM), nullable=False)
 
 
@@ -209,7 +213,6 @@ class Article(Base):
     status: Mapped[ArticleStatus] = mapped_column(pg_enum(ArticleStatus, "article_status"))
 
     topic: Mapped[str] = mapped_column(Text, nullable=False)
-    source_blurb: Mapped[str | None] = mapped_column(Text)
     product: Mapped[str] = mapped_column(Text, nullable=False)
     target_claims: Mapped[list[str]] = mapped_column(ARRAY(Text))
     ingredients: Mapped[list[str]] = mapped_column(ARRAY(Text))
@@ -306,6 +309,9 @@ class ArticleSource(Base):
         Boolean, nullable=False, server_default=text("false")
     )
     relevance_score: Mapped[float | None] = mapped_column(Float)
+    #: The full-text excerpts shown to the synthesis model for this source, as
+    #: a list of {"section", "text"}. NULL when none were shown.
+    excerpts: Mapped[list[dict[str, str | None]] | None] = mapped_column(NullableJSONB)
 
     article: Mapped[Article] = relationship(back_populates="sources")
     source: Mapped[Source] = relationship()
@@ -579,12 +585,6 @@ class DiscoveryDescriptor(Base):
     kind: Mapped[DiscoveryDescriptorKind] = mapped_column(
         pg_enum(DiscoveryDescriptorKind, "discovery_descriptor_kind")
     )
-    first_seen_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    last_seen_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
 
 
 class DiscoveryObservation(Base):
@@ -610,7 +610,6 @@ class DiscoveryObservation(Base):
     #: query filters on it and joining 30k rows back to the vocabulary for a
     #: boolean turns an index-only scan into a hash join per window.
     is_substance: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    major_topic: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     #: Whether this paper tagged the descriptor with an intervention qualifier.
     #: Per observation rather than aggregated: the substance-vs-biomarker rule
     #: is a ratio over papers, and its threshold is expected to be retuned.
@@ -619,12 +618,6 @@ class DiscoveryObservation(Base):
     )
     study_type: Mapped[StudyType] = mapped_column(
         pg_enum(StudyType, "study_type"), server_default=text("'unknown'")
-    )
-    scan_id: Mapped[str | None] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("discovery_scans.id", ondelete="SET NULL")
-    )
-    first_seen_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
     )
 
 
@@ -666,6 +659,97 @@ class DiscoveryCandidate(Base):
         pg_enum(DiscoveryCandidateStatus, "discovery_candidate_status"),
         server_default=text("'proposed'"),
     )
+    pipeline_run_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("pipeline_runs.id", ondelete="SET NULL")
+    )
+    decided_by: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dismiss_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ResearchRun(Base):
+    """One run of the research agent (``app/research/``).
+
+    Proposes topics and nothing else: its output is ``research_candidates``
+    rows, and a reviewer promoting one is what creates a ``PipelineRun``. The
+    stage log, provider status and config snapshot are here so a run can be
+    explained after the fact — which trends it saw, which providers failed,
+    and which weights it scored with.
+    """
+
+    __tablename__ = "research_runs"
+
+    id: Mapped[str] = mapped_column(UUID_PK, primary_key=True, server_default=GEN_UUID)
+    #: Human-readable, e.g. ``research_2026_09_30_a84f``. For logs and n8n.
+    label: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    mode: Mapped[ResearchRunMode] = mapped_column(
+        pg_enum(ResearchRunMode, "research_run_mode"), nullable=False
+    )
+    status: Mapped[ResearchRunStatus] = mapped_column(
+        pg_enum(ResearchRunStatus, "research_run_status"),
+        server_default=text("'queued'"),
+    )
+    #: The current ``ResearchStage`` while running, the last one reached after.
+    stage: Mapped[str | None] = mapped_column(Text)
+    params: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    #: Weights and thresholds the run scored with, frozen at start.
+    config: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    provider_status: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    stage_log: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    #: Short notes for the desk, e.g. why fewer topics than asked were selected.
+    notes: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    error: Mapped[dict | None] = mapped_column(NullableJSONB)
+    requested_by: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ResearchCandidate(Base):
+    """One topic a research run considered, with every signal it was scored on.
+
+    ``id`` is assigned in Python when the candidate is first built, so the
+    graph can rewrite the row after every stage by primary key.
+    """
+
+    __tablename__ = "research_candidates"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True)
+    research_run_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("research_runs.id", ondelete="CASCADE")
+    )
+    canonical_topic: Mapped[str] = mapped_column(Text, nullable=False)
+    category: Mapped[str | None] = mapped_column(Text)
+    queries: Mapped[list] = mapped_column(JSONB, nullable=False)
+    #: ``{trend, web, news, science, content, potential}`` — raw provider data.
+    signals: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    #: Component scores, ``overall``, ``weights_used`` and ``unavailable``.
+    scores: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    evidence_status: Mapped[str | None] = mapped_column(Text)
+    overall: Mapped[float | None] = mapped_column(Float)
+    rank: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[ResearchCandidateStatus] = mapped_column(
+        pg_enum(ResearchCandidateStatus, "research_candidate_status"),
+        server_default=text("'candidate'"),
+    )
+    discard_reason: Mapped[str | None] = mapped_column(Text)
     pipeline_run_id: Mapped[str | None] = mapped_column(
         UUID(as_uuid=False), ForeignKey("pipeline_runs.id", ondelete="SET NULL")
     )

@@ -39,6 +39,10 @@ import {
   CLAIM_GROUP,
   CLAIM_HEADING,
   PANEL_BLOCK,
+  PANEL_EXCERPT,
+  PANEL_EXCERPT_SECTION,
+  PANEL_EXCERPTS,
+  PANEL_EXCERPTS_SUMMARY,
   PANEL_GRADE_BAR,
   PANEL_GRADE_NOTE,
   PANEL_SOURCE_HANDLE,
@@ -122,6 +126,24 @@ function SourceRow({ source, focused }: { source: ReviewSource; focused: boolean
           .filter(Boolean)
           .join(" · ")}
       </div>
+
+      {source.excerpts.length > 0 && (
+        <details className={PANEL_EXCERPTS}>
+          <summary className={PANEL_EXCERPTS_SUMMARY}>
+            {source.excerpts.length === 1
+              ? "1 full-text excerpt shown to the model"
+              : `${source.excerpts.length} full-text excerpts shown to the model`}
+          </summary>
+          {source.excerpts.map((excerpt, index) => (
+            <blockquote key={index} className={PANEL_EXCERPT}>
+              <span className={PANEL_EXCERPT_SECTION}>
+                {excerpt.section ?? "Untitled section"}
+              </span>{" "}
+              {excerpt.text}
+            </blockquote>
+          ))}
+        </details>
+      )}
     </li>
   );
 }

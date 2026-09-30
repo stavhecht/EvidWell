@@ -282,6 +282,16 @@ export function panelSourceStudyType(weak: boolean): string {
 
 export const PANEL_SOURCE_META = "ml-[26px] font-body text-micro text-ink-3";
 
+/**
+ * The full-text passages the model was shown. Collapsed: most rows have none,
+ * and a reviewer opens them to check a number the abstract does not state.
+ */
+export const PANEL_EXCERPTS = "ml-[26px] mt-1 font-body text-micro text-ink-3";
+export const PANEL_EXCERPTS_SUMMARY =
+  "cursor-pointer select-none font-semibold text-ink-2 hover:text-ink";
+export const PANEL_EXCERPT = "mt-1.5 border-l border-rule pl-2 leading-normal text-ink-2";
+export const PANEL_EXCERPT_SECTION = "font-semibold text-ink-3";
+
 /* ── the validation summary ─────────────────────────────────────────────── */
 
 export const VALIDATION_HEADLINE =
@@ -654,3 +664,32 @@ export const CANDIDATE_DISMISS_FIELD = `${FIELD} flex-1 basis-56`;
 export const CANDIDATES_EMPTY = "px-4 py-3 font-body text-micro text-ink-3";
 
 export const CANDIDATES_ERROR = "px-4 py-3 font-body text-micro text-accent-ink";
+
+/*
+ * The research agent's panel. The same frame, header and rows as the trend
+ * candidates panel above — both are "topics proposed for a draft" — plus an
+ * options row and a quieter list of what was considered and turned away.
+ */
+
+/** The run options, shown when the panel is open. */
+export const RESEARCH_OPTIONS =
+  "flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-rule-soft px-4 py-2 font-body text-micro text-ink-3";
+
+export const RESEARCH_OPTION = "inline-flex items-center gap-1.5";
+
+export const RESEARCH_SELECT = `${FIELD} w-auto py-1 text-micro`;
+
+export const RESEARCH_CATEGORY = "inline-flex items-center gap-1 text-ink-3";
+
+/** "Also considered" — a label, not a control, above the discarded list. */
+export const RESEARCH_SUBHEAD =
+  "border-t border-rule-soft px-4 pb-1 pt-3 font-body text-[11px] font-bold uppercase tracking-[0.08em] text-ink-4";
+
+/** The score, spelled out by component, one step quieter than the evidence line. */
+export const RESEARCH_SCORE = "mt-0.5 font-body text-micro text-ink-4";
+
+/** Where the reviewer should look first: the reader's question, in the topic's voice. */
+export const RESEARCH_QUESTION = "mt-0.5 font-body text-micro italic text-ink-3";
+
+/** "Draft queued" in place of the buttons once a topic is promoted. */
+export const RESEARCH_DONE = "font-body text-micro text-ink-3";

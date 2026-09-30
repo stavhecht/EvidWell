@@ -12,6 +12,7 @@ with an API key — set ``PUBMED_API_KEY``).
 from __future__ import annotations
 
 import logging
+from typing import Any
 from xml.etree import ElementTree
 
 import httpx
@@ -78,17 +79,43 @@ class PubMedProvider:
         terms = query.terms
         if query.reviews_only:
             terms = f"({terms}) AND {REVIEW_FILTER}"
+        payload = await self._esearch_json(
+            terms,
+            retmax=query.max_results,
+            min_date=str(query.min_year) if query.min_year else None,
+        )
+        return list(payload.get("esearchresult", {}).get("idlist", []))
 
+    async def count(self, terms: str, *, min_date: str | None = None) -> int:
+        """How many PubMed records match ``terms``, without fetching any.
+
+        ``min_date`` is ``YYYY`` or ``YYYY/MM/DD`` on the publication date. Used
+        by the research agent to size a topic's literature; the same esearch
+        call ``search`` makes, with ``retmax=0``.
+
+        Raises:
+            RateLimited, ProviderError: as ``search``. A count that could not be
+                made must never read as zero papers.
+        """
+        payload = await self._esearch_json(terms, retmax=0, min_date=min_date)
+        raw = payload.get("esearchresult", {}).get("count")
+        if raw is None or not str(raw).isdigit():
+            raise ProviderError("pubmed esearch returned no count")
+        return int(raw)
+
+    async def _esearch_json(
+        self, terms: str, *, retmax: int, min_date: str | None
+    ) -> dict[str, Any]:
         params: dict[str, str] = {
             "db": "pubmed",
             "term": terms,
-            "retmax": str(query.max_results),
+            "retmax": str(retmax),
             "retmode": "json",
             "sort": "relevance",
             **self._auth_params(),
         }
-        if query.min_year:
-            params["mindate"] = str(query.min_year)
+        if min_date:
+            params["mindate"] = min_date
             params["maxdate"] = "3000"
             params["datetype"] = "pdat"
 
@@ -105,8 +132,9 @@ class PubMedProvider:
             payload = response.json()
         except ValueError as exc:
             raise ProviderError("pubmed esearch returned non-JSON") from exc
-
-        return list(payload.get("esearchresult", {}).get("idlist", []))
+        if not isinstance(payload, dict):
+            raise ProviderError("pubmed esearch returned an unexpected shape")
+        return payload
 
     async def _efetch(self, pmids: list[str]) -> list[CandidatePaper]:
         params = {

@@ -35,16 +35,8 @@ import re
 from collections.abc import Iterator
 from typing import Any
 
-from app.domain.contracts import CITATION_MARKER_PATTERN, ArticleBody
+from app.domain.contracts import CITATION_RUN_RE, ArticleBody
 
-#: Splits on a run of adjacent markers, so ``[S1][S3]`` and ``[S1, S3]`` both
-#: become one citation node. A row of separate chips reads as three findings
-#: when it is one.
-#:
-#: Built from the contracts pattern rather than restating it: the renderer and
-#: ``extract_handles`` disagreeing about what a marker is means a source the
-#: article visibly cites is recorded as uncited.
-_CITATION_RUN_RE = re.compile(rf"((?:{CITATION_MARKER_PATTERN})+)")
 _HANDLE_RE = re.compile(r"S\d+")
 
 #: Any bracket still standing once every well-formed marker is removed.
@@ -63,7 +55,16 @@ class MalformedBodyError(ValueError):
     Surfaces as a ``malformed_body`` validation failure, not an exception —
     the model produced something unrenderable, which is a draft problem rather
     than a system problem.
+
+    Carries the block's name and its raw text, because a draft that fails to
+    parse is stored with an empty document: without the text on the failure,
+    nobody can see what the model actually wrote.
     """
+
+    def __init__(self, message: str, *, where: str, text: str) -> None:
+        super().__init__(message)
+        self.where = where
+        self.text = text
 
 
 def body_text_to_doc(
@@ -131,19 +132,21 @@ def _inline_content(text: str, *, where: str) -> list[dict[str, Any]]:
     ``where`` names the block for the error message only — a reviewer reading a
     ``malformed_body`` failure needs to know which block to look at.
     """
-    if match := _STRAY_BRACKET_RE.search(_CITATION_RUN_RE.sub("", text)):
+    if match := _STRAY_BRACKET_RE.search(CITATION_RUN_RE.sub("", text)):
         raise MalformedBodyError(
-            f"{where} contains a malformed citation marker: {match.group(0)!r}"
+            f"{where} contains a malformed citation marker: {match.group(0)!r}",
+            where=where,
+            text=text,
         )
 
     content: list[dict[str, Any]] = []
-    for segment in _CITATION_RUN_RE.split(text):
+    for segment in CITATION_RUN_RE.split(text):
         if not segment:
             continue
         # ``fullmatch`` rather than "did we find handles here": the handle
         # pattern is unanchored, so testing it against an arbitrary segment
         # would read prose like "the S1 group" as a citation.
-        if _CITATION_RUN_RE.fullmatch(segment):
+        if CITATION_RUN_RE.fullmatch(segment):
             # Preserve order, drop duplicates within the run.
             handles = list(dict.fromkeys(_HANDLE_RE.findall(segment)))
             content.append({"type": "citation", "attrs": {"sourceIds": handles}})

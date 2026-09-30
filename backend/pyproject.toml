@@ -37,6 +37,12 @@ dependencies = [
     # Starlette parses multipart bodies through this; without it the console's
     # image upload endpoint raises at import time rather than at request time.
     "python-multipart>=0.0.20",
+    # Research agent (`app/research/`). Google has no free official Trends API;
+    # pytrends scrapes the Explore endpoints and is archived upstream, so it is
+    # imported by `research/providers/google_trends.py` alone and swappable
+    # there. It brings pandas. ddgs is keyless DuckDuckGo web and news search.
+    "pytrends>=4.9.2",
+    "ddgs>=9.0",
 ]
 
 [project.optional-dependencies]

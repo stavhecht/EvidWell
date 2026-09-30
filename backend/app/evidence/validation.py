@@ -39,6 +39,7 @@ from app.evidence.grading import (
     max_verdict_for_claims,
     max_verdict_for_sources,
 )
+from app.services.tiptap import MalformedBodyError, body_text_to_doc
 
 logger = logging.getLogger(__name__)
 
@@ -288,6 +289,31 @@ def check_verdict_within_grade(
     return grade, ceiling, []
 
 
+def check_body_parses(output: SynthesisOutput) -> list[ValidationFailure]:
+    """Check 5 — the body can be turned into a document.
+
+    PERSIST parses the body again to build ``original_content``, and it once
+    was the only place that did. The failure was then added to the report after
+    this stage had recorded its metrics, so a run's ``validate`` metrics read
+    ``passed: true`` for an article stored as ``validation_failed``.
+
+    The raw text of the offending block goes into ``detail``: a draft that does
+    not parse is stored with an empty document, so this is the only record of
+    what the model wrote.
+    """
+    try:
+        body_text_to_doc(output.body)
+    except MalformedBodyError as exc:
+        return [
+            ValidationFailure(
+                code="malformed_body",
+                message=str(exc),
+                detail={"where": exc.where, "text": exc.text},
+            )
+        ]
+    return []
+
+
 async def validate_draft(
     session: AsyncSession,
     output: SynthesisOutput,
@@ -312,6 +338,8 @@ async def validate_draft(
     failures.extend(resolve_failures)
 
     failures.extend(check_beats_are_cited(output))
+
+    failures.extend(check_body_parses(output))
 
     grade, ceiling, verdict_failures = check_verdict_within_grade(
         output, resolved, payload

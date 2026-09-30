@@ -21,6 +21,7 @@ import logging
 import signal
 import time
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,11 +30,14 @@ from app.config import get_settings
 from app.db import dispose_engine, get_session_factory
 from app.domain.enums import RunStatus
 from app.domain.models import PipelineRun, PipelineStageRun
+from app.logging_setup import configure_logging
 from app.pipeline.orchestrator import (
     PipelineOrchestrator,
     build_default_pipeline,
     retry_delay,
 )
+from app.research import service as research_service
+from app.research.runner import execute_research_run
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +90,15 @@ class PipelineWorker:
                 await self._recover_stale_runs()
                 last_sweep = time.monotonic()
 
+            # Research runs first, and in this process rather than their own:
+            # both kinds count papers against NCBI's per-IP ceiling, and one
+            # process running one thing at a time is what keeps the throttle's
+            # budget true. See research/runner.py.
+            research = await self._claim_research_run()
+            if research is not None:
+                await self._run_research(*research, settings=settings)
+                continue
+
             run = await self._claim_next_run()
             if run is None:
                 with contextlib.suppress(TimeoutError):
@@ -122,6 +135,37 @@ class PipelineWorker:
                     await heartbeat
 
         logger.info("worker stopped")
+
+    async def _claim_research_run(self) -> tuple[str, str] | None:
+        try:
+            return await research_service.claim_next(get_session_factory())
+        except Exception:
+            # A missing table (0005 not applied) or a transient error must not
+            # stop article runs from being claimed.
+            logger.exception("could not check for queued research runs")
+            return None
+
+    async def _run_research(self, run_id: str, label: str, *, settings: Any) -> None:
+        logger.info("claimed research run %s", label)
+        factory = get_session_factory()
+        heartbeat = asyncio.create_task(self._beat_research(run_id))
+        try:
+            await execute_research_run(run_id, settings, factory)
+        finally:
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
+
+    async def _beat_research(self, run_id: str) -> None:
+        """The research run's heartbeat. Same rule as ``_beat``: never raises."""
+        while True:
+            await asyncio.sleep(self._heartbeat_interval)
+            try:
+                await research_service.beat(get_session_factory(), run_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("heartbeat for research run %s failed", run_id, exc_info=True)
 
     async def _beat(self, run_id: str) -> None:
         """Report the run alive until cancelled.
@@ -246,6 +290,10 @@ class PipelineWorker:
         """
         cutoff = datetime.now(UTC) - self._stale_after
         factory = get_session_factory()
+        try:
+            await research_service.recover_stale(factory, self._stale_after)
+        except Exception:
+            logger.exception("could not sweep stale research runs")
         async with factory() as session:
             stale = (
                 await session.execute(
@@ -374,10 +422,7 @@ class PipelineWorker:
 
 
 async def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-    )
+    configure_logging(logging.INFO)
     settings = get_settings()
     worker = PipelineWorker(
         poll_interval=settings.worker_poll_interval_seconds,

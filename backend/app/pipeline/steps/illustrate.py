@@ -56,6 +56,9 @@ from app.services.illustration import generate_illustration, seed_for_run
 
 logger = logging.getLogger(__name__)
 
+#: Retries after a failed render before the article goes out text-only.
+IMAGE_RETRIES = 1
+
 
 @dataclass(frozen=True, slots=True)
 class IllustrationConfig:
@@ -76,6 +79,8 @@ class IllustrationConfig:
     #: ``None``, to tell "switched off" from "no key configured" — two states
     #: that produce an identical article and want opposite responses.
     enabled: bool
+    #: ``IMAGE_COVER_MODE=crop``: one render, the cover cut from the lead.
+    cover_from_lead: bool = False
 
 
 class IllustrateStage:
@@ -106,47 +111,73 @@ class IllustrateStage:
         if ctx.draft is None or ctx.extraction is None:
             raise StageError(self.name, "synthesis stage did not run")
 
+        if ctx.illustration is not None:
+            # A revision pass (VALIDATE -> SYNTHESIZE) comes back through here.
+            # The pictures are claim-free and do not depend on the draft's
+            # wording, so the ones already drawn — and billed — stand.
+            ctx.record_metrics(self.name, {"generated": 0, "cause": "kept_from_first_draft"})
+            return ctx
+
         if self._client is None:
             return self._skip(ctx, "disabled" if not self._config.enabled else "not_configured")
 
         started = time.monotonic()
         seed = seed_for_run(ctx.run_id)
-        try:
-            illustration = await generate_illustration(
-                self._client,
-                product=ctx.extraction.product,
-                topic=ctx.topic,
-                # None, always, on this path: `subject` is reviewer-set and the
-                # article row does not exist yet. The prompt builder infers
-                # which objects to photograph from the text instead — which is
-                # why the actives are worth passing. See imagery/prompt.py.
-                subject=None,
-                ingredients=" ".join(ctx.extraction.ingredients),
-                lead_size=self._config.lead_size,
-                cover_size=self._config.cover_size,
-                session=self._session,
-                max_bytes=self._config.max_bytes,
-                seed=seed,
-            )
-        except ImageError as exc:
-            logger.warning("illustration failed for run %s: %s", ctx.run_id, exc)
-            return self._skip(
-                ctx, "provider_error", detail=str(exc), seed=seed, started=started
-            )
-        except Exception as exc:
-            # Broader than this codebase's usual instinct, and deliberate: a bug
-            # in our own prompt builder or encoder must not fail every run for
-            # a decoration. The traceback still reaches the log and the type
-            # still reaches the metrics, so it is recorded rather than
-            # swallowed.
-            logger.exception("illustration raised unexpectedly for run %s", ctx.run_id)
-            return self._skip(
-                ctx,
-                "unexpected",
-                detail=f"{type(exc).__name__}: {exc}",
-                seed=seed,
-                started=started,
-            )
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                illustration = await generate_illustration(
+                    self._client,
+                    product=ctx.extraction.product,
+                    topic=ctx.topic,
+                    # None, always, on this path: `subject` is reviewer-set and
+                    # the article row does not exist yet. The prompt builder
+                    # infers which objects to photograph from the text instead —
+                    # which is why the actives are worth passing. See
+                    # imagery/prompt.py.
+                    subject=None,
+                    ingredients=" ".join(ctx.extraction.ingredients),
+                    lead_size=self._config.lead_size,
+                    cover_size=self._config.cover_size,
+                    session=self._session,
+                    max_bytes=self._config.max_bytes,
+                    seed=seed,
+                    cover_from_lead=self._config.cover_from_lead,
+                )
+                break
+            except ImageError as exc:
+                if attempts <= IMAGE_RETRIES:
+                    # One retry: a cold or briefly overloaded provider is the
+                    # common failure, and the second call usually lands. More
+                    # would hold the run open for a decoration.
+                    logger.info(
+                        "illustration failed for run %s (%s); retrying once", ctx.run_id, exc
+                    )
+                    continue
+                logger.warning("illustration failed for run %s: %s", ctx.run_id, exc)
+                return self._skip(
+                    ctx,
+                    "provider_error",
+                    detail=str(exc),
+                    seed=seed,
+                    started=started,
+                    attempts=attempts,
+                )
+            except Exception as exc:
+                # Broader than this codebase's usual instinct, and deliberate: a
+                # bug in our own prompt builder or encoder must not fail every
+                # run for a decoration. The traceback still reaches the log and
+                # the type still reaches the metrics, so it is recorded rather
+                # than swallowed. Not retried: a bug fails the same way twice.
+                logger.exception("illustration raised unexpectedly for run %s", ctx.run_id)
+                return self._skip(
+                    ctx,
+                    "unexpected",
+                    detail=f"{type(exc).__name__}: {exc}",
+                    seed=seed,
+                    started=started,
+                )
 
         ctx.record_metrics(
             self.name,
@@ -156,6 +187,9 @@ class IllustrateStage:
                 # A reviewer can later redraw one alone; that is the console's
                 # doing and does not touch this run's metrics.
                 "generated": 2,
+                # What was billed: one render in crop mode, two otherwise.
+                "renders": 1 if self._config.cover_from_lead else 2,
+                "attempts": attempts,
                 "cause": None,
                 # Read off the lead because provenance lives on the frames now.
                 # On this path the two are identical by construction: one call,
@@ -178,6 +212,7 @@ class IllustrateStage:
         detail: str | None = None,
         seed: int | None = None,
         started: float | None = None,
+        attempts: int | None = None,
     ) -> PipelineContext:
         """Record why there is no picture and hand the context back untouched.
 
@@ -193,6 +228,8 @@ class IllustrateStage:
         }
         if started is not None:
             metrics["duration_ms"] = _elapsed_ms(started)
+        if attempts is not None:
+            metrics["attempts"] = attempts
         ctx.record_metrics(self.name, metrics)
         return ctx
 

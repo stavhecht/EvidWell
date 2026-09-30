@@ -148,6 +148,38 @@ class RunOrigin(StrEnum):
 
     CONSOLE = "console"
     DISCOVERY = "discovery"
+    #: A reviewer promoting a topic the research agent proposed (research_runs).
+    RESEARCH = "research"
+
+
+class ResearchRunMode(StrEnum):
+    """What triggered a research run. Metadata only — the graph never branches on it."""
+
+    WEEKLY = "weekly"
+    MANUAL = "manual"
+
+
+class ResearchRunStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class ResearchCandidateStatus(StrEnum):
+    """Where one topic got to in a research run, and what a reviewer did with it.
+
+    ``SELECTED`` is the agent's proposal; ``SHORTLISTED`` got deep research but
+    lost on score; ``DISCARDED`` carries a reason. Only a reviewer moves a row
+    to ``PROMOTED`` or ``DISMISSED``.
+    """
+
+    CANDIDATE = "candidate"
+    DISCARDED = "discarded"
+    SHORTLISTED = "shortlisted"
+    SELECTED = "selected"
+    PROMOTED = "promoted"
+    DISMISSED = "dismissed"
 
 
 class SourceApi(StrEnum):

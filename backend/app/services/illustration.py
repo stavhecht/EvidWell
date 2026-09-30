@@ -26,10 +26,12 @@ article, under the same locked claim-free prompt, and it is discarded the
 moment the article's own picture is no longer the one drawn beside it. Neither
 frame asserts anything, so neither can assert something the other does not.
 
-If the two ever need to be provably the same photograph, the move is one
-portrait render cropped to landscape with Pillow — which also halves the bill.
-The still-life style centres its subject in generous negative space, so the
-crop is safe. That is a deliberate open option, not an oversight.
+**``IMAGE_COVER_MODE=crop`` (the default since 2026-09-30) makes them one
+photograph**: the landscape lead is rendered once and the portrait cover is
+centre-cropped out of it with Pillow (``imagery/encode.py::crop_to_ratio``),
+which also halves the bill. The still-life style centres its subject in
+generous negative space, so the crop is safe. Everything above describes
+``render`` mode, which draws the cover as its own generation.
 
 Nothing is written back until every requested frame has been drawn and stored.
 A first render that succeeds beside a second that fails leaves the article
@@ -49,6 +51,7 @@ move onto the frames themselves; see ``domain/contracts.py::GeneratedImage``.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import secrets
@@ -59,6 +62,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.contracts import GeneratedImage, Illustration
 from app.domain.enums import ImageFrame, Subject
 from app.imagery.base import ImageClient, ImageError, ImageRequest, RenderedImage
+from app.imagery.encode import crop_to_ratio
 from app.imagery.prompt import build_alt_text, build_prompt
 from app.services.media import (
     MEDIA_SRC_RE,
@@ -129,6 +133,7 @@ async def generate_illustration(
     seed: int,
     frames: Collection[ImageFrame] = BOTH_FRAMES,
     keep: Illustration | None = None,
+    cover_from_lead: bool = False,
 ) -> Illustration:
     """Render the requested frames, store them, and describe what was made.
 
@@ -153,6 +158,11 @@ async def generate_illustration(
             not being redrawn. Required whenever ``frames`` is partial —
             returning half an ``Illustration`` is not representable, and it
             should not be: the tile's cover is only ever honest next to a lead.
+        cover_from_lead: render the lead once and centre-crop the cover out of
+            it (``IMAGE_COVER_MODE=crop``). Both frames are then always drawn
+            together — a cover cut from a lead that is not the article's own
+            would break the pairing rule — so ``frames`` and ``keep`` are
+            ignored, and the call costs one render, not two.
 
     Raises:
         ValueError: a partial redraw with nothing to keep the other frame from.
@@ -164,7 +174,7 @@ async def generate_illustration(
             Callers in the pipeline treat this as "no picture", never as a
             reason to fail a run.
     """
-    wanted = frozenset(frames)
+    wanted = BOTH_FRAMES if cover_from_lead else frozenset(frames)
     if not wanted:
         raise ValueError("generate_illustration was asked to draw no frames")
     if (carried := BOTH_FRAMES - wanted) and keep is None:
@@ -202,6 +212,21 @@ async def generate_illustration(
             frame=frame,
         )
 
+    if cover_from_lead:
+        rendered = await _render(
+            client, prompt=prompt, negative_prompt=negative_prompt, size=lead_size, seed=seed
+        )
+        cropped = await asyncio.to_thread(crop_to_ratio, rendered, cover_size)
+        lead = await _store_frame(
+            rendered, client=client, prompt=prompt, negative_prompt=negative_prompt,
+            seed=seed, alt=alt, session=session, max_bytes=max_bytes, frame=ImageFrame.LEAD,
+        )
+        cover = await _store_frame(
+            cropped, client=client, prompt=prompt, negative_prompt=negative_prompt,
+            seed=seed, alt=alt, session=session, max_bytes=max_bytes, frame=ImageFrame.COVER,
+        )
+        return Illustration(lead=lead, cover=cover)
+
     # Sequentially, in document order. Two concurrent renders would halve the
     # wait and double the peak spend on a provider that bills per image; the
     # reviewer is looking at a spinner either way.
@@ -226,8 +251,32 @@ async def _render_and_store(
     max_bytes: int,
     frame: ImageFrame,
 ) -> GeneratedImage:
+    rendered = await _render(
+        client, prompt=prompt, negative_prompt=negative_prompt, size=size, seed=seed
+    )
+    return await _store_frame(
+        rendered,
+        client=client,
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        seed=seed,
+        alt=alt,
+        session=session,
+        max_bytes=max_bytes,
+        frame=frame,
+    )
+
+
+async def _render(
+    client: ImageClient,
+    *,
+    prompt: str,
+    negative_prompt: str,
+    size: tuple[int, int],
+    seed: int,
+) -> RenderedImage:
     width, height = size
-    rendered = await client.render(
+    return await client.render(
         ImageRequest(
             prompt=prompt,
             negative_prompt=negative_prompt,
@@ -236,6 +285,20 @@ async def _render_and_store(
             seed=seed,
         )
     )
+
+
+async def _store_frame(
+    rendered: RenderedImage,
+    *,
+    client: ImageClient,
+    prompt: str,
+    negative_prompt: str,
+    seed: int,
+    alt: str,
+    session: AsyncSession,
+    max_bytes: int,
+    frame: ImageFrame,
+) -> GeneratedImage:
     _assert_fits(rendered, max_bytes=max_bytes, frame=frame)
     stored = await _store(rendered, session=session, frame=frame)
 
