@@ -9,7 +9,9 @@ write — or worse, as silently degraded retrieval.
 
 from __future__ import annotations
 
+import json
 from functools import lru_cache
+from typing import Annotated
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -36,7 +38,7 @@ class Settings(BaseSettings):
         min_length=32,
         description="HS256 signing key",
     )
-    cors_origins: list[str] = ["http://localhost:5173"]
+    cors_origins: CsvList = ["http://localhost:5173"]
 
     # --- generative provider ---
     #: 'ollama' | 'anthropic'. Ollama is the default while the pipeline is being
@@ -94,7 +96,7 @@ class Settings(BaseSettings):
     openalex_mailto: str = ""
     #: Providers enabled for retrieval. Phase 1 runs PubMed alone by design —
     #: one API learned properly beats four half-integrated.
-    enabled_providers: list[str] = ["pubmed"]
+    enabled_providers: CsvList = ["pubmed"]
     http_timeout_seconds: float = 30.0
     #: How many times a throttled provider call is retried before it is
     #: recorded as a failure. Two rides out a burst; more would let one
@@ -424,10 +426,22 @@ class Settings(BaseSettings):
     )
     @classmethod
     def _split_csv(cls, value: object) -> object:
-        """Allow comma-separated env values as well as JSON lists."""
-        if isinstance(value, str) and not value.strip().startswith("["):
-            return [item.strip() for item in value.split(",") if item.strip()]
-        return value
+        """Allow comma-separated env values as well as JSON lists.
+
+        These fields are ``CsvList``, so pydantic-settings hands the raw string
+        over undecoded and both forms have to be handled here — including the
+        JSON one, which nothing upstream will parse any more.
+        """
+        if not isinstance(value, str):
+            return value
+
+        text = value.strip()
+        if text.startswith("["):
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"not valid JSON: {value!r}") from exc
+        return [item.strip() for item in text.split(",") if item.strip()]
 
     @field_validator(
         "image_lead_width",
