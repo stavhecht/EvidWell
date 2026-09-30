@@ -20,7 +20,15 @@ from app.domain.contracts import (
 
 @dataclass(frozen=True, slots=True)
 class TokenUsage:
-    """Recorded per stage in ``pipeline_stage_runs.metrics``."""
+    """What one model call consumed, by token class.
+
+    Persisted per stage in ``pipeline_stage_runs`` as four typed columns, and
+    rolled up onto ``pipeline_runs``. Deliberately carries no model id and no
+    cost: ``__add__`` exists so a run can report a total, and a total is only
+    meaningful over tokens. Extraction and synthesis can run on *different*
+    models, so summed tokens have no single price — which is why the model id
+    lives on ``LLMResult`` and pricing happens per call in ``llm/pricing.py``.
+    """
 
     input_tokens: int = 0
     output_tokens: int = 0
@@ -38,10 +46,18 @@ class TokenUsage:
 
 @dataclass(frozen=True, slots=True)
 class LLMResult[T]:
-    """A parsed, schema-valid model output plus what it cost."""
+    """A parsed, schema-valid model output plus what it cost.
+
+    ``model`` is the provider-namespaced id (``anthropic/claude-sonnet-5``),
+    not the bare setting value. It is the join key into the price table, and it
+    has to come back from the call rather than be read from settings at the
+    persistence site: a run in flight when someone edits ``SYNTHESIS_MODEL``
+    would otherwise be priced against a model it never used.
+    """
 
     output: T
     usage: TokenUsage
+    model: str = ""
 
 
 class ExtractionClient(Protocol):
@@ -61,13 +77,44 @@ class SynthesisClient(Protocol):
     handle set and the database — neither of which the model can influence.
     """
 
-    async def synthesize(self, payload: SynthesisInput) -> LLMResult[SynthesisOutput]:
-        """Write a grounded article from the retrieved abstracts."""
+    async def synthesize(
+        self, payload: SynthesisInput, *, feedback: str | None = None
+    ) -> LLMResult[SynthesisOutput]:
+        """Write a grounded article from the retrieved abstracts.
+
+        ``feedback`` re-runs the same payload with an editorial note appended as
+        a further user turn — used by ``SynthesizeStage`` to ask once for a
+        fuller article when a draft came back short despite plentiful sources.
+        It carries no new *sources* and no new rules, so the grounding contract
+        is unchanged: the handle set the draft may cite is still exactly the one
+        in ``payload``.
+
+        Keyword-only and defaulted so that a caller which does not re-prompt is
+        written the same way it always was.
+        """
         ...
 
 
 class LLMError(RuntimeError):
-    """Transport, rate-limit, or schema failure from a generative call."""
+    """Transport, rate-limit, or schema failure from a generative call.
+
+    Carries ``usage`` when the failure happened *after* the provider answered,
+    because those tokens are billed exactly like a successful call's. The
+    expensive case is truncation: hitting ``max_tokens`` spends the entire
+    output budget — 8K on synthesis, the largest single charge the pipeline can
+    incur — and produces nothing. A failed run reporting zero cost would make
+    the pipeline look cheapest at the moment it is burning the most, so the
+    stage records this before converting the error into a ``StageError``.
+
+    Left empty on a transport failure, where nothing was consumed.
+    """
+
+    def __init__(
+        self, message: str, *, usage: TokenUsage | None = None, model: str = ""
+    ) -> None:
+        super().__init__(message)
+        self.usage = usage or TokenUsage()
+        self.model = model
 
 
 class RefusalError(LLMError):

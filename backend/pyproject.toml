@@ -14,9 +14,35 @@ dependencies = [
     "pgvector>=0.3.6",
     "httpx>=0.28",
     "anthropic>=0.69",
+    "ollama>=0.4",
     "voyageai>=0.3",
+    # Stage sequencing only — `pipeline/graph.py`. Nothing here talks to a
+    # model: both LLM clients are hand-written against their own SDKs, and the
+    # retrieval providers are httpx. What the graph buys is the RETRIEVE ->
+    # RANK -> RETRIEVE refinement cycle, which the ordered stage list it
+    # replaced could not express. Its checkpointer is deliberately unused:
+    # durability is already the per-stage commit plus the heartbeat sweep, and
+    # a second mechanism beside them is how the no-double-execution guarantee
+    # gets re-derived by accident.
+    "langgraph>=1.2",
+    # Article imagery. Text-to-image is not available on Hugging Face's
+    # OpenAI-compatible /v1 endpoint (chat only) and the raw HTTP shape differs
+    # per inference provider, so the SDK is the supported path — same reason the
+    # three above are here rather than hand-rolled over httpx. Pillow is what
+    # `text_to_image` returns; `imagery/huggingface.py` re-encodes it to WebP.
+    "huggingface-hub>=0.35",
+    "pillow>=11.0",
     "pyjwt>=2.10",
     "argon2-cffi>=23.1",
+    # Starlette parses multipart bodies through this; without it the console's
+    # image upload endpoint raises at import time rather than at request time.
+    "python-multipart>=0.0.20",
+    # Research agent (`app/research/`). Google has no free official Trends API;
+    # pytrends scrapes the Explore endpoints and is archived upstream, so it is
+    # imported by `research/providers/google_trends.py` alone and swappable
+    # there. It brings pandas. ddgs is keyless DuckDuckGo web and news search.
+    "pytrends>=4.9.2",
+    "ddgs>=9.0",
 ]
 
 [project.optional-dependencies]
@@ -52,6 +78,14 @@ testpaths = ["tests"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
+
+# `openai` is an optional extra and is normally not installed — the guarded
+# imports in llm/embeddings/openai.py are the point, not an oversight. Declared
+# here rather than as per-line ignores because those would themselves go stale
+# the moment someone does install the extra.
+[[tool.mypy.overrides]]
+module = ["openai.*"]
+ignore_missing_imports = true
 
 [tool.ruff.lint.per-file-ignores]
 # Prose in docstrings legitimately uses en/em dashes and typographic quotes.

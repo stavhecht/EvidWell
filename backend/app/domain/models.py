@@ -13,17 +13,21 @@ fine. Always apply the migration.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     ARRAY,
     Boolean,
+    Date,
     DateTime,
     Enum,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
+    LargeBinary,
+    SmallInteger,
     String,
     Text,
     func,
@@ -33,7 +37,24 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.config import get_settings
-from app.domain.enums import ArticleStatus, RunStatus, StudyType, UserRole, Verdict
+from app.domain.enums import (
+    ArticleStatus,
+    ContactKind,
+    ContactStatus,
+    DiscoveryCandidateStatus,
+    DiscoveryDescriptorKind,
+    DiscoveryScanMode,
+    DiscoveryScanStatus,
+    ResearchCandidateStatus,
+    ResearchRunMode,
+    ResearchRunStatus,
+    RunOrigin,
+    RunStatus,
+    StudyType,
+    Subject,
+    UserRole,
+    Verdict,
+)
 
 #: Read once at import. Must match the applied migration's ``vector(N)``;
 #: ``Settings.validate_embedding_dim`` checks it against the live provider at
@@ -49,6 +70,21 @@ EMBEDDING_DIM = get_settings().embedding_dim
 #: counter defaults below.
 UUID_PK = UUID(as_uuid=False)
 GEN_UUID = text("gen_random_uuid()")
+
+#: Every nullable JSONB column. **Use this, not bare ``JSONB``.**
+#:
+#: SQLAlchemy's JSON types default to ``none_as_null=False``, which persists a
+#: Python ``None`` as the JSON literal ``null`` rather than as SQL ``NULL``.
+#: The two are not interchangeable: ``COALESCE(edited_content, original_content)``
+#: returns JSON ``null`` for a row that has never been edited, and ``WHERE error
+#: IS NULL`` matches no succeeded stage. Both read as "a value is present".
+#:
+#: Python-side readers hide this — ``json.loads('null')`` is ``None``, so
+#: ``edited_content or original_content`` behaves correctly and every current
+#: caller happens to take that path. The bug only appears when someone writes
+#: the SQL that ``migrations/0001_initial.sql`` and ``services/card.py`` both
+#: document as the mechanism, which is exactly when it is least expected.
+NullableJSONB = JSONB(none_as_null=True)
 
 
 def pg_enum(enum_class: type, name: str) -> Enum:
@@ -92,7 +128,7 @@ class User(Base):
 
 
 class Source(Base):
-    """A cached paper. Also a row in the vector store."""
+    """A cached paper. Its vectors live in ``SourceChunk``, one per chunk."""
 
     __tablename__ = "sources"
 
@@ -108,16 +144,32 @@ class Source(Base):
     citation_count: Mapped[int | None] = mapped_column(Integer)
     url: Mapped[str | None] = mapped_column(Text)
     source_api: Mapped[str] = mapped_column(Text, nullable=False)
-    #: Cosine-indexed by sources_embedding_hnsw. Null until the abstract has
-    #: been embedded, or after a provider change invalidates the old vector.
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM))
+    #: The model that embedded this paper's chunks, and how they were cut
+    #: (``retrieval/chunking.py::CHUNK_SETTINGS``). Null until they are
+    #: embedded. If either differs from the live value, the chunks are
+    #: out of date and get re-made.
     embedding_model: Mapped[str | None] = mapped_column(Text)
+    chunk_settings: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
     last_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    #: Detection time, not the journal's retraction date — neither PubMed nor
+    #: Crossref reliably exposes the latter. Set by scripts/check_retractions.py.
+    retracted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: An expression of concern: under investigation, not withdrawn. Recorded
+    #: rather than refused, because the paper may yet be exonerated.
+    concern_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: NULL means nobody has *successfully* asked — which is not "asked and it
+    #: is fine". Written only when a provider actually answered, so a sweep
+    #: that reached nothing cannot be mistaken for one that verified everything.
+    #: See retrieval/retractions.py.
+    retraction_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    retraction_note: Mapped[str | None] = mapped_column(Text)
 
     @property
     def resolved_url(self) -> str:
@@ -134,6 +186,25 @@ class Source(Base):
         return f"https://pubmed.ncbi.nlm.nih.gov/{self.pmid}/"
 
 
+class SourceChunk(Base):
+    """One overlapping piece of a source's abstract, with its own vector.
+
+    Written by ``retrieval/cache.py``, read by ``retrieval/rerank.py``, which
+    scores a paper by its best chunk. Deliberately not ANN-indexed; see
+    ``migrations/0002_source_chunks.sql``.
+    """
+
+    __tablename__ = "source_chunks"
+
+    source_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("sources.id", ondelete="CASCADE"), primary_key=True
+    )
+    ordinal: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
+    #: No text column: ranking reads only the vector, and a chunk can be re-cut
+    #: from ``Source.abstract`` with ``chunk_text``. See 0001_initial.sql.
+    embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIM), nullable=False)
+
+
 class Article(Base):
     __tablename__ = "articles"
 
@@ -142,7 +213,6 @@ class Article(Base):
     status: Mapped[ArticleStatus] = mapped_column(pg_enum(ArticleStatus, "article_status"))
 
     topic: Mapped[str] = mapped_column(Text, nullable=False)
-    source_blurb: Mapped[str | None] = mapped_column(Text)
     product: Mapped[str] = mapped_column(Text, nullable=False)
     target_claims: Mapped[list[str]] = mapped_column(ARRAY(Text))
     ingredients: Mapped[list[str]] = mapped_column(ARRAY(Text))
@@ -155,19 +225,56 @@ class Article(Base):
     #: Immutable. A DB trigger rejects any UPDATE that changes it — do not
     #: attempt to write it after PersistStage.
     original_content: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    edited_content: Mapped[dict | None] = mapped_column(JSONB)
+    edited_content: Mapped[dict | None] = mapped_column(NullableJSONB)
 
     card_headline: Mapped[str | None] = mapped_column(Text)
     card_excerpt: Mapped[str | None] = mapped_column(Text)
     card_verdict: Mapped[Verdict | None] = mapped_column(pg_enum(Verdict, "verdict"))
+    #: The first image in the approved body, materialised at publish time by
+    #: the same rule as the other card columns: derived, never a separate
+    #: upload. NULL is the normal case — the feed draws a typographic tile.
+    card_image: Mapped[str | None] = mapped_column(Text)
+    card_image_alt: Mapped[str | None] = mapped_column(Text)
+
+    #: Both frames of the pipeline's generated illustration, plus the prompt,
+    #: model and seed that produced them — see ``domain/contracts.Illustration``.
+    #: NULL is normal: every article written before this existed, every run with
+    #: no image key, and every run whose generation failed.
+    #:
+    #: ``lead`` is *also* in ``original_content`` as an ordinary image node, so
+    #: it is edited and checked like any other picture. ``cover`` is not in the
+    #: document at all — it is the portrait framing for the feed tile, and this
+    #: column is the only record of it. ``services/card.py`` will only use it
+    #: while ``lead.src`` is still the document's first image; that pairing is
+    #: what keeps the tile a reframing of the article's own picture rather than
+    #: an independent one.
+    #:
+    #: ``NullableJSONB``, not bare ``JSONB``. It matters here specifically:
+    #: ``derive_card`` tests this value for truthiness, and the JSON literal
+    #: ``null`` a bare column would store is a dict-shaped truthy value in SQL.
+    generated_imagery: Mapped[dict | None] = mapped_column(NullableJSONB)
+
+    #: Set by a reviewer, not by the pipeline. See ``Subject``.
+    subject: Mapped[Subject | None] = mapped_column(pg_enum(Subject, "subject"))
 
     evidence_grade: Mapped[StudyType] = mapped_column(pg_enum(StudyType, "study_type"))
-    validation_report: Mapped[dict | None] = mapped_column(JSONB)
+    validation_report: Mapped[dict | None] = mapped_column(NullableJSONB)
 
     reviewed_by: Mapped[str | None] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id"))
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     rejection_reason: Mapped[str | None] = mapped_column(Text)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    #: A cited source has been retracted. The article stays `published` — this
+    #: raises a banner and puts the row in front of a reviewer, who decides.
+    #: Automatic withdrawal would be the machine deciding what the public sees,
+    #: which is the thing invariant #1 exists to prevent, pointed the other way.
+    retraction_flagged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    #: Which handles and sources triggered the flag, so the console can point
+    #: at the paragraph rather than at the article.
+    retraction_detail: Mapped[dict | None] = mapped_column(NullableJSONB)
 
     pipeline_run_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False))
     created_at: Mapped[datetime] = mapped_column(
@@ -202,6 +309,9 @@ class ArticleSource(Base):
         Boolean, nullable=False, server_default=text("false")
     )
     relevance_score: Mapped[float | None] = mapped_column(Float)
+    #: The full-text excerpts shown to the synthesis model for this source, as
+    #: a list of {"section", "text"}. NULL when none were shown.
+    excerpts: Mapped[list[dict[str, str | None]] | None] = mapped_column(NullableJSONB)
 
     article: Mapped[Article] = relationship(back_populates="sources")
     source: Mapped[Source] = relationship()
@@ -215,10 +325,31 @@ class PipelineRun(Base):
     source_blurb: Mapped[str | None] = mapped_column(Text)
     status: Mapped[RunStatus] = mapped_column(pg_enum(RunStatus, "run_status"))
     article_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False))
-    error: Mapped[dict | None] = mapped_column(JSONB)
+    error: Mapped[dict | None] = mapped_column(NullableJSONB)
+    #: Rollup of the per-stage ledger below, so "what did this run consume" is
+    #: one row read. Cannot be priced on its own: the stages may have run on
+    #: different models. See PipelineStageRun and app/llm/pricing.py.
     input_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     output_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    cache_read_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    cache_write_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     requested_by: Mapped[str | None] = mapped_column(UUID(as_uuid=False))
+    #: What the topic came from — a reviewer typing it, or a reviewer promoting
+    #: a trend the scan proposed. Both are human decisions; this only says which
+    #: surface produced the string. Defaulted in the database so `create_run`
+    #: never has to set it.
+    origin: Mapped[RunOrigin] = mapped_column(
+        pg_enum(RunOrigin, "run_origin"), server_default=text("'console'")
+    )
+    #: Attempts started, incremented when a worker claims the run.
+    attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    #: Earliest time this run may be claimed; NULL means now. Set when a
+    #: retryable failure requeues the run — see orchestrator._requeue_run.
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: Last sign of life from the worker holding this run, pinged on a timer
+    #: for as long as it is `running`. A frozen heartbeat is how a killed
+    #: worker is told apart from a slow one — see runner._recover_stale_runs.
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -233,8 +364,400 @@ class PipelineStageRun(Base):
     run_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("pipeline_runs.id"))
     stage: Mapped[str] = mapped_column(Text, nullable=False)
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: Which attempt of the run this row belongs to. Rows are kept per attempt
+    #: rather than overwritten — diagnosing a run that succeeded on its third
+    #: try means seeing what the first two did.
+    attempt: Mapped[int] = mapped_column(Integer, server_default=text("1"))
     status: Mapped[RunStatus] = mapped_column(pg_enum(RunStatus, "run_status"))
-    error: Mapped[dict | None] = mapped_column(JSONB)
-    metrics: Mapped[dict | None] = mapped_column(JSONB)
+    error: Mapped[dict | None] = mapped_column(NullableJSONB)
+    metrics: Mapped[dict | None] = mapped_column(NullableJSONB)
+    #: Provider-namespaced id of the model this stage called, e.g.
+    #: `anthropic/claude-sonnet-5`. NULL for the four stages that call no model.
+    #: The join key into app/llm/pricing.py — a bare name would not distinguish
+    #: a local model (free) from a hosted one nobody has priced yet.
+    model: Mapped[str | None] = mapped_column(Text)
+    #: What that call consumed. Kept as four columns rather than one total
+    #: because they are priced at four different rates, an order of magnitude
+    #: apart in both directions: a cache read is a tenth of a fresh input token,
+    #: a cache write a quarter more than one. Written even when the stage
+    #: failed — a truncated response burns the whole output budget and produces
+    #: nothing, which is the most expensive way a run can end.
+    input_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    output_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    cache_read_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    cache_write_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class Reader(Base):
+    """A public reader's account.
+
+    Separate from :class:`User` on purpose — see the note in
+    ``migrations/0001_initial.sql``. ``users`` is the reviewer
+    roster and ``articles.reviewed_by`` is a foreign key into it, so a row
+    there is a claim about who is answerable for a published article. Readers
+    sign themselves up; a reader id can never satisfy ``require_reviewer``
+    because it is not in ``users`` at all.
+    """
+
+    __tablename__ = "readers"
+
+    id: Mapped[str] = mapped_column(UUID_PK, primary_key=True, server_default=GEN_UUID)
+    email: Mapped[str] = mapped_column(Text, nullable=False)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    #: Which subjects to lift to the top of this reader's feed. Ordering, not
+    #: filtering: everything else still appears below.
+    interests: Mapped[list[Subject]] = mapped_column(
+        ARRAY(pg_enum(Subject, "subject")), server_default=text("'{}'")
+    )
+    newsletter: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ReaderFolder(Base):
+    """A named shelf. Every reader gets one called "Saved" at signup."""
+
+    __tablename__ = "reader_folders"
+
+    id: Mapped[str] = mapped_column(UUID_PK, primary_key=True, server_default=GEN_UUID)
+    reader_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("readers.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ReaderSave(Base):
+    """One article on one reader's shelf.
+
+    ``(reader_id, article_id)`` is the primary key, so moving an article
+    between folders is an update of ``folder_id`` rather than a second row —
+    the same article cannot accumulate a copy per folder. The composite foreign
+    key on ``(folder_id, reader_id)`` is what makes "you can only save into
+    your own folder" a database fact rather than a check every handler has to
+    remember.
+    """
+
+    __tablename__ = "reader_saves"
+
+    reader_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("readers.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    article_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("articles.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    folder_id: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["folder_id", "reader_id"],
+            ["reader_folders.id", "reader_folders.reader_id"],
+            ondelete="CASCADE",
+        ),
+    )
+
+
+class ContactRequest(Base):
+    """A "Let us know" submission: a claim to check, or a topic to cover.
+
+    Written unauthenticated from the public site, read only in the console.
+    No foreign key to ``readers`` — a request is worth having from someone who
+    never signs up, and the email on the row is how we reply either way.
+    """
+
+    __tablename__ = "contact_requests"
+
+    id: Mapped[str] = mapped_column(UUID_PK, primary_key=True, server_default=GEN_UUID)
+    kind: Mapped[ContactKind] = mapped_column(pg_enum(ContactKind, "contact_kind"))
+    name: Mapped[str | None] = mapped_column(Text)
+    email: Mapped[str] = mapped_column(Text, nullable=False)
+    link: Mapped[str | None] = mapped_column(Text)
+    note: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[ContactStatus] = mapped_column(pg_enum(ContactStatus, "contact_status"))
+    handled_by: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id")
+    )
+    handled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class MediaObject(Base):
+    """Image bytes, keyed by their own SHA-256.
+
+    The store behind ``services/media.py``. Deliberately unrelated to
+    ``articles``: an image is referenced by URL from inside a document, and the
+    same bytes may be embedded by several drafts or by none. See the
+    ``media_objects`` section of ``migrations/0001_initial.sql`` for why a
+    column on ``articles`` cannot work — the short version is that ILLUSTRATE
+    stores pictures two stages before the article row exists.
+
+    ``digest`` is the primary key rather than a surrogate, which is what makes
+    storing the same image twice a no-op rather than a duplicate.
+    """
+
+    __tablename__ = "media_objects"
+
+    digest: Mapped[str] = mapped_column(Text, primary_key=True)
+    #: One of png/jpg/gif/webp, decided by sniffing ``data``'s leading bytes.
+    #: The content type served is derived from this via ``media.CONTENT_TYPES``
+    #: rather than stored, so there is one definition of that mapping.
+    extension: Mapped[str] = mapped_column(Text, nullable=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class DiscoveryScan(Base):
+    """One run of ``scripts/scan_trends.py``.
+
+    Bookkeeping only. The observations a scan recorded outlive it — they are the
+    baseline every later scan is measured against — which is why
+    ``DiscoveryObservation.scan_id`` is ``ON DELETE SET NULL``.
+    """
+
+    __tablename__ = "discovery_scans"
+
+    id: Mapped[str] = mapped_column(UUID_PK, primary_key=True, server_default=GEN_UUID)
+    #: The Entrez-date range asked of PubMed, overlap included. Successive scans
+    #: overlap heavily on purpose; see the trend-discovery section of
+    #: migrations/0001_initial.sql.
+    window_start: Mapped[date] = mapped_column(Date, nullable=False)
+    window_end: Mapped[date] = mapped_column(Date, nullable=False)
+    mode: Mapped[DiscoveryScanMode] = mapped_column(
+        pg_enum(DiscoveryScanMode, "discovery_scan_mode"),
+        server_default=text("'scan'"),
+    )
+    status: Mapped[DiscoveryScanStatus] = mapped_column(
+        pg_enum(DiscoveryScanStatus, "discovery_scan_status"),
+        server_default=text("'running'"),
+    )
+    seeds_queried: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    records_seen: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    descriptors_seen: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    candidates_emitted: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    error: Mapped[dict | None] = mapped_column(NullableJSONB)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DiscoveryDescriptor(Base):
+    """A MeSH descriptor we have seen, and what we take it to be.
+
+    ``ui`` is the primary key because it is the only stable name a substance
+    has: descriptor labels change between MeSH editions, and ``articles.product``
+    is free text the extraction model wrote. D003401 is creatine in every record
+    ever indexed, which is what makes the one-live-proposal-per-substance index
+    a real guarantee rather than fuzzy string matching.
+    """
+
+    __tablename__ = "discovery_descriptors"
+
+    ui: Mapped[str] = mapped_column(Text, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    #: Recomputed each scan rather than frozen, so a misclassification is one
+    #: UPDATE rather than a code change plus a full re-scan.
+    kind: Mapped[DiscoveryDescriptorKind] = mapped_column(
+        pg_enum(DiscoveryDescriptorKind, "discovery_descriptor_kind")
+    )
+
+
+class DiscoveryObservation(Base):
+    """One (descriptor, paper) pair. The unit every trend count is made of.
+
+    Counts are ``COUNT(DISTINCT pmid)`` over this table, never an incremented
+    counter. That is what lets each scan re-read the weeks a previous scan
+    already covered — necessary, because MeSH indexing lags PubMed entry — for
+    free, and it makes the whole script idempotent.
+    """
+
+    __tablename__ = "discovery_observations"
+
+    descriptor_ui: Mapped[str] = mapped_column(
+        Text, ForeignKey("discovery_descriptors.ui"), primary_key=True
+    )
+    pmid: Mapped[str] = mapped_column(Text, primary_key=True)
+    #: When PubMed received the record, not when we found it. A paper indexed
+    #: late belongs to the window it entered in, or a scan that happens to
+    #: notice a backlog reads as a surge.
+    entrez_date: Mapped[date] = mapped_column(Date, nullable=False)
+    #: Denormalised from ``DiscoveryDescriptor.kind``, because the baseline
+    #: query filters on it and joining 30k rows back to the vocabulary for a
+    #: boolean turns an index-only scan into a hash join per window.
+    is_substance: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    #: Whether this paper tagged the descriptor with an intervention qualifier.
+    #: Per observation rather than aggregated: the substance-vs-biomarker rule
+    #: is a ratio over papers, and its threshold is expected to be retuned.
+    intervention_qualifier: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false")
+    )
+    study_type: Mapped[StudyType] = mapped_column(
+        pg_enum(StudyType, "study_type"), server_default=text("'unknown'")
+    )
+
+
+class DiscoveryCandidate(Base):
+    """A proposed article topic, ranked by how fast its literature is growing.
+
+    A proposal and nothing more. Promotion to a ``PipelineRun`` is a reviewer
+    action through the console, so nothing here spends money on its own — the
+    same principle as invariant #1, moved one step earlier to what gets written
+    at all rather than what gets published.
+    """
+
+    __tablename__ = "discovery_candidates"
+
+    id: Mapped[str] = mapped_column(UUID_PK, primary_key=True, server_default=GEN_UUID)
+    scan_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("discovery_scans.id", ondelete="CASCADE")
+    )
+    substance_ui: Mapped[str] = mapped_column(
+        Text, ForeignKey("discovery_descriptors.ui"), nullable=False
+    )
+    #: Nullable: a substance whose co-occurring descriptors name no recognisable
+    #: outcome is still proposed, under a bare topic. Missing context is not a
+    #: reason to hide an emerging trend.
+    outcome_ui: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("discovery_descriptors.ui")
+    )
+    #: Verbatim what becomes ``pipeline_runs.topic``. Stored rather than
+    #: recomposed at promote time, so what the reviewer read is what runs.
+    topic: Mapped[str] = mapped_column(Text, nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    paper_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    baseline_count: Mapped[float] = mapped_column(Float, nullable=False)
+    #: ``{lift, study_mix, top_pmids, window}`` — the reviewer's evidence for the
+    #: proposal, and the dismissal rule's memory of what was known at the time.
+    #: Not nullable, so bare JSONB is correct here.
+    rationale: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    status: Mapped[DiscoveryCandidateStatus] = mapped_column(
+        pg_enum(DiscoveryCandidateStatus, "discovery_candidate_status"),
+        server_default=text("'proposed'"),
+    )
+    pipeline_run_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("pipeline_runs.id", ondelete="SET NULL")
+    )
+    decided_by: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dismiss_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ResearchRun(Base):
+    """One run of the research agent (``app/research/``).
+
+    Proposes topics and nothing else: its output is ``research_candidates``
+    rows, and a reviewer promoting one is what creates a ``PipelineRun``. The
+    stage log, provider status and config snapshot are here so a run can be
+    explained after the fact — which trends it saw, which providers failed,
+    and which weights it scored with.
+    """
+
+    __tablename__ = "research_runs"
+
+    id: Mapped[str] = mapped_column(UUID_PK, primary_key=True, server_default=GEN_UUID)
+    #: Human-readable, e.g. ``research_2026_09_30_a84f``. For logs and n8n.
+    label: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    mode: Mapped[ResearchRunMode] = mapped_column(
+        pg_enum(ResearchRunMode, "research_run_mode"), nullable=False
+    )
+    status: Mapped[ResearchRunStatus] = mapped_column(
+        pg_enum(ResearchRunStatus, "research_run_status"),
+        server_default=text("'queued'"),
+    )
+    #: The current ``ResearchStage`` while running, the last one reached after.
+    stage: Mapped[str | None] = mapped_column(Text)
+    params: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    #: Weights and thresholds the run scored with, frozen at start.
+    config: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    provider_status: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    stage_log: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    #: Short notes for the desk, e.g. why fewer topics than asked were selected.
+    notes: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    error: Mapped[dict | None] = mapped_column(NullableJSONB)
+    requested_by: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ResearchCandidate(Base):
+    """One topic a research run considered, with every signal it was scored on.
+
+    ``id`` is assigned in Python when the candidate is first built, so the
+    graph can rewrite the row after every stage by primary key.
+    """
+
+    __tablename__ = "research_candidates"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True)
+    research_run_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("research_runs.id", ondelete="CASCADE")
+    )
+    canonical_topic: Mapped[str] = mapped_column(Text, nullable=False)
+    category: Mapped[str | None] = mapped_column(Text)
+    queries: Mapped[list] = mapped_column(JSONB, nullable=False)
+    #: ``{trend, web, news, science, content, potential}`` — raw provider data.
+    signals: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    #: Component scores, ``overall``, ``weights_used`` and ``unavailable``.
+    scores: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    evidence_status: Mapped[str | None] = mapped_column(Text)
+    overall: Mapped[float | None] = mapped_column(Float)
+    rank: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[ResearchCandidateStatus] = mapped_column(
+        pg_enum(ResearchCandidateStatus, "research_candidate_status"),
+        server_default=text("'candidate'"),
+    )
+    discard_reason: Mapped[str | None] = mapped_column(Text)
+    pipeline_run_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("pipeline_runs.id", ondelete="SET NULL")
+    )
+    decided_by: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dismiss_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

@@ -21,11 +21,19 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.api import automation
+from app.api.console import research as console_research
 from app.api.console import routes as console_routes
+from app.api.public import contact as public_contact
 from app.api.public import feed as public_feed
+from app.api.public import media as public_media
+from app.api.public import readers as public_readers
 from app.config import get_settings
-from app.db import dispose_engine
+from app.db import dispose_engine, get_session_factory
+from app.discovery.schedule import ScanScheduler
+from app.logging_setup import configure_logging
 from app.security.auth import AuthError
+from app.services.reader import ReaderError
 from app.services.review import ReviewError
 
 logger = logging.getLogger(__name__)
@@ -36,9 +44,12 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     settings = get_settings()
 
     # Fail fast on an embedding-width mismatch rather than at the first
-    # pgvector write. Skipped when no key is configured, so the API can serve
-    # the public feed without embedding credentials.
-    if settings.voyage_api_key or settings.openai_api_key:
+    # pgvector write. Skipped when a hosted provider has no key configured, so
+    # the API can serve the public feed without embedding credentials. Ollama
+    # needs no key, and building its provider makes no network call — only the
+    # width is asserted here, so a stopped `ollama serve` does not block the API.
+    is_local = settings.embedding_provider.lower() == "ollama"
+    if is_local or settings.voyage_api_key or settings.openai_api_key:
         from app.llm.embeddings.factory import build_embedding_provider
 
         build_embedding_provider(settings)
@@ -48,18 +59,24 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
             "(the public feed and console are unaffected)"
         )
 
-    yield
-    await dispose_engine()
+    # Fills the trend desk on a timer so nobody has to press the button. Started
+    # here rather than in the worker because `manual_scan` — the single-flight
+    # runner it shares with the console's button — lives in this process, and
+    # two runners would be two guards. See `discovery/schedule.py`.
+    scheduler = ScanScheduler(settings, get_session_factory())
+    scheduler.start()
+    try:
+        yield
+    finally:
+        await scheduler.stop()
+        await dispose_engine()
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    logging.basicConfig(
-        level=logging.DEBUG if settings.debug else logging.INFO,
-        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-    )
+    configure_logging(logging.DEBUG if settings.debug else logging.INFO)
 
-    app = FastAPI(title="EvidWell API", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="You.th API", version="0.1.0", lifespan=lifespan)
 
     app.add_middleware(
         CORSMiddleware,
@@ -69,12 +86,36 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    app.include_router(public_feed.router, prefix="/api")
-    app.include_router(console_routes.auth_router, prefix="/api/console")
-    app.include_router(console_routes.router, prefix="/api/console")
+    app.include_router(public_feed.router, prefix="/api")                      # app client
+    app.include_router(public_readers.router, prefix="/api")                  # accounts
+    app.include_router(public_contact.router, prefix="/api")                  # let us know
+    # Stored images, read from `media_objects`. A router rather than the
+    # StaticFiles mount this replaced, because the bytes are in the database —
+    # see services/media.py. Unauthenticated by design: these images are
+    # embedded in published articles, so every reader fetches them. Uploading
+    # is the console-only half and lives on the authenticated router below.
+    #
+    # Under /api rather than a /media of its own because the dev proxy and any
+    # deployment already route that prefix — media needs no new rule in either
+    # place, and article documents hold these paths verbatim.
+    app.include_router(public_media.router, prefix="/api")                     # images
+    app.include_router(console_routes.auth_router, prefix="/api/console")     # login
+    app.include_router(console_routes.router, prefix="/api/console")           # reviewer
+    app.include_router(console_research.router, prefix="/api/console")        # research
+    # n8n. Shared-secret auth, and 404 throughout while no token is configured.
+    app.include_router(automation.router, prefix="/api")                       # n8n
 
     @app.exception_handler(ReviewError)
     async def _review_error(_: Request, exc: ReviewError) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT, content={"detail": str(exc)}
+        )
+
+    @app.exception_handler(ReaderError)
+    async def _reader_error(_: Request, exc: ReaderError) -> JSONResponse:
+        # Same treatment as ReviewError: an illegal operation on your own data
+        # is a conflict, and the message is safe to show because it can only
+        # describe the caller's own account.
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT, content={"detail": str(exc)}
         )

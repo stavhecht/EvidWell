@@ -1,0 +1,99 @@
+{
+  "name": "EvidWell - manual research run",
+  "nodes": [
+    {
+      "id": "webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "3a7e9c1b-5d2f-4e8a-b6c4-1f0d2e3a4b5c",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "evidwell-research",
+        "responseMode": "responseNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "start-research-run",
+      "name": "Start research run",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EVIDWELL_API_URL }}/api/automation/research/runs",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Trigger-Token",
+              "value": "={{ $env.RESEARCH_TRIGGER_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify(Object.assign({}, $json.body || {}, { mode: 'manual' })) }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true,
+              "fullResponse": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "respondWith": "firstIncomingItem",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Start research run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start research run": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "id": "EvidWellManualRun"
+}

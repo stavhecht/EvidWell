@@ -1,8 +1,7 @@
-"""Stage 3 — semantic re-rank and evidence-grade filtering.
+"""Stage 3 — rank each claim's candidates, then number the sources S1..Sn.
 
-Pass 2 of hybrid retrieval. This is where pgvector earns its place: cosine
-similarity against the specific claim, restricted to this run's candidates,
-combined with the grade and recency bonuses from retrieval/rerank.py.
+Reads what RetrieveStage cached and writes nothing. The scoring itself is in
+``retrieval/rerank.py``.
 """
 
 from __future__ import annotations
@@ -11,79 +10,76 @@ import logging
 from collections import Counter
 
 from app.domain.contracts import RankedSource
+from app.domain.enums import Verdict
+from app.evidence.grading import QUORUM_FOR_SUPPORTED, VERDICT_CEILING
 from app.pipeline.stages import PipelineContext, StageError, StageName
-from app.retrieval.cache import CachedSource, SourceCache
 from app.retrieval.rerank import RerankConfig, SemanticReranker, assign_handles
 
 logger = logging.getLogger(__name__)
 
 
+def thin_claims(ranked: dict[str, list[RankedSource]]) -> list[str]:
+    """Claims with fewer than ``QUORUM_FOR_SUPPORTED`` supported-tier sources.
+
+    Such a claim cannot reach ``supported`` however well the article is
+    written, so the graph sends it back through RETRIEVE with a broader query.
+    This counts *strong* sources, not sources: a claim with twelve weak
+    studies is thin, one with three good reviews is not.
+    """
+    return sorted(
+        claim
+        for claim, entries in ranked.items()
+        if sum(
+            1
+            for entry in entries
+            if VERDICT_CEILING[entry.paper.study_type] is Verdict.SUPPORTED
+        )
+        < QUORUM_FOR_SUPPORTED
+    )
+
+
 class RankStage:
     name = StageName.RANK
 
-    def __init__(
-        self,
-        reranker: SemanticReranker,
-        cache: SourceCache,
-        config: RerankConfig,
-    ) -> None:
+    def __init__(self, reranker: SemanticReranker, config: RerankConfig) -> None:
         self._reranker = reranker
-        self._cache = cache
         self._config = config
 
     async def run(self, ctx: PipelineContext) -> PipelineContext:
-        """Rank candidates per claim, then assign citation handles globally."""
+        """Rank candidates per claim, then assign citation handles across the article."""
         if ctx.extraction is None:
             raise StageError(self.name, "extraction stage did not run")
 
-        # Re-resolve candidates to their cached rows so ranking has source ids.
-        cached_by_key: dict[str, CachedSource] = {}
-        all_papers = [paper for papers in ctx.candidates.values() for paper in papers]
-        if all_papers:
-            for entry in await self._cache.upsert_many(all_papers):
-                cached_by_key[entry.paper.dedup_key] = entry
-
         ranked_by_claim: dict[str, list[RankedSource]] = {}
-        for claim, papers in ctx.candidates.items():
-            candidates = [
-                cached_by_key[paper.dedup_key]
-                for paper in papers
-                if paper.dedup_key in cached_by_key
-            ]
+        for claim, candidates in ctx.candidates.items():
             ranked_by_claim[claim] = await self._reranker.rank_for_claim(
                 claim, candidates, self._config
             )
-
-        # Handles are assigned once, globally, across the whole article — two
-        # claims sharing a source must give it the same handle, or the model
-        # sees one paper twice under different names and cites it as if it were
-        # two independent findings.
         ranked_by_claim = assign_handles(ranked_by_claim)
 
-        study_types = Counter(
-            str(entry.paper.study_type)
-            for entries in ranked_by_claim.values()
-            for entry in entries
-        )
+        thin = thin_claims(ranked_by_claim)
+        if thin:
+            logger.info(
+                "%d of %d claims are below the supported-tier quorum: %s",
+                len(thin),
+                len(ranked_by_claim),
+                ", ".join(repr(claim) for claim in thin),
+            )
 
-        # An all-in-vitro kept set means the verdict is about to be capped at
-        # 'weak'. Far easier to understand here than to reverse-engineer from a
-        # validation failure two stages later.
+        all_ranked = [entry for entries in ranked_by_claim.values() for entry in entries]
+        study_types = Counter(str(entry.paper.study_type) for entry in all_ranked)
         ctx.record_metrics(
             self.name,
             {
                 "kept_per_claim": {
                     claim: len(entries) for claim, entries in ranked_by_claim.items()
                 },
+                # All in-vitro here means the verdict will be capped at 'weak'.
                 "study_types": dict(study_types),
-                "unique_sources": len(
-                    {
-                        entry.source_id
-                        for entries in ranked_by_claim.values()
-                        for entry in entries
-                    }
-                ),
+                "unique_sources": len({entry.source_id for entry in all_ranked}),
+                "refine_round": ctx.refine_round,
+                "thin_claims": thin,
             },
         )
 
-        return ctx.model_copy(update={"ranked": ranked_by_claim})
+        return ctx.model_copy(update={"ranked": ranked_by_claim, "thin_claims": thin})

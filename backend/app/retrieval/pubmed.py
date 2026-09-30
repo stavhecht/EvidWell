@@ -12,6 +12,7 @@ with an API key — set ``PUBMED_API_KEY``).
 from __future__ import annotations
 
 import logging
+from typing import Any
 from xml.etree import ElementTree
 
 import httpx
@@ -20,6 +21,7 @@ from app.domain.contracts import CandidatePaper
 from app.domain.enums import SourceApi
 from app.evidence.grading import classify_study_type
 from app.retrieval.base import ProviderError, RateLimited, SearchQuery
+from app.retrieval.throttle import HttpClient, retry_after_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +34,24 @@ EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 REVIEW_FILTER = '(systematic[sb] OR "meta-analysis"[pt] OR "systematic review"[pt])'
 
 
+def detect_throttle(response: httpx.Response) -> float | None:
+    """E-utilities signals throttling in a 200 body, not only with a 429.
+
+    Handed to the ``ThrottledClient`` so those responses are retried like any
+    other throttle instead of being parsed. Left unhandled, the JSON body has
+    no ``idlist``, the search returns zero candidates, and the pipeline reads
+    that as "no literature exists for this claim" — the single most misleading
+    conclusion this provider can produce.
+
+    Returns the seconds to wait, or None when the response is not a throttle.
+    """
+    if "API rate limit exceeded" in response.text[:500]:
+        return 1.0
+    return None
+
+
 class PubMedProvider:
-    def __init__(self, http: httpx.AsyncClient, api_key: str | None = None) -> None:
+    def __init__(self, http: HttpClient, api_key: str | None = None) -> None:
         self._http = http
         self._api_key = api_key
 
@@ -61,17 +79,43 @@ class PubMedProvider:
         terms = query.terms
         if query.reviews_only:
             terms = f"({terms}) AND {REVIEW_FILTER}"
+        payload = await self._esearch_json(
+            terms,
+            retmax=query.max_results,
+            min_date=str(query.min_year) if query.min_year else None,
+        )
+        return list(payload.get("esearchresult", {}).get("idlist", []))
 
+    async def count(self, terms: str, *, min_date: str | None = None) -> int:
+        """How many PubMed records match ``terms``, without fetching any.
+
+        ``min_date`` is ``YYYY`` or ``YYYY/MM/DD`` on the publication date. Used
+        by the research agent to size a topic's literature; the same esearch
+        call ``search`` makes, with ``retmax=0``.
+
+        Raises:
+            RateLimited, ProviderError: as ``search``. A count that could not be
+                made must never read as zero papers.
+        """
+        payload = await self._esearch_json(terms, retmax=0, min_date=min_date)
+        raw = payload.get("esearchresult", {}).get("count")
+        if raw is None or not str(raw).isdigit():
+            raise ProviderError("pubmed esearch returned no count")
+        return int(raw)
+
+    async def _esearch_json(
+        self, terms: str, *, retmax: int, min_date: str | None
+    ) -> dict[str, Any]:
         params: dict[str, str] = {
             "db": "pubmed",
             "term": terms,
-            "retmax": str(query.max_results),
+            "retmax": str(retmax),
             "retmode": "json",
             "sort": "relevance",
             **self._auth_params(),
         }
-        if query.min_year:
-            params["mindate"] = str(query.min_year)
+        if min_date:
+            params["mindate"] = min_date
             params["maxdate"] = "3000"
             params["datetype"] = "pdat"
 
@@ -88,8 +132,9 @@ class PubMedProvider:
             payload = response.json()
         except ValueError as exc:
             raise ProviderError("pubmed esearch returned non-JSON") from exc
-
-        return list(payload.get("esearchresult", {}).get("idlist", []))
+        if not isinstance(payload, dict):
+            raise ProviderError("pubmed esearch returned an unexpected shape")
+        return payload
 
     async def _efetch(self, pmids: list[str]) -> list[CandidatePaper]:
         params = {
@@ -123,19 +168,19 @@ class PubMedProvider:
 
     @staticmethod
     def _raise_for_rate_limit(response: httpx.Response) -> None:
-        """E-utilities signals throttling without always using a status code.
+        """Backstop for a provider constructed against a bare httpx client.
 
-        A status-only check silently treats a throttle as an empty result,
-        which looks like "no literature exists for this claim" — the single
-        most misleading failure this provider can produce.
+        Wired the normal way (``retrieval/factory.py``) the ``ThrottledClient``
+        has already retried and raised before we reach here, so this fires only
+        when something skipped it. Kept because the failure it catches is
+        silent — see ``detect_throttle``.
         """
         if response.status_code == 429:
-            retry_after = response.headers.get("retry-after")
             raise RateLimited(
                 "pubmed rate limit (429)",
-                retry_after=float(retry_after) if retry_after else None,
+                retry_after=retry_after_seconds(response) or None,
             )
-        if "API rate limit exceeded" in response.text[:500]:
+        if detect_throttle(response) is not None:
             raise RateLimited("pubmed rate limit (200 body)", retry_after=1.0)
 
     def _parse_article(self, element: ElementTree.Element) -> CandidatePaper | None:

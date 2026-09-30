@@ -32,7 +32,14 @@ from app.domain.contracts import (
 )
 from app.domain.enums import StudyType, Verdict
 from app.domain.models import Source
-from app.evidence.grading import best_grade, max_verdict_for_grade, verdict_exceeds_grade
+from app.evidence.grading import (
+    QUORUM_FOR_SUPPORTED,
+    VERDICT_STRENGTH,
+    best_grade,
+    max_verdict_for_claims,
+    max_verdict_for_sources,
+)
+from app.services.tiptap import MalformedBodyError, body_text_to_doc
 
 logger = logging.getLogger(__name__)
 
@@ -138,12 +145,21 @@ async def check_sources_resolve(
 
 
 def check_beats_are_cited(output: SynthesisOutput) -> list[ValidationFailure]:
-    """Check 3 — the evidence beat carries at least one citation.
+    """Check 3 — the evidence beat and every section carry a citation.
 
     An uncited factual sentence is exactly the failure this whole system exists
-    to prevent, so beat 2 (what the research shows) must cite something.
+    to prevent, so beat 2 (what the research shows) must cite something, and so
+    must each section.
 
-    Two deliberate exemptions:
+    **Sections are covered for the same reason beat 2 is, at a scale that makes
+    it matter more.** Before sections existed the widest gap this check left was
+    three interpretive sentences. A section is up to eight, and there may be
+    five of them — so exempting them would quietly turn a three-sentence
+    allowance into most of the article. A section exists to say what the
+    research shows; if it cannot name a source, it is the kind of prose the
+    grounding invariant is for.
+
+    Two deliberate exemptions, both unchanged:
 
     * verdict ``no_evidence`` — an article correctly reporting that nothing was
       found has nothing to cite, and demanding a citation would push the model
@@ -157,26 +173,64 @@ def check_beats_are_cited(output: SynthesisOutput) -> list[ValidationFailure]:
 
     from app.domain.contracts import extract_handles
 
+    failures: list[ValidationFailure] = []
+
     if not extract_handles(output.body.beat_2_evidence):
-        return [
+        failures.append(
             ValidationFailure(
                 code="uncited_beat",
                 message="the evidence beat states findings without citing any source",
                 detail={"beat": "beat_2_evidence"},
             )
-        ]
-    return []
+        )
+
+    for index, section in enumerate(output.body.sections, start=1):
+        # The heading is excluded on purpose: it is a label, and a citation
+        # marker in one would render as a chip in a title. The prose under it
+        # is what makes a statement.
+        if not extract_handles(section.body):
+            failures.append(
+                ValidationFailure(
+                    code="uncited_section",
+                    message=(
+                        f"section {index} ({section.heading!r}) states findings "
+                        "without citing any source"
+                    ),
+                    detail={"section": index, "heading": section.heading},
+                )
+            )
+
+    return failures
 
 
 def check_verdict_within_grade(
-    output: SynthesisOutput, resolved: list[ResolvedSource]
-) -> tuple[StudyType, list[ValidationFailure]]:
+    output: SynthesisOutput, resolved: list[ResolvedSource], payload: SynthesisInput
+) -> tuple[StudyType, Verdict, list[ValidationFailure]]:
     """Check 4 — invariant #3: the verdict does not exceed its evidence.
 
-    ``best_grade`` is computed over the **cited** sources only. Sources the
-    model retrieved but ignored cannot raise its ceiling — otherwise a strong
-    review sitting unused in the prompt would license a confident verdict the
-    article never actually supported.
+    Computed over the **cited** sources only. Sources the model retrieved but
+    ignored cannot raise its ceiling — otherwise a strong review sitting unused
+    in the prompt would license a confident verdict the article never actually
+    supported.
+
+    Two questions, not one. *How good* is the evidence, which is the study-type
+    ceiling; and *how much of it is there*, which is the quorum. A lone trial
+    answers the first perfectly well and the second not at all, and the first
+    version of this check only asked the first — so one cited study could carry
+    ``supported``, the strongest thing this system can say. Both are evaluated
+    **per claim**, and the article inherits its weakest claim's ceiling.
+
+    **The ceiling is returned whether or not it was exceeded**, because the
+    check is one-sided: it can only fail a verdict that is too strong. A verdict
+    below its ceiling is either an honest cautious call or a model declining to
+    commit, and nothing here can tell them apart — so the number is recorded and
+    the judgement left to the reviewer, who can see both.
+
+    The returned ``StudyType`` is still the best grade cited anywhere in the
+    article: it is stored on the row as a description of the evidence and shown
+    in the console, and it stays a fact about the sources rather than becoming
+    a verdict-shaped judgement. The quorum shows up in the *ceiling*, which is
+    why the failure message reports both.
 
     This is what makes "honest about evidence strength" structural. A
     ``supported`` verdict resting on two cell-culture studies fails here and the
@@ -186,23 +240,78 @@ def check_verdict_within_grade(
     """
     grade = best_grade([source.study_type for source in resolved])
 
-    if verdict_exceeds_grade(output.verdict, grade):
-        return grade, [
+    cited = {source.source_id for source in resolved}
+    types_by_claim: dict[str, list[StudyType]] = {
+        claim: [] for claim in payload.target_claims
+    }
+    for prompt_source in payload.sources:
+        if prompt_source.source_id not in cited:
+            continue
+        for claim in prompt_source.claims:
+            # A claim absent from target_claims cannot happen via the pipeline
+            # (both come from the same extraction), and if it ever did, adding
+            # it here would let an unasked-for claim carry the article.
+            if claim in types_by_claim:
+                types_by_claim[claim].append(prompt_source.study_type)
+
+    ceiling = max_verdict_for_claims(types_by_claim)
+
+    if VERDICT_STRENGTH[output.verdict] > VERDICT_STRENGTH[ceiling]:
+        claimed = VERDICT_STRENGTH[output.verdict]
+        thin = sorted(
+            claim
+            for claim, types in types_by_claim.items()
+            if VERDICT_STRENGTH[max_verdict_for_sources(types)] < claimed
+        )
+        return grade, ceiling, [
             ValidationFailure(
                 code="verdict_exceeds_grade",
                 message=(
                     f"verdict '{output.verdict}' exceeds what the cited evidence "
-                    f"supports (best study type: {grade}, ceiling: "
-                    f"{max_verdict_for_grade(grade)})"
+                    f"supports (ceiling: {ceiling}; best study type: {grade}; "
+                    f"{QUORUM_FOR_SUPPORTED} sources at a supported-tier grade are "
+                    f"required per claim). Underpowered: "
+                    f"{', '.join(repr(claim) for claim in thin)}"
                 ),
                 detail={
                     "verdict": str(output.verdict),
                     "best_grade": str(grade),
-                    "ceiling": str(max_verdict_for_grade(grade)),
+                    "ceiling": str(ceiling),
+                    "quorum": QUORUM_FOR_SUPPORTED,
+                    "underpowered_claims": thin,
+                    "cited_per_claim": {
+                        claim: [str(t) for t in types]
+                        for claim, types in types_by_claim.items()
+                    },
                 },
             )
         ]
-    return grade, []
+    return grade, ceiling, []
+
+
+def check_body_parses(output: SynthesisOutput) -> list[ValidationFailure]:
+    """Check 5 — the body can be turned into a document.
+
+    PERSIST parses the body again to build ``original_content``, and it once
+    was the only place that did. The failure was then added to the report after
+    this stage had recorded its metrics, so a run's ``validate`` metrics read
+    ``passed: true`` for an article stored as ``validation_failed``.
+
+    The raw text of the offending block goes into ``detail``: a draft that does
+    not parse is stored with an empty document, so this is the only record of
+    what the model wrote.
+    """
+    try:
+        body_text_to_doc(output.body)
+    except MalformedBodyError as exc:
+        return [
+            ValidationFailure(
+                code="malformed_body",
+                message=str(exc),
+                detail={"where": exc.where, "text": exc.text},
+            )
+        ]
+    return []
 
 
 async def validate_draft(
@@ -230,7 +339,11 @@ async def validate_draft(
 
     failures.extend(check_beats_are_cited(output))
 
-    grade, verdict_failures = check_verdict_within_grade(output, resolved)
+    failures.extend(check_body_parses(output))
+
+    grade, ceiling, verdict_failures = check_verdict_within_grade(
+        output, resolved, payload
+    )
     failures.extend(verdict_failures)
 
     report = ValidationReport(
@@ -238,11 +351,22 @@ async def validate_draft(
         citations_total=len(cited),
         citations_resolved=len(resolved),
         best_evidence_grade=grade,
+        verdict_ceiling=ceiling,
         failures=failures,
     )
 
     if report.passed:
-        logger.info("draft validated: %s, grade=%s", report.badge, grade)
+        # The verdict and its ceiling are logged together so the gap between
+        # them is greppable: a run of "verdict=weak ceiling=supported" is the
+        # signature of a model declining to commit on good evidence, and it
+        # produces a clean report otherwise.
+        logger.info(
+            "draft validated: %s, grade=%s, verdict=%s, ceiling=%s",
+            report.badge,
+            grade,
+            output.verdict,
+            ceiling,
+        )
     else:
         logger.warning(
             "draft REJECTED (%d failures): %s", len(failures), summarise_failures(report)
@@ -263,6 +387,7 @@ def summarise_failures(report: ValidationReport) -> str:
         "hallucinated_handle": "hallucinated citation",
         "unresolvable_source": "unresolvable source",
         "uncited_beat": "uncited evidence beat",
+        "uncited_section": "uncited section",
         "verdict_exceeds_grade": "verdict exceeds evidence grade",
         "malformed_body": "unparseable body",
     }

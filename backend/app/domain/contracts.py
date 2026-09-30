@@ -13,14 +13,77 @@ article instead of padding to reach a floor.
 from __future__ import annotations
 
 import re
-from typing import Annotated
+from typing import Annotated, Any
 
-from pydantic import BaseModel, Field, StringConstraints, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from app.domain.enums import SourceApi, StudyType, Verdict
 
-# Matches a citation handle as the model emits it inline: [S1], [S2]…
-CITATION_MARKER_RE = re.compile(r"\[(S\d+)\]")
+#: One inline citation marker as the model emits it: ``[S1]``, or ``[S1, S5]``
+#: when several sources back one statement.
+#:
+#: **The comma form is accepted deliberately.** The canonical multi-source
+#: syntax is adjacent brackets (``[S1][S5]``), which is what ``doc_to_plain_text``
+#: regenerates — but it is not a form a model produces unprompted, and the
+#: synthesis prompt only ever showed a single handle. A model asked to cite
+#: three sources writes ``[S1, S5, S8]``, and rejecting that cost a whole draft:
+#: the body failed to parse, the article was written ``validation_failed``, and
+#: it never reached the review queue.
+#:
+#: **This is the only definition of a marker, and tiptap.py builds on it.** The
+#: parser and the handle extractor disagreeing is worse than either being
+#: strict: handles inside a marker the extractor cannot read are absent from
+#: ``ArticleBody.cited_handles()``, so ``was_cited`` is false for sources the article
+#: visibly cites, and ``check_beats_are_cited`` reports an uncited beat that is
+#: cited on the page.
+CITATION_MARKER_PATTERN = r"\[S\d+(?:\s*,\s*S\d+)*\]"
+CITATION_MARKER_RE = re.compile(CITATION_MARKER_PATTERN)
+
+#: A run of adjacent markers, which the article renders as **one** citation
+#: chip: ``[S1][S5]`` exactly as much as ``[S1, S5]``, because a row of separate
+#: chips reads as two findings when it is one. ``tiptap.py`` splits prose on it,
+#: and SYNTHESIZE counts coverage by it. Defined once, beside the marker
+#: it is built from, for the same reason the marker is: if the renderer and the
+#: coverage count disagreed about what one citation is, a draft could satisfy
+#: the count with a row of chips the reader sees as a single citation.
+#:
+#: The capturing group is for ``re.split``, which keeps the runs it splits on.
+CITATION_RUN_RE = re.compile(rf"((?:{CITATION_MARKER_PATTERN})+)")
+
+#: A handle within a marker. Only ever applied to ``CITATION_MARKER_RE``
+#: matches, so it does not need to guard against prose ("the S1 group").
+_HANDLE_IN_MARKER_RE = re.compile(r"S\d+")
+
+#: A citation handle in canonical form. Expressed as a schema-level pattern
+#: rather than a validator on purpose: ``model_json_schema()`` carries
+#: ``pattern`` into the structured-output grammar, so Ollama's sampler cannot
+#: emit a malformed handle in the first place. A ``@field_validator`` is
+#: invisible to the schema and only ever catches the mistake after generation.
+#:
+#: Written ``[0-9]`` and NOT ``\d`` deliberately. Ollama compiles this pattern
+#: into a GBNF grammar and its converter does not understand the ``\d`` escape:
+#: with ``\d`` the whole request fails at 400 "failed to parse grammar", which
+#: breaks every synthesis call rather than just a malformed one. Verified
+#: against llama3.1:8b — see tests/test_content.py.
+CitationHandle = Annotated[str, StringConstraints(pattern=r"^S[0-9]+$")]
+
+#: The shorthand a model reaches for when every source backs the same claim:
+#: "S1-S8" as one string instead of eight handles. Covers the dash variants
+#: models actually emit (hyphen, en dash, em dash) and the "S1-8" short form.
+_HANDLE_RANGE_RE = re.compile(r"S(\d+)\s*[-\u2013\u2014]\s*S?(\d+)")
+
+#: Ceiling on range expansion. Retrieval keeps single digits of sources per
+#: claim, so a wider span is a confused model rather than a real citation list.
+#: Leaving it unexpanded lets the pattern reject it instead of inventing
+#: hundreds of handles we never retrieved.
+_MAX_RANGE_SPAN = 50
 
 # A rough sentence splitter. Deliberately simple: it is used to enforce a
 # *ceiling*, so over-counting on an edge case (an abbreviation like "e.g.")
@@ -33,8 +96,16 @@ def count_sentences(text: str) -> int:
 
 
 def extract_handles(text: str) -> set[str]:
-    """Every citation handle appearing inline in a body of text."""
-    return set(CITATION_MARKER_RE.findall(text))
+    """Every citation handle appearing inline in a body of text.
+
+    Two steps rather than one capturing regex, because a marker may hold
+    several handles (``[S1, S5]``) and ``findall`` returns one group per match.
+    """
+    return {
+        handle
+        for marker in CITATION_MARKER_RE.findall(text)
+        for handle in _HANDLE_IN_MARKER_RE.findall(marker)
+    }
 
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -124,6 +195,25 @@ class CandidatePaper(BaseModel):
         return keys
 
 
+class CachedCandidate(BaseModel):
+    """A candidate paired with the ``sources`` row it was written to.
+
+    RetrieveStage produces these; RankStage consumes them. The pairing exists
+    on the context because RankStage used to rebuild it by re-upserting every
+    candidate a second time — 100 extra statements to recover ids the previous
+    stage already held in memory, most of them single-row UPDATEs.
+
+    A model rather than a parallel ``dedup_key -> source_id`` map, so the two
+    halves cannot drift: a candidate is either carried with its id or not
+    carried at all. The map version silently drops any candidate missing from
+    it, and a source dropped between retrieval and ranking is invisible in the
+    output — it just looks like thinner evidence.
+    """
+
+    source_id: str
+    paper: CandidatePaper
+
+
 class RankedSource(BaseModel):
     """A cached source with its score against one specific claim."""
 
@@ -142,6 +232,18 @@ class RankedSource(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class Excerpt(BaseModel):
+    """A passage from a paper's full text, shown to the model beside its abstract.
+
+    Chosen by ``pipeline/steps/full_text.py`` for its closeness to the claims
+    the paper was retrieved for. ``section`` is the heading it sits under
+    ("Results"), or None for text outside any section.
+    """
+
+    section: str | None
+    text: str
+
+
 class PromptSource(BaseModel):
     """One source exactly as it is rendered into the synthesis prompt.
 
@@ -156,38 +258,179 @@ class PromptSource(BaseModel):
     year: int | None
     study_type: StudyType
     source_id: str
+    #: Which target claims this source was retrieved for — a list, because one
+    #: paper answering two claims appears **once** in the prompt under one
+    #: handle (see ``assign_handles``), and losing that would show the model
+    #: the same study twice as though it were two findings.
+    #:
+    #: Carried purely so validation can apply the evidence quorum *per claim*.
+    #: Counted article-wide, one well-supported claim lets a thin one ride
+    #: along on its sources, and nothing downstream can see that happened.
+    #:
+    #: **Required, and non-empty.** Defaulting it to ``[]`` was tried: a source
+    #: attributed to no claim supports no claim, so every draft failed the
+    #: quorum check for reasons that pointed at the verdict rather than at the
+    #: missing field. Fail-closed is the right direction, but a required field
+    #: fails at construction instead, where the actual mistake is.
+    claims: list[str] = Field(min_length=1)
+    #: Full-text passages, for the few open-access papers FULL_TEXT chose.
+    #: Empty for every other source — which says nothing about its quality.
+    excerpts: list[Excerpt] = Field(default_factory=list)
 
 
 class SynthesisInput(BaseModel):
+    """What the synthesis stage was given, carried forward for validation.
+
+    ``sources`` may be **empty**, and that is a meaningful state rather than a
+    missing guard: a topic with no usable literature gets the deterministic
+    no-evidence article (``services/no_evidence.py``), and validation still
+    needs a payload on the context to check against — an empty handle set is
+    the correct thing for it to find, because an empty one is what the article
+    was written from.
+
+    The guarantee that a *generative* call never runs on zero sources lives in
+    ``SynthesizeStage``, which branches to the template before reaching the
+    client. Enforcing it here instead would make the honest "no evidence"
+    article unrepresentable, which is how it came to crash the pipeline.
+    """
+
     product: str
     target_claims: list[str]
-    sources: list[PromptSource] = Field(min_length=1)
+    sources: list[PromptSource] = Field(default_factory=list)
 
     @property
     def handle_set(self) -> set[str]:
         return {s.handle for s in self.sources}
 
 
-class ArticleBody(BaseModel):
-    """The three beats. Each is a ceiling, not a target.
+class ArticleSection(BaseModel):
+    """One titled stretch of the evidence discussion, between beats 2 and 3.
 
-    A beat that would be honest at one sentence must stay one sentence — see
-    DESIGN.md §6. Nothing in this system pads to length.
+    Sections are what let an article run to a three-to-five minute read without
+    becoming three unbroken blocks of prose. They are **optional and have no
+    minimum** — that is the whole point. DESIGN.md §6's rule is that length is a
+    ceiling and never a floor, so a `min_length` here would be a padding
+    instruction: an article resting on one small trial would be obliged to
+    invent two more things to say about it.
+
+    ``body`` may hold blank-line-separated paragraphs; ``tiptap.py`` splits them
+    into sibling paragraph nodes.
     """
+
+    #: **What the model is shown, deliberately not this docstring.** Pydantic
+    #: uses a class docstring as the JSON-schema ``description``, and Ollama
+    #: passes that schema in as the *generation grammar* — so every word above
+    #: was reaching the model at the moment it decided how much to write, and
+    #: what it said was that sections are optional and that padding is
+    #: forbidden. Measured: two of the first three articles carried no sections
+    #: at all. The rationale is for whoever edits this file; the model needs the
+    #: shape, and it gets it here.
+    model_config = ConfigDict(
+        json_schema_extra={
+            "description": (
+                "One titled stretch of the evidence discussion, sitting between "
+                "beats 2 and 3. The heading is a plain label of at most 8 words, "
+                "never a claim. The body is at most 8 sentences and must carry at "
+                "least one [S...] citation marker; separate paragraphs within it "
+                "with a blank line."
+            )
+        }
+    )
+
+
+    heading: NonEmptyStr = Field(description="A plain descriptive label, not a claim")
+    body: NonEmptyStr = Field(description="The section's prose, with inline citations")
+
+    @field_validator("heading")
+    @classmethod
+    def _heading_at_most_8_words(cls, value: str) -> str:
+        if len(value.split()) > 8:
+            raise ValueError("a section heading must be at most 8 words")
+        return value
+
+    @field_validator("body")
+    @classmethod
+    def _body_at_most_8_sentences(cls, value: str) -> str:
+        if count_sentences(value) > 8:
+            raise ValueError("a section must be at most 8 sentences")
+        return value
+
+
+class ArticleBody(BaseModel):
+    """Three beats, plus the optional sections that sit between 2 and 3.
+
+    Every bound here is a ceiling, not a target. A beat that would be honest at
+    one sentence must stay one sentence, and an article with one usable trial
+    should carry no sections at all — see DESIGN.md §6. Nothing in this system
+    pads to length.
+
+    The three beats stayed named fields when sections arrived, rather than
+    becoming a list. Three things address them by name: ``derive_card`` reads
+    beat 1 for the feed excerpt, ``check_beats_are_cited`` reads beat 2, and
+    ``PersistStage`` places the generated lead image above beat 1. Reshaping the
+    spine would have rippled into all three and bought nothing the sections do
+    not already give.
+    """
+
+    #: See the note on ``ArticleSection.model_config``: the docstring above is
+    #: for developers and must not be the grammar the model generates under.
+    model_config = ConfigDict(
+        json_schema_extra={
+            "description": (
+                "The article body: three beats, with titled sections between "
+                "beats 2 and 3 where the evidence supports them."
+            )
+        }
+    )
+
 
     beat_1_claim: NonEmptyStr = Field(description="What it claims to do")
     beat_2_evidence: NonEmptyStr = Field(description="What the research actually shows")
+    sections: list[ArticleSection] = Field(
+        default_factory=list,
+        max_length=5,
+        # Still no `min_length`, and there must never be one — that would be the
+        # padding instruction DESIGN.md §6 refuses. What changed is the word the
+        # model was reading: "Optional" told it, inside its own grammar, that
+        # skipping these was the easy correct answer. This states the same rule
+        # the prompt already gives, and its low end is *none*, so thin evidence
+        # still yields a short article.
+        description=(
+            "Titled sections working through the evidence in detail. How many is "
+            "decided by the evidence, not by a target: six or more usable sources "
+            "supports three to five sections, three to five sources supports one "
+            "or two, and one or two sources supports none at all."
+        ),
+    )
     beat_3_bottom_line: NonEmptyStr = Field(description="Bottom line / caveat")
 
-    @field_validator("beat_1_claim", "beat_2_evidence", "beat_3_bottom_line")
+    @field_validator("beat_1_claim")
     @classmethod
-    def _at_most_three_sentences(cls, value: str) -> str:
-        if count_sentences(value) > 3:
-            raise ValueError("each beat must be at most 3 sentences")
+    def _claim_at_most_four_sentences(cls, value: str) -> str:
+        if count_sentences(value) > 4:
+            raise ValueError("the claim beat must be at most 4 sentences")
+        return value
+
+    @field_validator("beat_2_evidence", "beat_3_bottom_line")
+    @classmethod
+    def _at_most_five_sentences(cls, value: str) -> str:
+        if count_sentences(value) > 5:
+            raise ValueError("this beat must be at most 5 sentences")
         return value
 
     def as_text(self) -> str:
-        return "\n\n".join([self.beat_1_claim, self.beat_2_evidence, self.beat_3_bottom_line])
+        """Every word of the body, in reading order.
+
+        Sections are included because ``cited_handles`` is built on this: a
+        section's citations missing from the handle set would make ``was_cited``
+        false for sources the article visibly cites, and would leave the
+        strongest evidence in the article invisible to validation.
+        """
+        parts = [self.beat_1_claim, self.beat_2_evidence]
+        for section in self.sections:
+            parts.extend([section.heading, section.body])
+        parts.append(self.beat_3_bottom_line)
+        return "\n\n".join(parts)
 
     def cited_handles(self) -> set[str]:
         return extract_handles(self.as_text())
@@ -197,15 +440,49 @@ class CitationGroup(BaseModel):
     """One factual claim and the sources the model says support it."""
 
     claim: NonEmptyStr
-    source_ids: list[str] = Field(min_length=1)
+    source_ids: list[CitationHandle] = Field(min_length=1)
 
-    @field_validator("source_ids")
+    @field_validator("source_ids", mode="before")
     @classmethod
-    def _handles_well_formed(cls, value: list[str]) -> list[str]:
-        for handle in value:
-            if not re.fullmatch(r"S\d+", handle):
-                raise ValueError(f"citation handle {handle!r} is malformed")
-        return value
+    def _normalise_handles(cls, value: Any) -> Any:
+        """Expand range and comma shorthand into individual handles.
+
+        Runs *before* the pattern check, so a model that collapses "S1", "S2",
+        … "S8" into the single string "S1-S8" gets eight handles rather than a
+        validation failure that fails the whole run.
+
+        This only reshapes what the model already said; it cannot make a handle
+        legitimate. Grounding is still established in ``evidence/validation.py``
+        against the prompt's handle set and the database, so an expansion that
+        yields a handle we never retrieved is caught there and the draft is
+        discarded — the guarantee in this module's docstring is unchanged.
+        """
+        if not isinstance(value, list):
+            return value
+
+        expanded: list[Any] = []
+        for entry in value:
+            if not isinstance(entry, str):
+                expanded.append(entry)
+                continue
+            for part in (piece.strip() for piece in entry.split(",")):
+                if not part:
+                    continue
+                match = _HANDLE_RANGE_RE.fullmatch(part)
+                if match is not None:
+                    start, end = int(match.group(1)), int(match.group(2))
+                    if 0 <= end - start < _MAX_RANGE_SPAN:
+                        expanded.extend(f"S{n}" for n in range(start, end + 1))
+                        continue
+                expanded.append(part)
+
+        # Order-preserving dedupe: "S1-S3" alongside a stray "S2" is one source
+        # list, not a repeated citation. These lists are single digits long.
+        deduped: list[Any] = []
+        for handle in expanded:
+            if handle not in deduped:
+                deduped.append(handle)
+        return deduped
 
 
 class SynthesisOutput(BaseModel):
@@ -216,6 +493,19 @@ class SynthesisOutput(BaseModel):
     the prompt's handle set and the database, neither of which the model can
     influence.
     """
+
+    #: See ``ArticleSection.model_config``. Same split, same reason: the
+    #: docstring names the module that enforces grounding, which is what a
+    #: maintainer needs and is noise inside the model's generation grammar.
+    model_config = ConfigDict(
+        json_schema_extra={
+            "description": (
+                "One finished article: a headline, a verdict on the claims, a "
+                "two-sentence summary, the body, and the list of sources cited."
+            )
+        }
+    )
+
 
     headline: NonEmptyStr
     verdict: Verdict
@@ -258,6 +548,96 @@ class SynthesisOutput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Illustration — generated imagery
+# ---------------------------------------------------------------------------
+
+
+class GeneratedImage(BaseModel):
+    """One render, already written to the media store.
+
+    ``src`` is the path a document may hold — it comes back from
+    ``services/media.py::store_image``, so it satisfies ``MEDIA_SRC_RE`` by
+    construction rather than by a later check.
+
+    **Provenance is per frame, and that is a deliberate move down from
+    ``Illustration``.** ``prompt``, ``negative_prompt``, ``model`` and ``seed``
+    were shared fields on the pair for as long as the only way to draw either
+    frame was to draw both. A reviewer can now redraw one on its own, and a
+    single stored prompt would then be a true record of one picture and a false
+    record of the other — the kind of quietly wrong provenance that is worse
+    than none, because it still answers when asked.
+
+    They are stored rather than recomputed because ``imagery/prompt.py`` is
+    going to change and "which words produced this picture" stops being
+    answerable the moment it does. Provenance outranks tidiness here, the same
+    argument as the retracted-source rows.
+
+    The three string fields default to empty so rows written before the move
+    still validate; ``Illustration`` pushes their old shared values down into
+    the frames on the way in, so nothing is actually lost.
+    """
+
+    src: str
+    alt: str
+    width: int
+    height: int
+    seed: int
+    prompt: str = ""
+    negative_prompt: str = ""
+    #: Provider-namespaced, e.g. ``huggingface/black-forest-labs/FLUX.1-schnell``.
+    model: str = ""
+
+
+class Illustration(BaseModel):
+    """Both pictures an article has: the one in its body, and the tile's.
+
+    **They are not one photograph at two aspect ratios**, and they are no
+    longer even guaranteed to come from one generation — a reviewer can redraw
+    either alone. They are two renders of the same subject under the same
+    locked, claim-free treatment; see ``services/illustration.py`` for the
+    measurement that killed the stronger claim.
+
+    What survives all of that is the property worth having, and
+    ``services/card.py`` is what enforces it: the cover reaches the feed only
+    while ``lead.src`` is still the document's first image, so the tile can
+    never show a picture belonging to an article this one has stopped being.
+    Neither frame asserts anything, so neither can assert what the other does
+    not — which is why redrawing one and not the other is safe.
+    """
+
+    lead: GeneratedImage
+    cover: GeneratedImage
+
+    @model_validator(mode="before")
+    @classmethod
+    def _carry_legacy_shared_fields(cls, value: Any) -> Any:
+        """Push a pre-split row's shared ``prompt``/``model`` onto both frames.
+
+        Rows written while the pair shared one prompt keep it at the top level,
+        where nothing reads it any more. Dropping it would silently discard the
+        only record of how those two pictures were made, on the first partial
+        redraw — so it is moved down instead. A frame that carries its own
+        value always wins, which is what makes this safe to run on new rows too.
+        """
+        if not isinstance(value, dict):
+            return value
+        shared = {
+            key: value[key]
+            for key in ("prompt", "negative_prompt", "model")
+            if isinstance(value.get(key), str)
+        }
+        if not shared:
+            return value
+
+        patched = dict(value)
+        for frame in ("lead", "cover"):
+            existing = patched.get(frame)
+            if isinstance(existing, dict):
+                patched[frame] = {**shared, **existing}
+        return patched
+
+
+# ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
 
@@ -282,6 +662,21 @@ class ValidationReport(BaseModel):
     citations_total: int
     citations_resolved: int
     best_evidence_grade: StudyType
+    #: The strongest verdict the cited evidence would have allowed.
+    #:
+    #: Recorded even when the draft passes, which is the whole point. The cap
+    #: is a ceiling and nothing raises a verdict toward it, so an over-confident
+    #: draft fails loudly while an under-confident one is indistinguishable from
+    #: a correct cautious call — and the first three articles were all "weak"
+    #: against ceilings that permitted "supported", with a clean report each
+    #: time. Storing the ceiling beside the verdict is what lets a reviewer see
+    #: the gap; without it this class of failure has no signal anywhere.
+    #:
+    #: Optional because reports written before this field existed do not carry
+    #: it, and a missing ceiling must read as "not recorded" rather than as
+    #: ``no_evidence``, which is a real verdict and the falsest thing a default
+    #: could say here.
+    verdict_ceiling: Verdict | None = None
     failures: list[ValidationFailure] = Field(default_factory=list)
 
     @property

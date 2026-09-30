@@ -1,22 +1,59 @@
-"""Stage 2 — keyword recall against the scholarly APIs.
+"""Stage 2 — search the scholarly APIs for every claim and cache the results.
 
-Pass 1 of the hybrid retrieval described in DESIGN.md §4. Fan out across
-providers per claim, normalise, dedup, cache.
+For each claim:
+  1. Build the queries (``retrieval/query_builder.py``).
+  2. Run every query against every provider in parallel.
+  3. Drop trial protocols and retracted papers.
+Then, across all claims:
+  4. Merge duplicate papers (``retrieval/dedup.py``).
+  5. Fill in the PMID of any paper that arrived with only a DOI, when Europe
+     PMC knows one (``retrieval/identifiers.py``), and merge again.
+  6. Save them to the cache and embed new abstracts in chunks
+     (``retrieval/cache.py``).
+
+Three outcomes for a claim, deliberately kept apart:
+
+* **Searched, found nothing.** Fine. The article can honestly say "no evidence".
+* **Every provider call failed.** The stage fails (retryable). Otherwise a
+  throttled search would reach synthesis as the same empty list as a real
+  "nothing found", and publish a confident verdict nobody checked.
+* **The query names no substance.** The stage fails (not retryable). An
+  outcome-only query returns real but off-topic papers, and every later
+  stage would read that as success.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections import Counter
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
-from app.domain.contracts import CandidatePaper
-from app.domain.enums import EVIDENCE_RANK
+from app.domain.contracts import CachedCandidate, CandidatePaper, ExtractionOutput
+from app.domain.enums import SourceApi
+from app.evidence.grading import is_protocol, is_retracted
 from app.pipeline.stages import PipelineContext, StageError, StageName
-from app.retrieval.base import ScholarlyProvider
-from app.retrieval.cache import SourceCache
-from app.retrieval.query_builder import QueryStrategy
+from app.retrieval.base import ProviderError, RateLimited, ScholarlyProvider, SearchQuery
+from app.retrieval.cache import CachedSource, SourceCache
+from app.retrieval.dedup import merge_candidates, unique_papers
+from app.retrieval.identifiers import PmidResolver
+from app.retrieval.query_builder import QueryStrategy, UnanchoredQuery
 
 logger = logging.getLogger(__name__)
+
+ComposeQueries = Callable[[str, str, list[str]], list[SearchQuery]]
+
+
+@dataclass
+class _SearchStats:
+    """Counters collected while searching, reported as stage metrics."""
+
+    provider_hits: Counter[SourceApi] = field(default_factory=Counter)
+    failures: int = 0
+    rate_limited: int = 0
+    protocols_dropped: int = 0
+    retractions_dropped: int = 0
 
 
 class RetrieveStage:
@@ -28,164 +65,225 @@ class RetrieveStage:
         strategy: QueryStrategy,
         cache: SourceCache,
         max_candidates_per_claim: int = 50,
+        resolver: PmidResolver | None = None,
     ) -> None:
         self._providers = providers
         self._strategy = strategy
         self._cache = cache
         self._max_candidates = max_candidates_per_claim
+        self._resolver = resolver
 
     async def run(self, ctx: PipelineContext) -> PipelineContext:
-        """Query every provider for every claim; dedup and cache the results.
-
-        Partial provider failure is tolerated: one API being down degrades
-        recall, and degraded recall produces a more cautious verdict, which is
-        an acceptable outcome. A stage error is raised only if *every* provider
-        fails for *every* claim — that is a systems problem, not an evidence
-        one.
-
-        **Zero candidates is a valid result, not an error.** A fringe trend with
-        no literature must reach synthesis so the article can honestly say "no
-        evidence". Raising here would turn the most important thing this product
-        can say into a crash.
-        """
         if ctx.extraction is None:
             raise StageError(self.name, "extraction stage did not run")
 
-        candidates: dict[str, list[CandidatePaper]] = {}
-        provider_hits: dict[str, int] = {}
-        failures = 0
-        attempts = 0
+        # A refinement pass re-searches only the claims RANK found thin, with a
+        # broader query (the outcome dropped, the substance kept).
+        refining = ctx.refine_round > 0
+        claims = list(ctx.thin_claims) if refining else list(ctx.extraction.target_claims)
+        compose = self._strategy.broaden if refining else self._strategy.build
 
-        for claim in ctx.extraction.target_claims:
-            queries = self._strategy.build(claim, ctx.extraction.ingredients)
+        # Steps 1–3, per claim.
+        stats = _SearchStats()
+        found: dict[str, list[CandidatePaper]] = {}
+        unsearched: list[str] = []
+        for claim in claims:
+            queries = self._build_queries(compose, claim, ctx.extraction)
+            found[claim], all_failed = await self._search(claim, queries, stats)
+            if all_failed:
+                unsearched.append(claim)
 
-            tasks = [
-                provider.search(query)
-                for query in queries
-                for provider in self._providers
-            ]
-            attempts += len(tasks)
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+        if unsearched:
+            detail = f"; {stats.rate_limited} rate limited" if stats.rate_limited else ""
+            raise StageError(
+                self.name,
+                f"{len(unsearched)} of {len(found)} claims went unsearched "
+                f"(every provider call failed{detail}): "
+                f"{', '.join(repr(claim) for claim in unsearched)}",
+                retryable=True,  # usually a throttle that has since cleared
+            )
 
-            collected: list[CandidatePaper] = []
-            for index, result in enumerate(results):
-                provider = self._providers[index % len(self._providers)]
-                if isinstance(result, BaseException):
-                    failures += 1
-                    logger.warning(
-                        "provider %s failed for claim %r: %s",
-                        provider.source_api,
-                        claim,
-                        result,
-                    )
-                    continue
-                collected.extend(result)
-                provider_hits[provider.source_api] = provider_hits.get(
-                    provider.source_api, 0
-                ) + len(result)
+        # Step 4. Across all claims at once, so a paper answering two claims
+        # is the same merged record in both lists.
+        merged = merge_candidates(found)
 
-            deduped = self._dedup(collected)[: self._max_candidates]
-            candidates[claim] = deduped
+        # Step 5. Before the cap, so a paper that turns out to be a duplicate
+        # frees its slot for the next one.
+        merged, pmid_metrics = await self._fill_pmids(merged)
+        candidates = {claim: papers[: self._max_candidates] for claim, papers in merged.items()}
+        for claim, papers in candidates.items():
             logger.info(
                 "claim %r: %d raw -> %d deduped candidates",
                 claim,
-                len(collected),
-                len(deduped),
+                len(found[claim]),
+                len(papers),
             )
 
-        if attempts and failures == attempts:
-            raise StageError(
-                self.name,
-                f"every provider call failed ({failures}/{attempts})",
-                retryable=True,
-            )
-
-        # Upsert first, embed second — see cache.py. The reverse re-embeds the
-        # whole candidate set on every run.
-        all_papers = [paper for papers in candidates.values() for paper in papers]
-        unique = self._dedup(all_papers)
+        # Step 6.
+        unique = unique_papers(candidates)
         cached = await self._cache.upsert_many(unique)
         await self._cache.ensure_embeddings(cached)
+        paired = self._pair_with_ids(candidates, cached)
 
+        # A refinement pass keeps every claim the first pass already answered.
+        if refining:
+            paired = {**ctx.candidates, **paired}
+
+        raw_total = sum(len(papers) for papers in found.values())
         ctx.record_metrics(
             self.name,
             {
-                "provider_hits": provider_hits,
-                "candidates_total": len(all_papers),
+                "provider_hits": dict(stats.provider_hits),
+                "candidates_total": raw_total,
+                "protocols_dropped": stats.protocols_dropped,
+                "retractions_dropped": stats.retractions_dropped,
                 "candidates_unique": len(unique),
-                "provider_failures": failures,
+                # Near zero with several providers on means dedup stopped working.
+                "duplicates_merged": raw_total - sum(len(p) for p in candidates.values()),
+                "provider_failures": stats.failures,
+                # Separate from failures: throttling wants slower pacing,
+                # failure wants a look at the provider.
+                "rate_limited": stats.rate_limited,
                 "cache_hits": sum(1 for entry in cached if entry.had_embedding),
+                "refine_round": ctx.refine_round,
+                "claims_searched": len(claims),
+                **pmid_metrics,
             },
         )
+        return ctx.model_copy(update={"candidates": paired})
 
-        return ctx.model_copy(update={"candidates": candidates})
+    async def _fill_pmids(
+        self, merged: dict[str, list[CandidatePaper]]
+    ) -> tuple[dict[str, list[CandidatePaper]], dict[str, object]]:
+        """Step 5. Give a DOI-only paper its PMID, when one exists.
+
+        Without it the paper is invisible to the full-text lookup and to the
+        retraction sweep, and a PubMed-only record of the same paper stays a
+        second candidate that the model would cite as independent support. So
+        the merge runs again once PMIDs are in: a DOI-only and a PMID-only
+        record of one paper only unify when something carries both.
+
+        Never fails the stage. A lookup that could not run leaves every paper
+        exactly as its provider reported it, which is how retrieval worked
+        before this step existed; ``pmid_lookup_failed`` records it.
+        """
+        dois = sorted(
+            {
+                paper.doi.strip().lower()
+                for papers in merged.values()
+                for paper in papers
+                if paper.doi and not paper.pmid
+            }
+        )
+        if self._resolver is None or not dois:
+            return merged, {"dois_without_pmid": len(dois), "pmids_filled": 0}
+
+        try:
+            found = await self._resolver.pmids_for_dois(dois)
+        except ProviderError as exc:
+            logger.warning("PMID lookup for %d DOI-only papers failed: %s", len(dois), exc)
+            return merged, {
+                "dois_without_pmid": len(dois),
+                "pmids_filled": 0,
+                "pmid_lookup_failed": str(exc),
+            }
+
+        def filled(paper: CandidatePaper) -> CandidatePaper:
+            if paper.pmid or not paper.doi:
+                return paper
+            pmid = found.get(paper.doi.strip().lower())
+            return paper.model_copy(update={"pmid": pmid}) if pmid else paper
+
+        if found:
+            logger.info("filled PMIDs for %d of %d DOI-only papers", len(found), len(dois))
+            merged = merge_candidates(
+                {claim: [filled(paper) for paper in papers] for claim, papers in merged.items()}
+            )
+        return merged, {"dois_without_pmid": len(dois), "pmids_filled": len(found)}
+
+    def _build_queries(
+        self, compose: ComposeQueries, claim: str, extraction: ExtractionOutput
+    ) -> list[SearchQuery]:
+        """Step 1. A query that names no substance fails the stage for good."""
+        try:
+            return compose(claim, extraction.product, extraction.ingredients)
+        except UnanchoredQuery as exc:
+            # Not retryable: the same extraction would build the same query.
+            raise StageError(self.name, str(exc), retryable=False) from exc
+
+    async def _search(
+        self, claim: str, queries: list[SearchQuery], stats: _SearchStats
+    ) -> tuple[list[CandidatePaper], bool]:
+        """Steps 2–3: every query against every provider, in parallel.
+
+        Returns the usable papers, and whether every call failed. Some calls
+        failing is tolerated; it only lowers recall.
+        """
+        calls = [(provider, query) for query in queries for provider in self._providers]
+        results = await asyncio.gather(
+            *(provider.search(query) for provider, query in calls), return_exceptions=True
+        )
+
+        papers: list[CandidatePaper] = []
+        failed = 0
+        for (provider, _), result in zip(calls, results, strict=True):
+            if isinstance(result, BaseException):
+                failed += 1
+                if isinstance(result, RateLimited):
+                    stats.rate_limited += 1
+                logger.warning(
+                    "provider %s failed for claim %r: %s", provider.source_api, claim, result
+                )
+                continue
+            usable = self._screen(result, stats)
+            papers.extend(usable)
+            stats.provider_hits[provider.source_api] += len(usable)
+
+        stats.failures += failed
+        return papers, bool(calls) and failed == len(calls)
 
     @staticmethod
-    def _dedup(papers: list[CandidatePaper]) -> list[CandidatePaper]:
-        """Collapse cross-provider duplicates, merging what each knew.
+    def _screen(papers: list[CandidatePaper], stats: _SearchStats) -> list[CandidatePaper]:
+        """Step 3. Drop trial protocols and retracted papers before they are cached.
 
-        Keeps the longest abstract, the highest citation count, and the
-        strongest study-type classification across the group. Strongest-wins on
-        study type is intentional: one provider knowing a paper is an RCT is
-        more informative than another not knowing — which is most of the value
-        of running OpenAlex next to PubMed, since OpenAlex carries only a single
-        coarse ``type`` string.
-
-        Matching is on *any* shared identifier, not on ``dedup_key`` alone. Two
-        providers routinely return the same paper with different identifier
-        subsets, and keying on the strongest one each happens to have would file
-        them as two studies. Merging also teaches the group the identifiers it
-        was missing, so a later record matches on either.
+        A protocol is a plan and reports no findings; a retracted paper reports
+        findings the literature has withdrawn. Retractions issued *after* a
+        paper was cached are caught by ``scripts/check_retractions.py``.
         """
-        merged: dict[str, CandidatePaper] = {}
-        #: every known identifier -> the group key it belongs to
-        aliases: dict[str, str] = {}
-
+        kept: list[CandidatePaper] = []
         for paper in papers:
-            key = next(
-                (
-                    aliases[candidate]
-                    for candidate in paper.identity_keys
-                    if candidate in aliases
-                ),
-                None,
-            )
-            if key is None:
-                key = paper.dedup_key
-                merged[key] = paper
-                for candidate in paper.identity_keys:
-                    aliases[candidate] = key
-                continue
+            if is_protocol(paper.raw_study_type, paper.title):
+                stats.protocols_dropped += 1
+            elif is_retracted(paper.raw_study_type):
+                stats.retractions_dropped += 1
+                logger.info(
+                    "refused retracted paper pmid=%s doi=%s: %r",
+                    paper.pmid,
+                    paper.doi,
+                    paper.title,
+                )
+            else:
+                kept.append(paper)
+        return kept
 
-            existing = merged[key]
-            combined = existing.model_copy(
-                update={
-                    "pmid": existing.pmid or paper.pmid,
-                    "doi": existing.doi or paper.doi,
-                    "url": existing.url or paper.url,
-                    "journal": existing.journal or paper.journal,
-                    "year": existing.year or paper.year,
-                    "abstract": max(
-                        existing.abstract, paper.abstract, key=len
-                    ),
-                    "citation_count": max(
-                        existing.citation_count or 0, paper.citation_count or 0
-                    )
-                    or None,
-                    "study_type": max(
-                        existing.study_type,
-                        paper.study_type,
-                        key=lambda study: EVIDENCE_RANK[study],
-                    ),
-                    "raw_study_type": existing.raw_study_type or paper.raw_study_type,
-                }
-            )
-            merged[key] = combined
+    def _pair_with_ids(
+        self, candidates: dict[str, list[CandidatePaper]], cached: list[CachedSource]
+    ) -> dict[str, list[CachedCandidate]]:
+        """Attach each candidate's ``sources`` row id, which RankStage needs.
 
-            # The merge may have supplied an identifier the group did not have.
-            # Registering it is what lets a third provider's record — carrying
-            # yet another subset — still land in this group.
-            for candidate in (*paper.identity_keys, *combined.identity_keys):
-                aliases.setdefault(candidate, key)
-
-        return list(merged.values())
+        A missing id raises rather than dropping the paper: a paper lost here
+        would silently read as thinner evidence downstream.
+        """
+        source_ids = {entry.paper.dedup_key: entry.source_id for entry in cached}
+        try:
+            return {
+                claim: [
+                    CachedCandidate(source_id=source_ids[paper.dedup_key], paper=paper)
+                    for paper in papers
+                ]
+                for claim, papers in candidates.items()
+            }
+        except KeyError as exc:
+            raise StageError(
+                self.name, f"source cache returned no row for candidate {exc}"
+            ) from exc

@@ -14,11 +14,12 @@ from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.contracts import ValidationFailure
+from app.domain.contracts import SynthesisInput, ValidationFailure
 from app.domain.enums import ArticleStatus
 from app.domain.models import Article, ArticleSource
 from app.evidence.validation import summarise_failures, validate_draft
 from app.pipeline.stages import PipelineContext, StageError, StageName
+from app.services.media import image_node
 from app.services.tiptap import MalformedBodyError, body_text_to_doc
 
 logger = logging.getLogger(__name__)
@@ -86,20 +87,39 @@ class PersistStage:
         report = ctx.validation
 
         # A body we cannot render is a draft problem, not a system problem —
-        # record it as a validation failure rather than raising.
+        # record it as a validation failure rather than raising. VALIDATE
+        # already runs this parse (`check_body_parses`), so the report normally
+        # carries the failure already; this is the backstop, not the check.
         try:
-            content = body_text_to_doc(ctx.draft.body)
+            content = body_text_to_doc(
+                ctx.draft.body,
+                # Above beat 1, inside `original_content`, as an ordinary image
+                # node. So the picture is part of the immutable draft the
+                # reviewer is shown, and removing it is an edit like any other
+                # rather than a setting somewhere. Beats stay addressable —
+                # `beat_text` reads `attrs.beat`, never position.
+                lead_image=(
+                    image_node(ctx.illustration.lead.src, ctx.illustration.lead.alt)
+                    if ctx.illustration is not None
+                    else None
+                ),
+            )
         except MalformedBodyError as exc:
             content = {"type": "doc", "content": []}
-            report = report.model_copy(
-                update={
-                    "passed": False,
-                    "failures": [
-                        *report.failures,
-                        ValidationFailure(code="malformed_body", message=str(exc)),
-                    ],
-                }
-            )
+            if not any(failure.code == "malformed_body" for failure in report.failures):
+                report = report.model_copy(
+                    update={
+                        "passed": False,
+                        "failures": [
+                            *report.failures,
+                            ValidationFailure(
+                                code="malformed_body",
+                                message=str(exc),
+                                detail={"where": exc.where, "text": exc.text},
+                            ),
+                        ],
+                    }
+                )
 
         article_status = (
             ArticleStatus.PENDING_REVIEW if report.passed else ArticleStatus.VALIDATION_FAILED
@@ -109,7 +129,6 @@ class PersistStage:
             slug=_slugify(ctx.draft.headline),
             status=article_status,
             topic=ctx.topic,
-            source_blurb=ctx.blurb,
             product=ctx.extraction.product,
             target_claims=ctx.extraction.target_claims,
             ingredients=ctx.extraction.ingredients,
@@ -121,6 +140,15 @@ class PersistStage:
             # it — human edits go to edited_content.
             original_content=content,
             edited_content=None,
+            # Both frames plus the prompt, model and seed that made them. The
+            # cover is not in the document, so this column is the only record
+            # of it — and the only place `derive_card` can find it at publish
+            # time. NULL whenever ILLUSTRATE produced nothing, which is normal.
+            generated_imagery=(
+                ctx.illustration.model_dump(mode="json")
+                if ctx.illustration is not None
+                else None
+            ),
             evidence_grade=report.best_evidence_grade,
             validation_report=report.model_dump(mode="json"),
             pipeline_run_id=ctx.run_id,
@@ -130,7 +158,15 @@ class PersistStage:
         self._session.add(article)
         await self._session.flush()
 
-        cited = ctx.draft.all_cited_handles()
+        # The *body*, not ``all_cited_handles()``. That union includes handles
+        # the model named only in its ``citations`` list, and this flag is what
+        # ``FeedService.article`` filters the public source list on — so a
+        # handle listed but never written about was shown to the reader as a
+        # source the article cites, beside prose that never refers to it. The
+        # union is still right where it is used: hallucination and resolution
+        # checks must see every handle the model emitted anywhere.
+        cited = ctx.draft.body.cited_handles()
+        excerpts = excerpts_shown(ctx.synthesis_input)
         seen: set[tuple[str, str]] = set()
         for claim, ranked in ctx.ranked.items():
             for entry in ranked:
@@ -150,6 +186,7 @@ class PersistStage:
                         # catch.
                         was_cited=entry.citation_handle in cited,
                         relevance_score=entry.final_score,
+                        excerpts=excerpts.get(entry.source_id),
                     )
                 )
 
@@ -169,10 +206,30 @@ class PersistStage:
                 "status": str(article_status),
                 "source_links": len(seen),
                 "cited_sources": len(cited),
+                "illustrated": ctx.illustration is not None,
             },
         )
 
         return ctx.model_copy(update={"article_id": article.id, "validation": report})
+
+
+def excerpts_shown(
+    synthesis_input: SynthesisInput | None,
+) -> dict[str, list[dict[str, str | None]]]:
+    """The full-text excerpts each source carried in the prompt, by source id.
+
+    Read from ``synthesis_input`` — exactly what the model saw — rather than
+    from ``ctx.excerpts``, for the same reason VALIDATE checks handles against
+    it: a second reconstruction is free to drift from the first. Sources shown
+    without excerpts are absent, so their column stays NULL.
+    """
+    if synthesis_input is None:
+        return {}
+    return {
+        source.source_id: [excerpt.model_dump() for excerpt in source.excerpts]
+        for source in synthesis_input.sources
+        if source.excerpts
+    }
 
 
 def _slugify(headline: str) -> str:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,8 +13,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings, get_settings
 from app.db import get_session_factory
 from app.domain.enums import UserRole
-from app.domain.models import User
-from app.security.auth import AuthenticatedReviewer, AuthError, decode_token_subject
+from app.domain.models import Reader, User
+from app.security.auth import (
+    TOKEN_TYPE_READER,
+    AuthenticatedReader,
+    AuthenticatedReviewer,
+    AuthError,
+    decode_token_subject,
+)
+from app.security.login_throttle import InMemoryLoginThrottle, LoginThrottle
+from app.security.spend_throttle import InMemorySpendThrottle, SpendThrottle
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -42,6 +50,87 @@ async def get_session() -> AsyncGenerator[AsyncSession]:
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
+
+#: Process-wide, because the counters *are* the state — a per-request instance
+#: would forget every failure the moment it answered. Injected as a dependency
+#: rather than imported at the call site so a test can override it and a Redis
+#: implementation can replace it without touching the route.
+_login_throttle: LoginThrottle = InMemoryLoginThrottle()
+
+
+def get_login_throttle() -> LoginThrottle:
+    return _login_throttle
+
+
+LoginThrottleDep = Annotated[LoginThrottle, Depends(get_login_throttle)]
+
+#: A **separate** counter for the reader login, not the console's.
+#:
+#: One shared instance would make the two endpoints each other's denial of
+#: service: readers and reviewers arrive from the same office NAT, and enough
+#: failed reader logins would lock the console out of its own IP budget. The
+#: budgets protect the same process, but they are not the same budget.
+_reader_login_throttle: LoginThrottle = InMemoryLoginThrottle()
+
+
+def get_reader_login_throttle() -> LoginThrottle:
+    return _reader_login_throttle
+
+
+ReaderLoginThrottleDep = Annotated[LoginThrottle, Depends(get_reader_login_throttle)]
+
+#: And a third for the contact form, for the same reason again.
+#:
+#: It is not a login — nothing is being guessed — but it is the other
+#: unauthenticated write on the public surface, and the same token bucket is
+#: the right shape: an escalating, expiring, reject-don't-sleep budget per IP
+#: and per address. Sharing the reader-login instance would let a burst of
+#: messages lock someone out of their own account.
+_contact_throttle: LoginThrottle = InMemoryLoginThrottle()
+
+
+def get_contact_throttle() -> LoginThrottle:
+    return _contact_throttle
+
+
+ContactThrottleDep = Annotated[LoginThrottle, Depends(get_contact_throttle)]
+
+#: And a fourth counter, of a different kind, for regenerating article imagery.
+#:
+#: Not a ``LoginThrottle`` instance, because it is not counting the same thing.
+#: The three above count *failures* on unauthenticated endpoints and are keyed
+#: by IP and address; this one counts *successes* on an authenticated one and
+#: is keyed by reviewer id. What it protects is the project's inference credit
+#: rather than the process — regenerate is the only console action that bills
+#: an external provider per press. See ``security/spend_throttle.py``.
+_illustration_throttle: SpendThrottle = InMemorySpendThrottle()
+
+
+def get_illustration_throttle() -> SpendThrottle:
+    return _illustration_throttle
+
+
+IllustrationThrottleDep = Annotated[SpendThrottle, Depends(get_illustration_throttle)]
+
+
+def client_ip(request: Request) -> str:
+    """The socket peer, and deliberately nothing else.
+
+    ``X-Forwarded-For`` is attacker-controlled until a trusted proxy overwrites
+    it. Reading it here would let anyone mint a fresh identity per request and
+    bypass the IP budget entirely — worse than no limit, because the endpoint
+    would look protected. Nothing sits in front of uvicorn today, so the socket
+    peer is the truth.
+
+    Behind a load balancer this must become the forwarded address, via
+    ``uvicorn --proxy-headers --forwarded-allow-ips=<balancer>`` so Starlette
+    trusts the header only from the balancer (DESIGN.md §10). Until then, one
+    bucket for anything with no peer address, which no real request has.
+    """
+    return request.client.host if request.client else "unknown"
+
+
+ClientIpDep = Annotated[str, Depends(client_ip)]
 
 
 async def require_reviewer(
@@ -83,10 +172,65 @@ async def require_reviewer(
 ReviewerDep = Annotated[AuthenticatedReviewer, Depends(require_reviewer)]
 
 
-async def require_admin(reviewer: ReviewerDep) -> AuthenticatedReviewer:
-    """Admin-only gate. Unused in the MVP; the seam exists for user management."""
-    if reviewer.role is not UserRole.ADMIN:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required"
+async def _resolve_reader(
+    session: AsyncSession,
+    settings: Settings,
+    credentials: HTTPAuthorizationCredentials | None,
+) -> AuthenticatedReader | None:
+    """Shared body of the two reader gates. Returns None for any failure."""
+    if credentials is None or not credentials.credentials:
+        return None
+
+    try:
+        reader_id = decode_token_subject(
+            credentials.credentials, settings.jwt_secret, expect=TOKEN_TYPE_READER
         )
-    return reviewer
+    except AuthError:
+        return None
+
+    result = await session.execute(
+        select(Reader).where(Reader.id == reader_id, Reader.is_active.is_(True))
+    )
+    reader = result.scalar_one_or_none()
+    if reader is None:
+        return None
+
+    return AuthenticatedReader(
+        id=reader.id, email=reader.email, display_name=reader.display_name
+    )
+
+
+async def require_reader(
+    session: SessionDep,
+    settings: SettingsDep,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)] = None,
+) -> AuthenticatedReader:
+    """Auth gate for a reader's own data — their profile, folders and saves.
+
+    Re-loads the reader for the same reason ``require_reviewer`` does: a
+    deactivated account must stop authenticating immediately rather than at
+    token expiry, and a reader token lasts thirty days.
+    """
+    reader = await _resolve_reader(session, settings, credentials)
+    if reader is None:
+        raise _UNAUTHORIZED
+    return reader
+
+
+async def optional_reader(
+    session: SessionDep,
+    settings: SettingsDep,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)] = None,
+) -> AuthenticatedReader | None:
+    """The feed's gate: signed in personalises the order, signed out still works.
+
+    **Never raises.** A stale or malformed token on the public feed has to
+    degrade to the anonymous feed rather than to a 401 — the alternative is a
+    reader whose month-old token has expired seeing an error page where the
+    site used to be, on a surface that requires no account at all.
+    """
+    return await _resolve_reader(session, settings, credentials)
+
+
+ReaderDep = Annotated[AuthenticatedReader, Depends(require_reader)]
+OptionalReaderDep = Annotated[AuthenticatedReader | None, Depends(optional_reader)]

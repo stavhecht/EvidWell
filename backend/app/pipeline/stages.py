@@ -25,8 +25,10 @@ from typing import Any, Protocol
 from pydantic import BaseModel, Field
 
 from app.domain.contracts import (
-    CandidatePaper,
+    CachedCandidate,
+    Excerpt,
     ExtractionOutput,
+    Illustration,
     RankedSource,
     SynthesisInput,
     SynthesisOutput,
@@ -39,17 +41,46 @@ class StageName(StrEnum):
     """Ordered. ``ordinal`` in pipeline_stage_runs is this enum's position.
 
     One-to-one with the states of the future Step Functions machine.
+
+    That first sentence is true of rows written from now on. ``ILLUSTRATE`` was
+    inserted at position 4, so runs recorded before it existed carry
+    ``validate`` at ordinal 4 and ``persist`` at 5 rather than 5 and 6.
+    ``FULL_TEXT`` was then inserted at position 3 (2026-09-29), shifting every
+    later stage up by one again. Nothing joins the number to the name — the
+    column only orders a single run's stages for display — so the old rows are
+    correct about the pipeline they ran on. Do not backfill them into a claim
+    about a pipeline that did not exist yet.
+
+    **PERSIST must stay last.** Its write commits together with the run's
+    completion row (``orchestrator._finish_run``); a stage after it reopens the
+    window where an article exists whose run still says ``running``, which the
+    stale sweep then requeues and writes a second time.
     """
 
     EXTRACT = "extract"
     RETRIEVE = "retrieve"
     RANK = "rank"
+    FULL_TEXT = "full_text"
     SYNTHESIZE = "synthesize"
+    ILLUSTRATE = "illustrate"
     VALIDATE = "validate"
     PERSIST = "persist"
 
 
-STAGE_ORDER: list[StageName] = list(StageName)
+class StageUsage(BaseModel):
+    """One stage's model call: what it consumed and which model consumed it.
+
+    The two travel together because neither is useful alone. Tokens without a
+    model cannot be priced, and the model has to be the one the call actually
+    used rather than whatever ``SYNTHESIS_MODEL`` says at persistence time.
+    """
+
+    #: Provider-namespaced, e.g. ``anthropic/claude-sonnet-5``. Empty for a
+    #: stage that made no model call, or one whose call failed in transport.
+    model: str = ""
+    usage: TokenUsage = Field(default_factory=TokenUsage)
+
+    model_config = {"arbitrary_types_allowed": True}
 
 
 class PipelineContext(BaseModel):
@@ -67,11 +98,32 @@ class PipelineContext(BaseModel):
     # EXTRACT
     extraction: ExtractionOutput | None = None
 
-    # RETRIEVE — candidates per claim, post-dedup
-    candidates: dict[str, list[CandidatePaper]] = Field(default_factory=dict)
+    # RETRIEVE — candidates per claim, post-dedup, each already paired with the
+    # `sources` row it was cached to. RankStage needs the ids and RetrieveStage
+    # is the stage that learns them; carrying them is what lets RankStage skip
+    # re-upserting the whole candidate set to look them up again.
+    candidates: dict[str, list[CachedCandidate]] = Field(default_factory=dict)
 
     # RANK — top-k per claim, with handles assigned
     ranked: dict[str, list[RankedSource]] = Field(default_factory=dict)
+
+    # RETRIEVE <-> RANK refinement loop
+    #: Which pass through RETRIEVE this is. 0 is the ordinary first pass and is
+    #: what every stage sees unless the router below sent the run back.
+    refine_round: int = 0
+    #: Claims RANK found too little usable evidence for, which RETRIEVE
+    #: re-searches with the outcome clause dropped. Empty on the first pass.
+    #:
+    #: Carried on the context rather than recomputed inside RETRIEVE because the
+    #: judgement is RANK's: thinness is a property of what survived scoring and
+    #: the grade floor, which RETRIEVE cannot see from its own candidate list.
+    thin_claims: list[str] = Field(default_factory=list)
+
+    # FULL_TEXT
+    #: Full-text passages for the few open-access papers chosen, keyed by
+    #: source id. Empty when none were chosen or Europe PMC could not be
+    #: reached — an ordinary outcome: the article is then written from abstracts.
+    excerpts: dict[str, list[Excerpt]] = Field(default_factory=dict)
 
     # SYNTHESIZE
     #: The exact payload rendered into the synthesis prompt. Carried forward
@@ -83,13 +135,32 @@ class PipelineContext(BaseModel):
     synthesis_input: SynthesisInput | None = None
     draft: SynthesisOutput | None = None
 
+    # ILLUSTRATE
+    #: The two generated frames, or None — which is an ordinary outcome and not
+    #: a failure. PersistStage prepends ``lead`` to the document as an image
+    #: node like any other; ``cover`` never enters the document and reaches the
+    #: feed only through ``articles.generated_imagery`` and the pairing rule in
+    #: ``services/card.py``.
+    illustration: Illustration | None = None
+
     # VALIDATE
     validation: ValidationReport | None = None
+
+    # VALIDATE -> SYNTHESIZE revision loop
+    #: Which draft this is. 0 is the first; 1 is the one re-written after the
+    #: first failed validation, with the failures fed back. SYNTHESIZE tells a
+    #: revision pass apart by this and by ``validation`` holding a failed report.
+    revise_round: int = 0
 
     # PERSIST
     article_id: str | None = None
 
-    usage: TokenUsage = Field(default_factory=TokenUsage)
+    #: What each stage's model call consumed, keyed by stage name. Mutated in
+    #: place for the same reason ``metrics`` is — and for one more: a stage that
+    #: raises never returns a context, so anything recorded via ``model_copy``
+    #: is lost on exactly the runs whose cost is least visible. Mutation means
+    #: the orchestrator still sees the tokens a failed call burned.
+    usage_by_stage: dict[str, StageUsage] = Field(default_factory=dict)
 
     #: Per-stage metrics, written into pipeline_stage_runs.metrics by the
     #: orchestrator. Mutated in place: it is bookkeeping about the run, not
@@ -99,9 +170,38 @@ class PipelineContext(BaseModel):
 
     model_config = {"arbitrary_types_allowed": True}
 
+    @property
+    def usage(self) -> TokenUsage:
+        """Run total, derived rather than accumulated.
+
+        A field would have to be summed by each stage *and* recorded per stage,
+        and the two would drift the first time someone added a call and updated
+        only one. Deriving it makes ``usage_by_stage`` the single record; the
+        total is a view over it. Note the total spans models and so cannot be
+        priced — see ``llm/pricing.py``.
+        """
+        total = TokenUsage()
+        for entry in self.usage_by_stage.values():
+            total = total + entry.usage
+        return total
+
     def record_metrics(self, stage: StageName, values: dict[str, Any]) -> None:
         """Attach observability data for one stage."""
         self.metrics[str(stage)] = values
+
+    def record_usage(self, stage: StageName, model: str, usage: TokenUsage) -> None:
+        """Record what one stage's model call consumed, successful or not.
+
+        Additive, because a stage may call a model more than once — Ollama's
+        validation-repair retry already does, and the agentic query loop would.
+        Overwriting would report the last attempt as though it were the only one.
+        """
+        key = str(stage)
+        existing = self.usage_by_stage.get(key)
+        self.usage_by_stage[key] = StageUsage(
+            model=model or (existing.model if existing else ""),
+            usage=(existing.usage if existing else TokenUsage()) + usage,
+        )
 
 
 class Stage(Protocol):

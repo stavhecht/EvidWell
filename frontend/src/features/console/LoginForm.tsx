@@ -1,15 +1,39 @@
 /**
- * Console login.
+ * The review desk's sign-in.
  *
  * The server returns one identical 401 for unknown email and wrong password,
  * and this form shows that message verbatim — narrowing it to "no such user"
  * would hand back the account enumeration the API deliberately avoids.
+ *
+ * The standfirst says what signing in commits you to rather than welcoming you:
+ * every approval is recorded against a name, and this is the screen where a
+ * reviewer takes that on.
+ *
+ * Drawn in the You.th shapes — one rounded card on the paper, pill button,
+ * rounded fields, wordmark centred in the bar above. The accent kicker is what
+ * says which surface this is; the rest is the product a reviewer already knows.
  */
 
 import { useState, type FormEvent } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { useAuth } from "./auth";
+import {
+  FIELD_LABEL,
+  LOGIN_CARD,
+  LOGIN_COLUMN,
+  LOGIN_ERROR,
+  LOGIN_FIELD,
+  LOGIN_FIELD_GROUP,
+  LOGIN_FOOTNOTE,
+  LOGIN_FOOTNOTE_LINK,
+  LOGIN_FORM,
+  LOGIN_KICKER,
+  LOGIN_PAGE,
+  LOGIN_STANDFIRST,
+  LOGIN_SUBMIT,
+  LOGIN_TITLE,
+} from "./styles";
 
 export function LoginForm() {
   const { login } = useAuth();
@@ -23,7 +47,7 @@ export function LoginForm() {
 
   const destination =
     (location.state as { from?: { pathname: string } } | null)?.from?.pathname ??
-    "/console";
+    "/review";
 
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
@@ -40,51 +64,76 @@ export function LoginForm() {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-sm flex-col justify-center px-4">
-      <h1 className="text-lg font-semibold text-stone-900">Editorial console</h1>
-      <p className="mt-1 text-sm text-stone-500">
-        Sign in to review drafts before they go live.
-      </p>
-
-      <form onSubmit={onSubmit} className="mt-6 space-y-3">
-        <label className="block">
-          <span className="text-sm text-stone-700">Email</span>
-          <input
-            type="email"
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-            required
-            autoComplete="username"
-            className="mt-1 w-full rounded-lg border border-stone-300 px-3 py-2 text-sm"
-          />
-        </label>
-
-        <label className="block">
-          <span className="text-sm text-stone-700">Password</span>
-          <input
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            required
-            autoComplete="current-password"
-            className="mt-1 w-full rounded-lg border border-stone-300 px-3 py-2 text-sm"
-          />
-        </label>
-
-        {error ? (
-          <p role="alert" className="text-sm text-verdict-weak">
-            {error}
+    <main className={LOGIN_PAGE}>
+      <div className={LOGIN_COLUMN}>
+        <div className={LOGIN_CARD}>
+          <div className={LOGIN_KICKER}>Review desk</div>
+          <h1 className={LOGIN_TITLE}>Sign in to the queue.</h1>
+          <p className={LOGIN_STANDFIRST}>
+            Reviewer access only. Every approval is recorded against the name you
+            sign in with, and nothing in the queue reaches the public feed
+            without one.
           </p>
-        ) : null}
 
-        <button
-          type="submit"
-          disabled={pending}
-          className="w-full rounded-lg bg-stone-900 px-3 py-2 text-sm text-white disabled:opacity-40"
-        >
-          {pending ? "Signing in…" : "Sign in"}
-        </button>
-      </form>
+          <form onSubmit={onSubmit} className={LOGIN_FORM}>
+            <FieldLabel htmlFor="review-email">Work email</FieldLabel>
+            <input
+              id="review-email"
+              type="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              required
+              autoComplete="username"
+              placeholder="you@you.th"
+              className={LOGIN_FIELD}
+            />
+
+            <div className={LOGIN_FIELD_GROUP}>
+              <FieldLabel htmlFor="review-password">Password</FieldLabel>
+              <input
+                id="review-password"
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                required
+                autoComplete="current-password"
+                className={LOGIN_FIELD}
+              />
+            </div>
+
+            {error ? (
+              <p role="alert" className={LOGIN_ERROR}>
+                {error}
+              </p>
+            ) : null}
+
+            <button type="submit" disabled={pending} className={LOGIN_SUBMIT}>
+              {pending ? "Signing in…" : "Sign in →"}
+            </button>
+          </form>
+        </div>
+
+        {/*
+          The desk links out to the site; the site never links in. A reviewer
+          who landed here by mistake needs a way back, and it is the only
+          crossing that carries no information about what is unpublished.
+        */}
+        <p className={LOGIN_FOOTNOTE}>
+          Not a reviewer?{" "}
+          <Link to="/" className={LOGIN_FOOTNOTE_LINK}>
+            Back to You.th
+          </Link>
+        </p>
+      </div>
     </main>
   );
 }
+
+function FieldLabel({ htmlFor, children }: { htmlFor: string; children: string }) {
+  return (
+    <label htmlFor={htmlFor} className={FIELD_LABEL}>
+      {children}
+    </label>
+  );
+}
+

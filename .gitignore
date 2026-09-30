@@ -8,3 +8,8 @@ __pycache__/
 node_modules/
 dist/
 .DS_Store
+
+/.claude/
+backend/tests/
+
+notesForME.txt

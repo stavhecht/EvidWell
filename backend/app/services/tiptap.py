@@ -16,25 +16,37 @@ Document shape::
       {"type": "paragraph", "attrs": {"beat": 1}, "content": [
         {"type": "text", "text": "One trial found lower cortisol "},
         {"type": "citation", "attrs": {"sourceIds": ["S1", "S3"]}}
-      ]}
+      ]},
+      {"type": "heading", "attrs": {"level": 2}, "content": [
+        {"type": "text", "text": "What the trials measured"}
+      ]},
+      {"type": "paragraph", "content": [...]}
     ]}
+
+Three block types come out of this module: ``paragraph``, ``heading`` (a
+section title, always level 2), and — passed in rather than parsed — ``image``.
+A reviewer can add ``image`` and ``youtube`` in the console. Beat paragraphs
+carry ``attrs.beat``; section paragraphs and reviewer-added ones do not.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from typing import Any
 
-from app.domain.contracts import ArticleBody
+from app.domain.contracts import CITATION_RUN_RE, ArticleBody
 
-#: Splits on a run of adjacent markers so ``[S1][S3]`` becomes one citation
-#: node. A row of separate chips reads as three findings when it is one.
-_CITATION_RUN_RE = re.compile(r"((?:\[S\d+\])+)")
-_SINGLE_HANDLE_RE = re.compile(r"\[(S\d+)\]")
+_HANDLE_RE = re.compile(r"S\d+")
 
-#: Any bracketed token that is *not* a well-formed handle. Catches "[S]",
-#: "[source 1]", and half-deleted markers like "[S1".
-_MALFORMED_RE = re.compile(r"\[(?!S\d+\])[^\]]*\]|\[S\d+(?!\])")
+#: Any bracket still standing once every well-formed marker is removed.
+#:
+#: Checked by elimination rather than with a "not a valid marker" pattern. The
+#: negative form has to enumerate every way a marker can be wrong, and it missed
+#: unterminated runs like ``"[S1, S5"`` — which matched nothing, fell through as
+#: literal text, and printed a broken marker into the finished article instead
+#: of failing. Anything bracketed that is not a marker is a parse failure.
+_STRAY_BRACKET_RE = re.compile(r"\[[^\]]*\]?|\]")
 
 
 class MalformedBodyError(ValueError):
@@ -43,56 +55,130 @@ class MalformedBodyError(ValueError):
     Surfaces as a ``malformed_body`` validation failure, not an exception —
     the model produced something unrenderable, which is a draft problem rather
     than a system problem.
+
+    Carries the block's name and its raw text, because a draft that fails to
+    parse is stored with an empty document: without the text on the failure,
+    nobody can see what the model actually wrote.
     """
 
+    def __init__(self, message: str, *, where: str, text: str) -> None:
+        super().__init__(message)
+        self.where = where
+        self.text = text
 
-def body_text_to_doc(body: ArticleBody) -> dict[str, Any]:
+
+def body_text_to_doc(
+    body: ArticleBody, *, lead_image: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Parse the three beats into a TipTap document.
 
     Beats are tagged ``attrs.beat`` 1–3 so the editor and the card deriver can
     address them without positional guessing.
 
+    ``lead_image`` — built by ``services/media.py::image_node`` — is prepended
+    as a sibling of the beat paragraphs, which is the same place a reviewer's
+    own image block sits (DESIGN.md §3.4b). Prepending is safe precisely
+    *because* beats are addressed by ``attrs.beat``: ``beat_text`` still finds
+    beat 1 for the card excerpt, and the walks below skip a node with no
+    ``content`` without producing an empty paragraph.
+
+    Sections (optional, and often absent) sit between beats 2 and 3 as an ``h2``
+    followed by one paragraph per blank-line-separated block. **Their paragraphs
+    carry no ``beat`` attribute**, for the same reason a reviewer's own added
+    paragraph carries none: a section is a sibling of the beats, not a fourth
+    beat, and must not answer to ``beat_text``.
+
     Raises:
         MalformedBodyError: unbalanced brackets, or a marker that isn't
             ``S<digits>``.
     """
-    beats = [
-        body.beat_1_claim,
-        body.beat_2_evidence,
-        body.beat_3_bottom_line,
+    blocks: list[dict[str, Any]] = [
+        _paragraph(body.beat_1_claim, beat=1, where="beat 1"),
+        _paragraph(body.beat_2_evidence, beat=2, where="beat 2"),
     ]
-    return {
-        "type": "doc",
-        "content": [
-            _paragraph(text, beat_number)
-            for beat_number, text in enumerate(beats, start=1)
-        ],
-    }
+
+    for index, section in enumerate(body.sections, start=1):
+        where = f"section {index}"
+        blocks.append(_heading(section.heading, where=f"{where} heading"))
+        # A section may be several paragraphs. Splitting here rather than
+        # asking the model for a list keeps the generated shape one string per
+        # section, which is what the structured-output grammar handles well.
+        for block in _split_paragraphs(section.body):
+            blocks.append(_paragraph(block, beat=None, where=where))
+
+    blocks.append(_paragraph(body.beat_3_bottom_line, beat=3, where="beat 3"))
+
+    if lead_image is not None:
+        blocks.insert(0, lead_image)
+    return {"type": "doc", "content": blocks}
 
 
-def _paragraph(text: str, beat: int) -> dict[str, Any]:
-    if match := _MALFORMED_RE.search(text):
+#: A blank line, however much trailing whitespace the model leaves on it.
+_PARAGRAPH_BREAK_RE = re.compile(r"\n[ \t]*\n+")
+
+
+def _split_paragraphs(text: str) -> list[str]:
+    """A section's prose as one string per paragraph.
+
+    Never returns an empty list: ``ArticleSection.body`` is ``NonEmptyStr``, so
+    a section that happens to hold no blank line is simply one paragraph.
+    """
+    return [block.strip() for block in _PARAGRAPH_BREAK_RE.split(text) if block.strip()]
+
+
+def _inline_content(text: str, *, where: str) -> list[dict[str, Any]]:
+    """Text and citation nodes, in order.
+
+    ``where`` names the block for the error message only — a reviewer reading a
+    ``malformed_body`` failure needs to know which block to look at.
+    """
+    if match := _STRAY_BRACKET_RE.search(CITATION_RUN_RE.sub("", text)):
         raise MalformedBodyError(
-            f"beat {beat} contains a malformed citation marker: {match.group(0)!r}"
+            f"{where} contains a malformed citation marker: {match.group(0)!r}",
+            where=where,
+            text=text,
         )
 
     content: list[dict[str, Any]] = []
-    for segment in _CITATION_RUN_RE.split(text):
+    for segment in CITATION_RUN_RE.split(text):
         if not segment:
             continue
-        handles = _SINGLE_HANDLE_RE.findall(segment)
-        if handles:
+        # ``fullmatch`` rather than "did we find handles here": the handle
+        # pattern is unanchored, so testing it against an arbitrary segment
+        # would read prose like "the S1 group" as a citation.
+        if CITATION_RUN_RE.fullmatch(segment):
             # Preserve order, drop duplicates within the run.
-            content.append(
-                {
-                    "type": "citation",
-                    "attrs": {"sourceIds": list(dict.fromkeys(handles))},
-                }
-            )
+            handles = list(dict.fromkeys(_HANDLE_RE.findall(segment)))
+            content.append({"type": "citation", "attrs": {"sourceIds": handles}})
         else:
             content.append({"type": "text", "text": segment})
 
-    return {"type": "paragraph", "attrs": {"beat": beat}, "content": content}
+    return content
+
+
+def _paragraph(text: str, *, beat: int | None, where: str) -> dict[str, Any]:
+    node: dict[str, Any] = {
+        "type": "paragraph",
+        "content": _inline_content(text, where=where),
+    }
+    if beat is not None:
+        node["attrs"] = {"beat": beat}
+    return node
+
+
+def _heading(text: str, *, where: str) -> dict[str, Any]:
+    """A section title, as an ``h2``.
+
+    Runs through the same marker check as prose. A heading should not carry a
+    citation, but an unbalanced bracket in one would print into the finished
+    article exactly as it would in a paragraph, so it is checked rather than
+    trusted.
+    """
+    return {
+        "type": "heading",
+        "attrs": {"level": 2},
+        "content": _inline_content(text, where=where),
+    }
 
 
 #: Whitespace stranded before punctuation once a citation node is removed.
@@ -123,6 +209,24 @@ def doc_to_plain_text(doc: dict[str, Any], *, keep_citations: bool = True) -> st
         paragraphs.append(text.strip())
 
     return "\n\n".join(part for part in paragraphs if part)
+
+
+def iter_nodes(node: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    """Every node in a document, depth first, the root included.
+
+    The walks above stop two levels down because the beats are flat paragraphs
+    and that is genuinely all they contain. This one recurses because it backs
+    a security check (``services/media.py``), and a check that only looks where
+    content is *supposed* to be is not a check. Non-dict children are skipped
+    rather than raising: the caller is auditing a document that arrived over
+    HTTP, so malformed is an expected input, not an exception.
+    """
+    yield node
+    children = node.get("content")
+    if isinstance(children, list):
+        for child in children:
+            if isinstance(child, dict):
+                yield from iter_nodes(child)
 
 
 def cited_handles_in_doc(doc: dict[str, Any]) -> set[str]:

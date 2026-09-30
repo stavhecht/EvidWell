@@ -50,6 +50,14 @@ class StudyType(StrEnum):
     IN_VITRO = "in_vitro"
     ANIMAL = "animal"
     CASE_REPORT = "case_report"
+    #: A literature review with no stated search or inclusion method — what
+    #: PubMed tags plainly as "Review". Distinct from UNKNOWN on purpose: we
+    #: *did* identify it, and it is weak secondary evidence rather than an
+    #: unreadable record. Sits below OBSERVATIONAL because it contributes no
+    #: primary data and has no protection against selection bias, and above
+    #: CASE_REPORT because it surveys a literature rather than one patient.
+    #: Measured need: 16 of 92 cached sources landed here (see README).
+    NARRATIVE_REVIEW = "narrative_review"
     OBSERVATIONAL = "observational"
     RCT = "rct"
     SYSTEMATIC_REVIEW = "systematic_review"
@@ -60,6 +68,59 @@ class StudyType(StrEnum):
 EVIDENCE_RANK: dict[StudyType, int] = {
     study_type: rank for rank, study_type in enumerate(StudyType)
 }
+
+
+class Subject(StrEnum):
+    """What kind of thing an article assesses.
+
+    The one chromatic axis in the product: colour says *what is being
+    assessed*, never how it scored (see the frontend's ``subject.ts``). Set by
+    a reviewer at publish time and deliberately not inferred — ``product`` is
+    free text, and a guessed subject would put a confident colour on an
+    unchecked classification.
+
+    Nullable everywhere it appears. An unclassified article renders in ink,
+    which is the design's resting state rather than a broken one.
+    """
+
+    SUPPLEMENT = "supplement"
+    DEVICE = "device"
+    PROTOCOL = "protocol"
+    FOOD = "food"
+    TOPICAL = "topical"
+
+
+class ImageFrame(StrEnum):
+    """Which of an article's two generated pictures.
+
+    They are two frames of one still life at two aspect ratios, and they live
+    in two different places: ``LEAD`` is an ordinary image node inside the
+    document, ``COVER`` exists only on ``articles.generated_imagery`` and
+    reaches the reader through the feed tile.
+
+    Named as a pair because they are drawn as one by default and can be redrawn
+    one at a time — a reviewer who likes the article's picture and not the tile
+    should not have to pay for both to fix one.
+    """
+
+    LEAD = "lead"
+    COVER = "cover"
+
+
+class ContactKind(StrEnum):
+    """What a "Let us know" submission is asking for."""
+
+    FACT_CHECK = "fact_check"
+    TOPIC = "topic"
+    OTHER = "other"
+
+
+class ContactStatus(StrEnum):
+    """Where a submission has got to in the console's inbox."""
+
+    NEW = "new"
+    ANSWERED = "answered"
+    CLOSED = "closed"
 
 
 class UserRole(StrEnum):
@@ -75,6 +136,52 @@ class RunStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class RunOrigin(StrEnum):
+    """Who asked for a pipeline run.
+
+    ``CONSOLE`` is a reviewer typing a topic; ``DISCOVERY`` is a reviewer
+    promoting a trend the scan proposed. Both are human decisions — the
+    distinction is what the topic was derived from, not whether anyone chose it.
+    It exists so "what has trend discovery cost us" is one ``WHERE`` against the
+    token ledger.
+    """
+
+    CONSOLE = "console"
+    DISCOVERY = "discovery"
+    #: A reviewer promoting a topic the research agent proposed (research_runs).
+    RESEARCH = "research"
+
+
+class ResearchRunMode(StrEnum):
+    """What triggered a research run. Metadata only — the graph never branches on it."""
+
+    WEEKLY = "weekly"
+    MANUAL = "manual"
+
+
+class ResearchRunStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class ResearchCandidateStatus(StrEnum):
+    """Where one topic got to in a research run, and what a reviewer did with it.
+
+    ``SELECTED`` is the agent's proposal; ``SHORTLISTED`` got deep research but
+    lost on score; ``DISCARDED`` carries a reason. Only a reviewer moves a row
+    to ``PROMOTED`` or ``DISMISSED``.
+    """
+
+    CANDIDATE = "candidate"
+    DISCARDED = "discarded"
+    SHORTLISTED = "shortlisted"
+    SELECTED = "selected"
+    PROMOTED = "promoted"
+    DISMISSED = "dismissed"
+
+
 class SourceApi(StrEnum):
     """Which scholarly API a source came from.
 
@@ -86,3 +193,50 @@ class SourceApi(StrEnum):
     EUROPE_PMC = "europe_pmc"
     SEMANTIC_SCHOLAR = "semantic_scholar"
     OPENALEX = "openalex"
+
+
+class DiscoveryScanStatus(StrEnum):
+    """Where one run of ``scripts/scan_trends.py`` got to."""
+
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+class DiscoveryScanMode(StrEnum):
+    """Whether a scan proposes candidates or only builds the baseline.
+
+    ``BOOTSTRAP`` walks months of history to fill ``discovery_observations`` and
+    emits nothing: a scan with no baseline can only rank by raw volume, which
+    proposes vitamin D and creatine forever.
+    """
+
+    SCAN = "scan"
+    BOOTSTRAP = "bootstrap"
+
+
+class DiscoveryDescriptorKind(StrEnum):
+    """What a MeSH descriptor is to us.
+
+    ``STOPLISTED`` is a decision, not an absence — it records that we saw the
+    descriptor and judged it to carry no signal (check tags, method terms, and
+    the seed anchors every query matches by construction).
+    """
+
+    SUBSTANCE = "substance"
+    OUTCOME = "outcome"
+    STOPLISTED = "stoplisted"
+
+
+class DiscoveryCandidateStatus(StrEnum):
+    """Lifecycle of a proposed topic.
+
+    ``EXPIRED`` exists so ``PROPOSED`` means "live now": a candidate a later scan
+    drops below the cut stops being offered without being deleted, because the
+    trail of what was proposed is what makes the scorer tunable.
+    """
+
+    PROPOSED = "proposed"
+    PROMOTED = "promoted"
+    DISMISSED = "dismissed"
+    EXPIRED = "expired"

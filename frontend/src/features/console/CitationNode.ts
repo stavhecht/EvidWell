@@ -16,10 +16,6 @@
 
 import { Node, mergeAttributes } from "@tiptap/core";
 
-export interface CitationAttrs {
-  sourceIds: string[];
-}
-
 export const Citation = Node.create({
   name: "citation",
   group: "inline",
@@ -55,9 +51,12 @@ export const Citation = Node.create({
       "span",
       mergeAttributes(HTMLAttributes, {
         "data-citation": "",
+        // The same bracketed chip the published article renders, so the
+        // reviewer is editing what a reader will see rather than a stand-in.
         class:
-          "mx-0.5 rounded bg-stone-100 px-1 py-0.5 align-baseline font-mono " +
-          "text-[10px] text-stone-600 ring-1 ring-stone-200 cursor-pointer",
+          "ew-chip mx-0.5 inline-block cursor-pointer align-baseline font-body " +
+          "font-semibold leading-none tracking-[0.03em] text-ink-3 " +
+          "hover:border-accent hover:text-accent-ink",
         title: `Source ${handles.join(", ")}`,
       }),
       handles.join(" "),

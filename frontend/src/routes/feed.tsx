@@ -1,56 +1,170 @@
-import { useState } from "react";
+/**
+ * The public feed.
+ *
+ * The masthead the previous design opened with — a display-size statement of
+ * what the product is — is gone, replaced by the comp's hero: the footage full
+ * bleed with one serif line over it. The claim is the same and the register is
+ * not, which is the point of the redesign. The promise it used to make in a
+ * standfirst is now the line under the grid, where a reader arrives at it
+ * having already seen what it is about.
+ *
+ * Narrowing lives in the URL and is read through `useBrowseState`, so the
+ * header's search box, the drawer's categories and this page are three views of
+ * one piece of state rather than three copies of it.
+ */
+
+import { useRef } from "react";
 
 import { MasonryFeed } from "@/features/feed/MasonryFeed";
-import type { Verdict } from "@/types/api";
+import {
+  FEED_ACTIONS,
+  FEED_BODY,
+  FEED_COUNT,
+  FEED_FOOTER,
+  FEED_HEAD,
+  FEED_PAGE,
+  FEED_TITLE,
+  HERO,
+  HERO_STATEMENT,
+  HERO_VIDEO,
+  PILL_BUTTON,
+  PILL_BUTTON_ON,
+} from "@/features/feed/styles";
+import { useFeed } from "@/features/feed/useFeed";
+import { VERDICT_LABELS } from "@/features/evidence/labels";
+import { SUBJECT_LABELS } from "@/features/evidence/subject";
+import { useReader } from "@/features/reader/auth";
+import { useBrowseState } from "@/features/shell/useBrowseState";
 
-const FILTERS: { value: Verdict | undefined; label: string }[] = [
-  { value: undefined, label: "All" },
-  { value: "supported", label: "Supported" },
-  { value: "mixed", label: "Mixed" },
-  { value: "weak", label: "Weak" },
-  { value: "no_evidence", label: "No evidence" },
-];
-
-/** The public feed. */
 export function FeedRoute() {
-  const [verdict, setVerdict] = useState<Verdict | undefined>(undefined);
+  const { query, verdict, subject, plain, filtered, setPlain, clear } =
+    useBrowseState();
+  const { reader, signedIn } = useReader();
+
+  const personalised =
+    signedIn && !plain && (reader?.interests.length ?? 0) > 0 && subject === null;
+
+  const feed = useFeed({
+    query,
+    verdict,
+    subject,
+    // Turned off while browsing one subject: a second ordering rule layered on
+    // top of an explicit choice just makes the choice look ignored.
+    personalise: personalised,
+  });
+
+  const count = feed.items.length;
 
   return (
-    <main className="mx-auto max-w-6xl px-4 py-8">
-      <header>
-        <h1 className="text-xl font-bold text-stone-900">
-          Wellness claims, checked against the evidence
-        </h1>
-        <p className="mt-1 text-sm text-stone-600">
-          Every article cites real studies and is reviewed by a person before it
-          is published.
+    <main className={FEED_PAGE}>
+      <Hero />
+
+      <div className={FEED_BODY}>
+        <div className={FEED_HEAD}>
+          <h1 className={FEED_TITLE}>{heading({ query, verdict, subject, personalised })}</h1>
+
+          <div className={FEED_ACTIONS}>
+            {feed.status === "success" ? (
+              <span className={FEED_COUNT}>
+                {count} {count === 1 ? "article" : "articles"} · every one
+                editor-approved
+              </span>
+            ) : null}
+
+            {/*
+              Only offered to a reader whose feed is actually being reordered.
+              A toggle that does nothing is worse than no toggle: it teaches
+              that the control is decorative.
+            */}
+            {signedIn && (reader?.interests.length ?? 0) > 0 && subject === null ? (
+              <button
+                onClick={() => setPlain(!plain)}
+                aria-pressed={personalised}
+                className={personalised ? PILL_BUTTON_ON : PILL_BUTTON}
+              >
+                {personalised ? "For you" : "Newest first"}
+              </button>
+            ) : null}
+
+            {filtered ? (
+              <button onClick={clear} className={PILL_BUTTON}>
+                Clear
+              </button>
+            ) : null}
+          </div>
+        </div>
+
+        <MasonryFeed
+          {...feed}
+          filtered={filtered}
+          onClearFilters={clear}
+          query={query}
+        />
+
+        <p className={FEED_FOOTER}>
+          Every claim on this page was read against the studies behind it. No
+          influencers, no affiliate links, no supplements we sell.
         </p>
-      </header>
-
-      <nav className="mt-5 flex flex-wrap gap-2" aria-label="Filter by verdict">
-        {FILTERS.map((filter) => (
-          <button
-            key={filter.label}
-            onClick={() => setVerdict(filter.value)}
-            aria-pressed={verdict === filter.value}
-            className={`rounded-full px-3 py-1 text-sm ring-1 ring-inset transition ${
-              verdict === filter.value
-                ? "bg-stone-900 text-white ring-stone-900"
-                : "bg-white text-stone-600 ring-stone-300 hover:bg-stone-50"
-            }`}
-          >
-            {filter.label}
-          </button>
-        ))}
-      </nav>
-
-      <div className="mt-6">
-        <MasonryFeed verdict={verdict} />
       </div>
-
-      <footer className="mt-12 border-t border-stone-200 pt-4 text-xs text-stone-500">
-        Informational only — not medical advice.
-      </footer>
     </main>
+  );
+}
+
+/**
+ * What the grid below is currently showing.
+ *
+ * Named rather than always "Latest research", because the drawer and the search
+ * box can both narrow the feed from somewhere the reader cannot see — a grid
+ * that silently holds one category is how a reader concludes the site is empty.
+ */
+function heading({
+  query,
+  verdict,
+  subject,
+  personalised,
+}: {
+  query: string;
+  verdict: string | null;
+  subject: keyof typeof SUBJECT_LABELS | null;
+  personalised: boolean;
+}): string {
+  if (query) return `“${query}”`;
+  if (subject) return SUBJECT_LABELS[subject];
+  if (verdict) return VERDICT_LABELS[verdict as keyof typeof VERDICT_LABELS];
+  return personalised ? "For you" : "Latest research";
+}
+
+/**
+ * The hero.
+ *
+ * `autoPlay muted playsInline loop` is the only combination browsers will start
+ * without a gesture, and `muted` has to be on the element itself rather than set
+ * later — Safari decides at parse time, so a `ref` that mutes after mount is
+ * already too late and the video simply never plays.
+ *
+ * No controls and no audio track in use: this is wallpaper with a sentence over
+ * it, not something to watch. `aria-hidden` keeps it out of the accessibility
+ * tree entirely, and the statement over it is a real heading that is read.
+ */
+function Hero() {
+  const video = useRef<HTMLVideoElement>(null);
+
+  return (
+    <div className={HERO}>
+      <video
+        ref={video}
+        src="/media/hero.mp4"
+        autoPlay
+        loop
+        muted
+        playsInline
+        aria-hidden
+        // A poster would be a second asset to keep in step with the video for
+        // the few hundred milliseconds before the first frame decodes; the tile
+        // ground behind it covers that, in the right colour, for free.
+        className={HERO_VIDEO}
+      />
+      <p className={HERO_STATEMENT}>Simplifying your way to stay young</p>
+    </div>
   );
 }

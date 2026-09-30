@@ -18,7 +18,7 @@ alone. Role of each (DESIGN.md §4):
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -26,6 +26,7 @@ from app.domain.contracts import CandidatePaper
 from app.domain.enums import SourceApi
 from app.evidence.grading import classify_study_type
 from app.retrieval.base import ProviderError, RateLimited, SearchQuery
+from app.retrieval.throttle import HttpClient, retry_after_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ MIN_ABSTRACT_CHARS = 40
 
 
 async def _get_json(
-    http: httpx.AsyncClient,
+    http: HttpClient,
     url: str,
     params: dict[str, Any],
     provider: str,
@@ -49,16 +50,17 @@ async def _get_json(
         raise ProviderError(f"{provider} transport failure: {exc}") from exc
 
     if response.status_code == 429:
-        retry_after = response.headers.get("retry-after")
+        # Reached only when the client wrapping this ran out of retries, or
+        # when the provider was built against a bare httpx client.
         raise RateLimited(
             f"{provider} rate limit",
-            retry_after=float(retry_after) if retry_after else None,
+            retry_after=retry_after_seconds(response) or None,
         )
     if response.status_code >= 400:
         raise ProviderError(f"{provider} returned {response.status_code}")
 
     try:
-        return response.json()
+        return cast(dict[str, Any], response.json())
     except ValueError as exc:
         raise ProviderError(f"{provider} returned non-JSON") from exc
 
@@ -80,12 +82,32 @@ def _clean_doi(doi: str | None) -> str | None:
 
 
 class EuropePMCProvider:
-    def __init__(self, http: httpx.AsyncClient) -> None:
+    def __init__(self, http: HttpClient) -> None:
         self._http = http
 
     @property
     def source_api(self) -> SourceApi:
         return SourceApi.EUROPE_PMC
+
+    async def count(self, query: str) -> int:
+        """How many Europe PMC records match ``query`` (its ``hitCount``).
+
+        Used by the research agent to cross-check PubMed's count for a topic.
+
+        Raises:
+            RateLimited, ProviderError: a count that could not be made must
+                never read as zero papers.
+        """
+        payload = await _get_json(
+            self._http,
+            EUROPE_PMC_URL,
+            {"query": query, "format": "json", "resultType": "idlist", "pageSize": 1},
+            "europe_pmc",
+        )
+        hits = payload.get("hitCount")
+        if not isinstance(hits, int):
+            raise ProviderError("europe_pmc returned no hitCount")
+        return hits
 
     async def search(self, query: SearchQuery) -> list[CandidatePaper]:
         terms = query.terms
@@ -147,7 +169,7 @@ class EuropePMCProvider:
 
 
 class SemanticScholarProvider:
-    def __init__(self, http: httpx.AsyncClient, api_key: str | None = None) -> None:
+    def __init__(self, http: HttpClient, api_key: str | None = None) -> None:
         self._http = http
         self._api_key = api_key
 
@@ -157,10 +179,14 @@ class SemanticScholarProvider:
 
     async def search(self, query: SearchQuery) -> list[CandidatePaper]:
         if not self._api_key:
-            # Unauthenticated access 429s under any real fan-out. Skipping is
-            # better than burning the retry budget on a provider that cannot
-            # serve us — recall degrades, which yields a more cautious verdict.
-            logger.info("semantic scholar: no API key, skipping")
+            # Defence in depth: ``retrieval/factory.py`` does not build this
+            # provider without a key, precisely so this branch stays
+            # unreachable. Returning an empty list from a search that never
+            # ran is indistinguishable downstream from a search that found
+            # nothing, and RetrieveStage's coverage check would count it as
+            # proof the claim was searched. Loud, because reaching it means
+            # the provider was wired somewhere else.
+            logger.warning("semantic scholar: no API key; returning no results")
             return []
 
         params: dict[str, Any] = {
@@ -211,7 +237,7 @@ class SemanticScholarProvider:
 
 
 class OpenAlexProvider:
-    def __init__(self, http: httpx.AsyncClient, mailto: str | None = None) -> None:
+    def __init__(self, http: HttpClient, mailto: str | None = None) -> None:
         self._http = http
         # OpenAlex gives the polite pool — materially better latency — in
         # exchange for a contact address. Worth setting.

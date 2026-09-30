@@ -13,18 +13,12 @@ import json
 from functools import lru_cache
 from typing import Annotated
 
-from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from pydantic import Field, ValidationInfo, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-#: A list field that accepts `a,b,c` as well as a JSON array.
-#:
-#: ``NoDecode`` is load-bearing, not decoration. pydantic-settings treats any
-#: complex-typed field as JSON and calls ``json.loads`` inside the dotenv
-#: *source*, which is upstream of every validator — so a plain
-#: ``mode="before"`` validator never sees the value, and `FOO=a,b` raises
-#: SettingsError before it can be split. ``NoDecode`` suppresses that decode and
-#: hands the raw string to `_split_csv` below.
-CsvList = Annotated[list[str], NoDecode]
+#: Weakest to strongest. Mirrored by ``research/contracts.py::EvidenceStatus``;
+#: kept as strings here so config does not import the research package.
+_EVIDENCE_STATUSES = ("none", "limited", "emerging", "moderate", "strong")
 
 
 class Settings(BaseSettings):
@@ -32,7 +26,6 @@ class Settings(BaseSettings):
         env_file=(".env", "../.env"), extra="ignore", case_sensitive=False
     )
 
-    environment: str = "local"
     debug: bool = False
 
     # --- database ---
@@ -47,7 +40,27 @@ class Settings(BaseSettings):
     )
     cors_origins: CsvList = ["http://localhost:5173"]
 
-    # --- Claude ---
+    # --- generative provider ---
+    #: 'ollama' | 'anthropic'. Ollama is the default while the pipeline is being
+    #: built: every generative call runs locally, costs nothing, and needs no
+    #: key. Set LLM_PROVIDER=anthropic for real deployment — the hosted client
+    #: is fully wired and nothing else changes. See llm/factory.py.
+    llm_provider: str = "ollama"          # "ollama" | "anthropic"
+
+    # --- Ollama (local, free) ---
+    ollama_base_url: str = "http://localhost:11434"
+    #: Minutes, not seconds: a cold model is loaded into memory before the first
+    #: token, and a CPU-only synthesis turn over eight abstracts is slow.
+    ollama_timeout_seconds: float = 600.0
+    #: Both default to the same small model. Extraction is mechanical enough to
+    #: survive it; synthesis is where a bigger local model
+    #: (qwen2.5:14b-instruct, llama3.3:70b) actually shows, since that call
+    #: carries invariants #2 and #3. Pull whatever you set here first —
+    #: `ollama pull llama3.1:8b`.
+    ollama_extraction_model: str = "llama3.1:8b"
+    ollama_synthesis_model: str = "llama3.1:8b"
+
+    # --- Claude (hosted; used when llm_provider='anthropic') ---
     anthropic_api_key: str = ""
     #: Split by job, not by tier-for-its-own-sake. Extraction is a short,
     #: mechanical structured response. Synthesis is where invariants #2 and #3
@@ -63,9 +76,17 @@ class Settings(BaseSettings):
     synthesis_model: str = "claude-sonnet-5"
 
     # --- embeddings ---
-    embedding_provider: str = "voyage"  # 'voyage' | 'openai'
+    embedding_provider: str = "ollama"  # 'ollama' | 'voyage' | 'openai'
     voyage_api_key: str = ""
     openai_api_key: str = ""
+    #: mxbai-embed-large is the local default because it is 1024-d, the same
+    #: width as voyage-4 — so the move from local to hosted embeddings is a
+    #: re-embed but not a migration. A 768-d model is both.
+    ollama_embedding_model: str = "mxbai-embed-large"
+    #: Only consulted for a model absent from
+    #: ``llm/embeddings/ollama.py::KNOWN_DIMENSIONS``; prefer adding it there,
+    #: so startup checks the width instead of taking your word for it.
+    ollama_embedding_dim: int = 1024
     #: Must equal the provider's dimension AND the migration's vector(N).
     embedding_dim: int = 1024
 
@@ -77,17 +98,332 @@ class Settings(BaseSettings):
     #: one API learned properly beats four half-integrated.
     enabled_providers: CsvList = ["pubmed"]
     http_timeout_seconds: float = 30.0
+    #: How many times a throttled provider call is retried before it is
+    #: recorded as a failure. Two rides out a burst; more would let one
+    #: throttled provider hold a run open indefinitely, and the worst case is
+    #: already this many waits of up to the cap below. Per-provider request
+    #: rates are constants in ``retrieval/factory.py``, not settings — they are
+    #: facts about each API rather than things to tune.
+    provider_max_retries: int = 2
+    provider_max_retry_wait_seconds: float = 10.0
 
     # --- retrieval tuning ---
-    retrieval_top_k: int = 8
+    #: Ranked sources kept **per claim**, deduplicated across claims when the
+    #: synthesis prompt is assembled. This is the one knob that decides how many
+    #: sources an article *can* cite, so it moved 8 -> 12 when articles grew
+    #: from three beats to a three-to-five minute read.
+    #:
+    #: Raising it further means raising `SYNTHESIS_NUM_CTX` in
+    #: `llm/ollama_client.py` with it. Ollama's context overflow is silent: the
+    #: front of the prompt is dropped, so sources vanish while the instruction
+    #: to cite them survives, and the run fails as `hallucinated_handle` with
+    #: nothing pointing at the real cause.
+    retrieval_top_k: int = 12
     retrieval_max_candidates_per_claim: int = 50
     retrieval_min_year: int | None = None
+    #: How many open-access papers per article get full-text excerpts in the
+    #: synthesis prompt (pipeline/steps/full_text.py). 0 turns full text off.
+    #: Six papers at two ~300-word excerpts each is about 5,000 prompt tokens;
+    #: raising it eats into the same Ollama context window as `retrieval_top_k`.
+    full_text_max_papers: int = 6
 
     # --- pipeline ---
     worker_poll_interval_seconds: float = 5.0
-    worker_concurrency: int = 1
+    #: How many times a run may be *started* before a retryable failure is
+    #: treated as permanent. Only failures that set ``StageError.retryable``
+    #: consume it — a malformed draft is not retried at any budget. Backoff
+    #: between attempts is ``orchestrator.RETRY_DELAYS``. A run whose worker was
+    #: killed spends the same budget: the attempt is counted when it is claimed.
+    pipeline_max_attempts: int = 3
+    #: How often the worker reports that its in-flight run is still alive.
+    worker_heartbeat_seconds: float = 15.0
+    #: Silence after which a `running` run is treated as abandoned. Must stay
+    #: comfortably above the heartbeat interval — see the validator below.
+    worker_stale_after_seconds: float = 120.0
+    #: How often the worker looks for abandoned runs. Checked between polls, so
+    #: a worker busy with its own run does not sweep; with one worker that is
+    #: harmless, since the only run it could recover is the one it is running.
+    worker_sweep_interval_seconds: float = 60.0
 
-    @field_validator("cors_origins", "enabled_providers", mode="before")
+    # --- trend discovery ---
+    #: Days of literature one scan measures. Cadence and window are independent:
+    #: `discovery_observations` is keyed (descriptor, pmid), so counts are
+    #: COUNT(DISTINCT pmid) over a ledger rather than incremented counters, and
+    #: running weekly with a 14-day window double-counts nothing.
+    discovery_window_days: int = 14
+    #: Days each scan re-reads *before* its window start. MeSH indexing lands
+    #: days to weeks after a record enters PubMed, so a record inside last
+    #: window's dates only becomes visible during this one. Re-reading is free —
+    #: observations conflict to a no-op — and the only cost is API calls. Set it
+    #: too small and every scan under-counts the newest half of its own window,
+    #: which is exactly the half a trend detector exists to see.
+    discovery_overlap_days: int = 21
+    #: Completed windows averaged into a descriptor's baseline. Six fortnights
+    #: is a quarter: long enough that one quiet fortnight is not a surge, short
+    #: enough that a year-old wave stops reading as new.
+    discovery_baseline_windows: int = 6
+    #: Windows of history required before *any* candidate is emitted. Below
+    #: this the scan writes observations and proposes nothing. A first scan with
+    #: no baseline can only rank by raw volume, which floods the desk with
+    #: vitamin D and creatine — the three things a reviewer would have named
+    #: unaided, arriving with the authority of a ranking. There is deliberately
+    #: no volume fallback; build the baseline with
+    #: `python -m scripts.scan_trends --bootstrap --apply`.
+    discovery_min_baseline_windows: int = 4
+    #: Papers in the window before a substance can be proposed. Three is one lab
+    #: publishing a series; four is where "several groups" starts.
+    #:
+    #: Lowered 4 -> 3 on 2026-09-07 because four was starving the desk, measured
+    #: rather than guessed. Over a live 14-day window the substance counts ran
+    #: 9, 5, 5, 4, then 3, 3, 3, 3, then a long tail at 2 and 1 — so a floor of
+    #: four admitted **four substances in the whole corpus** and a floor of three
+    #: admits eight. With three of those already promoted the desk had nothing
+    #: left to offer, which reads as a broken scan rather than a strict one.
+    #:
+    #: The cost is smaller than it looks, because this floor is about *trend
+    #: detection*, not about how much evidence an article gets. A substance is
+    #: proposed on its recent publishing rate; the article it becomes retrieves
+    #: independently across all of PubMed (`retrieval_top_k` per claim), so a
+    #: substance with three recent papers can still rest on twenty-year-old
+    #: systematic reviews. Thin *recent* interest is also already priced in by
+    #: the scorer's `log2(1 + n)` term rather than only by this gate.
+    #:
+    #: Do not read it down to 2: that admits 24 more substances at once, which
+    #: is a ranking over noise.
+    discovery_min_papers: int = 3
+    #: Angles one scan may propose for a single substance. A substance surges as
+    #: a whole and gets written about one question at a time — "omega-3 for
+    #: muscle recovery" and "omega-3 for skin" are different articles resting on
+    #: different papers. Without a cap a single surge takes every slot on the
+    #: desk, which is the opposite of the variety the ranking exists to provide;
+    #: with a cap of 1 the other angles are never offered at all. Two is a desk
+    #: that can show eight substances or four, not one.
+    discovery_max_angles_per_substance: int = 2
+    #: How far back to look when deciding *which questions* a substance is
+    #: studied for. Much wider than the trend window on purpose — they are
+    #: different questions with different timescales. "Is omega-3 surging?" is a
+    #: fortnight's question; "what is omega-3 studied for?" is a slow fact.
+    #: Measured 2026-09-06: a 21-day window produced four usable angles across
+    #: the whole corpus; sixty days produced caffeine against strength,
+    #: endurance, cognition and heart rate. Costs nothing — it reads the
+    #: observation ledger, not PubMed.
+    discovery_angle_lookback_days: int = 90
+    #: Papers backing a *single angle* before it is worth proposing separately.
+    #: A different question from `discovery_min_papers`: that floor asks whether
+    #: the substance is moving, this one asks whether there is enough to write a
+    #: specific piece. Measured 2026-09-06 — omega-3 had 8 papers over 55 outcome
+    #: descriptors, so an angle floor set at the *then* substance floor of 4
+    #: would have collapsed every substance back to one angle.
+    #:
+    #: It sat below the substance floor until 2026-09-07, when that floor came
+    #: down to 3 and the two became equal. Left at 3 rather than dropped to 2:
+    #: two co-occurring papers is too thin to name an article's specific subject,
+    #: and equality is not the no-op the old note warned about — it only means a
+    #: substance at exactly the floor needs *all* its papers on one outcome to
+    #: earn an angle. Everything else falls back to a bare topic, which is what
+    #: `polyphenols` and `triterpenes` did on the first scan after the change.
+    #: **Never set it above `discovery_min_papers`**: that is unreachable by
+    #: construction, and every angle would silently become a bare topic.
+    discovery_min_papers_per_angle: int = 3
+    #: Descriptors appearing in more than this share of a scan's records are
+    #: stoplisted automatically, whatever `discovery/vocab.py` says. MeSH has
+    #: ~30,000 descriptors and check tags change between editions, so a hand
+    #: list will always be missing something — and what it misses is always the
+    #: same shape: a term on most of the corpus, which by construction cannot
+    #: distinguish any part of it.
+    discovery_document_frequency_ceiling: float = 0.35
+    #: Candidates one scan may propose, and so the most the desk ever holds —
+    #: `expire_absent` retires anything this scan did not re-rank, so the desk is
+    #: exactly the last scan's list.
+    #:
+    #: This is the reviewer-flooding control: it is literally the number of
+    #: "spend money" buttons on the screen. Six rather than eight by request.
+    #:
+    #: **It is a ceiling and has never been the reason the desk looks empty.**
+    #: `rank_candidates` is asked for `limit * 3` precisely so suppression can
+    #: remove already-decided topics without shrinking the desk — the next-best
+    #: candidates are pulled up automatically. When the desk shows three, the
+    #: binding constraint is `discovery_min_papers`, not this. Check the dry
+    #: run's "N of M above the floor" line before raising it.
+    discovery_max_candidates: int = 6
+    #: Records efetched per scan across all seeds. A hard request budget, not a
+    #: tuning knob: NCBI answers sustained overage by blocking the IP, and this
+    #: scan shares that IP with the pipeline worker.
+    discovery_max_records_per_scan: int = 4000
+    #: How long a dismissed candidate stays suppressed. Half a year, because a
+    #: reviewer who said no is saying no to *this* evidence base, and
+    #: re-proposing it next fortnight with two more papers is how a proposal
+    #: queue teaches people to stop reading it. The paper count must also have
+    #: doubled — see `DiscoveryService.suppression_reason`.
+    discovery_dismiss_cooloff_days: int = 180
+    #: Seeds to query, by name from `discovery/seeds.py`. Narrow it to debug one
+    #: net; empty means all of them.
+    discovery_seeds: list[str] = []
+    #: Run the scan on a timer, so the desk fills without anyone pressing a
+    #: button. Safe to leave on: a scan *proposes* and never enqueues, so it
+    #: spends PubMed requests and no tokens at all — the entire generative bill
+    #: still sits behind a reviewer choosing to promote something.
+    discovery_scan_enabled: bool = True
+    #: How stale the last *succeeded* scan may get before the scheduler runs
+    #: another. Measured from the ledger rather than from process start, which is
+    #: what makes a restart cheap and a missed slot self-healing — the same
+    #: reasoning as `discovery_overlap_days`.
+    #:
+    #: Daily against a 14-day window is deliberate over-sampling: MeSH indexing
+    #: lags entry by days to weeks, so a topic's counts keep moving after the
+    #: window that will end up owning them, and re-reading a covered window is
+    #: free (`discovery_observations` is ON CONFLICT DO NOTHING).
+    discovery_scan_interval_hours: int = 24
+    #: How long an observation stays in the ledger, by entrez_date. The scorer
+    #: reads the current window plus `discovery_baseline_windows` before it
+    #: (98 days at the defaults) and angles read `discovery_angle_lookback_days`
+    #: (90); nothing reads further back, so a succeeded scan deletes older rows.
+    #: Measured 2026-09-30: 51% of the ledger was past this and never read. The
+    #: validator below keeps it above what the scorer needs.
+    discovery_observation_retention_days: int = 120
+
+    # --- research agent (internet trends -> evidence-scored proposals) ---
+    # See app/research/ and DESIGN.md "Research agent". A research run
+    # *proposes*: it never enqueues a pipeline run, exactly like the MeSH scan
+    # above. These are the only definitions of these values — the graph, the
+    # scorer and the API read them from here.
+    #: How many topics a run selects for the desk. Clamped to [min, max] when a
+    #: request asks for a specific number.
+    research_target_article_count: int = 5
+    research_min_article_count: int = 4
+    research_max_article_count: int = 6
+    #: Candidates kept after clustering and the wellness filter, and the number
+    #: that get the cheap signals (trend, news, science counts).
+    research_max_candidates: int = 50
+    #: Candidates given a web search (~8 s each). The shortlist is drawn from
+    #: these, so it must be at least `research_shortlist_size`.
+    research_web_pool_size: int = 20
+    #: Candidates that get deep research: extraction plus the anchored query
+    #: the article pipeline will actually run.
+    research_shortlist_size: int = 10
+    research_trend_window_days: int = 7
+    research_news_window_days: int = 7
+    research_scientific_window_days: int = 365
+    #: Scoring weights. Must sum to 1 (checked below). A component with no data
+    #: is dropped and the rest renormalised — never filled in.
+    research_weight_trend: float = 0.30
+    research_weight_news: float = 0.15
+    research_weight_evidence: float = 0.25
+    research_weight_source_quality: float = 0.10
+    research_weight_reader_interest: float = 0.15
+    research_weight_novelty: float = 0.05
+    #: The weakest evidence a selected topic may rest on:
+    #: none < limited < emerging < moderate < strong.
+    research_min_evidence_status: str = "emerging"
+    #: Relevant web results + news articles below which a topic has too little
+    #: material to research. Applied only when either signal was available.
+    research_min_sources: int = 5
+    #: Cosine similarity at which two trend queries are one topic.
+    research_cluster_threshold: float = 0.88
+    #: Cosine similarity at which a candidate repeats a recent article or an
+    #: earlier decision and is discarded rather than re-proposed.
+    research_duplicate_threshold: float = 0.92
+    #: How far back "recent" reaches for that check.
+    research_novelty_lookback_days: int = 180
+    #: A stable, mid-popularity term put in every Google Trends comparison so
+    #: interest levels from different 5-term requests share one scale.
+    research_trends_anchor: str = "vitamin d"
+    #: Seconds between Google Trends requests. It 429s readily; be patient.
+    research_trends_request_interval_seconds: float = 4.0
+    #: Rising queries whose own related queries are fetched as an expansion.
+    research_expand_top: int = 5
+    research_geo: str = "US"
+    research_language: str = "en"
+    #: Domains whose results count toward `source_quality`. A suffix match, so
+    #: ".gov" covers every US government site.
+    research_authoritative_domains: list[str] = [
+        ".gov",
+        ".edu",
+        "nih.gov",
+        "who.int",
+        "nhs.uk",
+        "cdc.gov",
+        "mayoclinic.org",
+        "clevelandclinic.org",
+        "hopkinsmedicine.org",
+        "health.harvard.edu",
+        "examine.com",
+        "cochrane.org",
+        "bmj.com",
+        "thelancet.com",
+        "jamanetwork.com",
+        "nature.com",
+        "sciencedirect.com",
+        "europepmc.org",
+    ]
+    #: newsapi.org key. Empty means the keyless DuckDuckGo news fallback.
+    news_api_key: str = ""
+    #: Candidates nobody promoted or dismissed are deleted this long after their
+    #: run finished. Novelty reads only decided candidates, so undecided ones
+    #: from an old run are never read again — and a run writes ~45 of them.
+    research_retention_days: int = 60
+    #: Shared secret for /api/automation/* (n8n). Empty disables that router
+    #: entirely — it answers 404 — so an unconfigured deployment exposes nothing.
+    research_trigger_token: str = ""
+
+    # --- article media ---
+    #: Per-file ceiling. Generous for a photo, small enough that a stray upload
+    #: cannot bloat the database or the request buffer. The reviewer sees the
+    #: limit in the error, so raising it is a config change, not a code one.
+    #:
+    #: There is no `media_root` any more: image bytes live in `media_objects`,
+    #: so the store needs a session rather than a path and there is nothing
+    #: left to configure. See the `media_objects` section of
+    #: migrations/0001_initial.sql.
+    media_max_bytes: int = 8 * 1024 * 1024
+
+    # --- article imagery (generated) ---
+    #: 'huggingface' | 'none'. Set to 'none' to draft text-only articles
+    #: without touching the provider at all.
+    image_provider: str = "huggingface"
+    #: The Hugging Face token, from IMAGE_GEN_KEY. It needs the "Make calls to
+    #: Inference Providers" permission — a plain read token authenticates and
+    #: then 403s on the first render. **An empty key is not a startup error**:
+    #: ``imagery/factory.py`` returns no client and drafts come out text-only,
+    #: because a picture is decorative and the API must still boot for review,
+    #: publishing and the public feed.
+    image_gen_key: str = ""
+    image_model: str = "black-forest-labs/FLUX.1-schnell"
+    #: Which inference provider serves the model. 'auto' picks the fastest
+    #: available and fails over; name one (nscale, fal-ai, replicate, together)
+    #: for consistent latency and billing.
+    image_inference_provider: str = "auto"
+    #: Generous: two renders run back to back and a cold provider can take a
+    #: while to answer the first one.
+    image_timeout_seconds: float = 120.0
+    #: FLUX.1-schnell is distilled for 1-4 steps at guidance 0.0 — these are the
+    #: model card's numbers, not tuning knobs. Raising steps costs credits and
+    #: buys nothing on a *schnell* checkpoint.
+    image_steps: int = 4
+    image_guidance_scale: float = 0.0
+    #: The article's lead image: landscape, for a 760px prose column.
+    image_lead_width: int = 1216
+    image_lead_height: int = 832
+    #: The feed tile's cover: portrait. 3:4 on purpose — ``tileRatio()`` in
+    #: ``frontend/src/features/feed/ArticleCard.tsx`` hashes a slug into 3/4,
+    #: 1/1, 4/5 or 2/3, and 3:4 sits nearest the middle of that spread, so
+    #: ``object-cover`` takes a modest centre crop on every tile rather than a
+    #: severe one on half of them.
+    image_cover_width: int = 864
+    image_cover_height: int = 1152
+    #: 'crop' | 'render'. 'crop' renders the lead once and centre-crops the
+    #: cover out of it (to the cover's aspect ratio): one billed render per
+    #: article instead of two, and the two frames are provably one photograph.
+    #: 'render' draws the cover as a second generation at the cover size.
+    image_cover_mode: str = "crop"
+
+    @field_validator(
+        "cors_origins",
+        "enabled_providers",
+        "discovery_seeds",
+        "research_authoritative_domains",
+        mode="before",
+    )
     @classmethod
     def _split_csv(cls, value: object) -> object:
         """Allow comma-separated env values as well as JSON lists.
@@ -106,6 +442,139 @@ class Settings(BaseSettings):
             except json.JSONDecodeError as exc:
                 raise ValueError(f"not valid JSON: {value!r}") from exc
         return [item.strip() for item in text.split(",") if item.strip()]
+
+    @field_validator(
+        "image_lead_width",
+        "image_lead_height",
+        "image_cover_width",
+        "image_cover_height",
+    )
+    @classmethod
+    def _dimension_is_a_multiple_of_16(cls, value: int, info: ValidationInfo) -> int:
+        """Diffusion latents are 1/8 scale over a patch grid; 16 is the safe step.
+
+        Providers disagree about what to do with a size that does not divide:
+        some 400, some silently round and return an image that is not the shape
+        that was asked for — which reaches the feed as a tile cropped wrong,
+        with nothing anywhere saying why. Refusing at startup names the number.
+        """
+        if value <= 0 or value % 16:
+            raise ValueError(
+                f"{info.field_name} must be a positive multiple of 16, got {value}"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _heartbeat_leaves_room_to_miss_one(self) -> Settings:
+        """The staleness window must survive a missed beat or two.
+
+        Set too close together, one slow UPDATE — a checkpoint, a brief lock
+        wait — declares a live run abandoned, and the sweep requeues work that
+        is still executing. Three intervals means it takes three consecutive
+        misses, which is a dead process rather than a hiccup.
+        """
+        floor = self.worker_heartbeat_seconds * 3
+        if self.worker_stale_after_seconds < floor:
+            raise ValueError(
+                f"worker_stale_after_seconds ({self.worker_stale_after_seconds}) must be "
+                f"at least 3x worker_heartbeat_seconds ({self.worker_heartbeat_seconds}) "
+                f"= {floor}s, or a single missed heartbeat requeues a live run."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _overlap_covers_a_missed_scan(self) -> Settings:
+        """The overlap must be at least a whole window.
+
+        A missed cron slot leaves a hole in the baseline, and the hole is worse
+        than the missing scan: a descriptor with one empty bucket has a lower
+        mean, so the next real window reads as a surge. The scan then proposes a
+        false trend produced by an outage, with nothing anywhere saying so.
+
+        An overlap of at least one window means the next scan re-reads
+        everything the missed one would have, and re-reading costs only API
+        calls — observations are keyed (descriptor, pmid) and conflict to a
+        no-op.
+        """
+        if self.discovery_overlap_days < self.discovery_window_days:
+            raise ValueError(
+                f"discovery_overlap_days ({self.discovery_overlap_days}) must be at "
+                f"least discovery_window_days ({self.discovery_window_days}), or a "
+                "single missed scan leaves a permanent hole in the baseline that "
+                "reads as a surge."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _research_settings_are_consistent(self) -> Settings:
+        """Refuse a research configuration that cannot mean what it says.
+
+        Weights not summing to one would make ``overall`` a number on no
+        particular scale; a min above the max, or a shortlist larger than the
+        pool it is drawn from, would silently shrink every run.
+        """
+        weights = (
+            self.research_weight_trend
+            + self.research_weight_news
+            + self.research_weight_evidence
+            + self.research_weight_source_quality
+            + self.research_weight_reader_interest
+            + self.research_weight_novelty
+        )
+        if abs(weights - 1.0) > 1e-6:
+            raise ValueError(f"research_weight_* must sum to 1, got {weights:.4f}")
+        if not (
+            1
+            <= self.research_min_article_count
+            <= self.research_target_article_count
+            <= self.research_max_article_count
+        ):
+            raise ValueError(
+                "research article counts must satisfy 1 <= min <= target <= max, got "
+                f"{self.research_min_article_count} / {self.research_target_article_count}"
+                f" / {self.research_max_article_count}"
+            )
+        if self.research_shortlist_size > self.research_web_pool_size:
+            raise ValueError(
+                f"research_shortlist_size ({self.research_shortlist_size}) must not "
+                f"exceed research_web_pool_size ({self.research_web_pool_size})"
+            )
+        if self.research_min_evidence_status not in _EVIDENCE_STATUSES:
+            raise ValueError(
+                f"research_min_evidence_status must be one of {_EVIDENCE_STATUSES}, "
+                f"got {self.research_min_evidence_status!r}"
+            )
+        if self.research_trigger_token and len(self.research_trigger_token) < 32:
+            raise ValueError(
+                "research_trigger_token must be at least 32 characters; it is the "
+                "only thing guarding /api/automation/*"
+            )
+        if self.image_cover_mode not in ("crop", "render"):
+            raise ValueError(
+                f"image_cover_mode must be 'crop' or 'render', got {self.image_cover_mode!r}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _retention_covers_what_is_read(self) -> Settings:
+        """Pruning must never delete a row the scorer or the angle lookup reads.
+
+        Too short, and the baseline silently loses its oldest buckets — every
+        substance's mean drops, and the next window reads as a surge.
+        """
+        needed = max(
+            self.discovery_window_days * (self.discovery_baseline_windows + 1),
+            self.discovery_angle_lookback_days,
+        )
+        if self.discovery_observation_retention_days < needed:
+            raise ValueError(
+                f"discovery_observation_retention_days "
+                f"({self.discovery_observation_retention_days}) must be at least {needed}: "
+                "the baseline windows and the angle lookback read that far back"
+            )
+        if self.research_retention_days < 1:
+            raise ValueError("research_retention_days must be at least 1")
+        return self
 
     def validate_embedding_dim(self, provider_dimension: int) -> None:
         """Fail fast when the configured width disagrees with the provider.

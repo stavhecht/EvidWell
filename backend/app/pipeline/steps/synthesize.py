@@ -4,11 +4,71 @@ from __future__ import annotations
 
 import logging
 
-from app.domain.contracts import PromptSource, SynthesisInput
-from app.llm.base import LLMError, SynthesisClient
+from app.domain.contracts import (
+    CITATION_RUN_RE,
+    PromptSource,
+    SynthesisInput,
+    SynthesisOutput,
+    ValidationReport,
+    extract_handles,
+)
+from app.llm.base import LLMError, LLMResult, SynthesisClient
 from app.pipeline.stages import PipelineContext, StageError, StageName
+from app.services.no_evidence import no_evidence_draft
 
 logger = logging.getLogger(__name__)
+
+#: Fraction of the offered sources a draft must give a citation of their own
+#: (see ``MAX_HANDLES_PER_CITATION``) before it is left alone. Below this it is
+#: re-prompted once, naming the handles it skipped.
+#:
+#: **This is not a length rule, and it deliberately stopped being one.** It was
+#: briefly a word-count floor aimed at a three-minute read, which was the wrong
+#: target twice over: it fired on essentially every run because no local model
+#: this machine can hold writes 700 words, and length was never the defect
+#: anyway. The defect is a draft that was handed 24 systematic reviews and wrote
+#: about three of them — measured, repeatedly — and the one re-prompt that
+#: clearly worked took a draft from 3 cited sources to 24.
+#:
+#: Aiming at coverage instead keeps DESIGN.md §6 intact rather than bending it:
+#: there is no floor on how long an article may be, and a thoroughly-cited short
+#: article is now a correct output that is never re-prompted. It also restates a
+#: rule the synthesis prompt already gives — "every source bearing on a claim
+#: deserves a sentence" — rather than adding a competing one.
+#:
+#: Raised 0.5 -> 0.75 on 2026-09-29, together with counting own citations
+#: rather than handles. Against the twelve articles in the database the old
+#: rule let two first drafts through: one citing exactly half its sources, and
+#: one that "cited" 22 of 24 by putting 19 handles in one bracket, in 109
+#: words. The new rule re-prompts all twelve, so expect it to fire on most runs
+#: with ``SECTIONS_EXPECTED_FROM`` or more sources. Each firing is one more
+#: synthesis call: free locally, and recorded in the token ledger when hosted.
+MIN_CITED_FRACTION = 0.75
+
+#: Most handles one citation may carry and still count toward coverage. A
+#: citation is one chip on the page, a run of adjacent markers split by the
+#: same ``CITATION_RUN_RE`` the renderer uses, so ``[S1][S2][S3][S4]`` is one
+#: citation of four, exactly as a reader sees it.
+#:
+#: Three because the synthesis prompt's own example of a shared citation is
+#: ``[S1, S5, S8]``, and because that is where real drafts sit: of the 57
+#: citations in the database on 2026-09-29, 54 carried one to three handles
+#: and the other three carried 5, 5 and 19. A long list after one sentence says
+#: nothing about what any of those sources found, which is the thing the
+#: re-prompt exists to ask for.
+#:
+#: This decides only what the nudge counts. ``cited_handles()``, ``was_cited``
+#: and validation still count every handle anywhere in the body.
+MAX_HANDLES_PER_CITATION = 3
+
+#: Sources below which a thinly-cited draft is left alone. The prompt already
+#: says "six or more usable sources supports 3 to 5 sections"; reusing its number
+#: keeps this a nudge toward a rule the model was given.
+#:
+#: This is the anti-padding guarantee. A draft citing one of two sources has
+#: nothing more to say, and asking it for more can only invent it. Only a draft
+#: sitting on plenty of unused evidence is worth a second ask.
+SECTIONS_EXPECTED_FROM = 6
 
 
 class SynthesizeStage:
@@ -28,47 +88,258 @@ class SynthesizeStage:
         This stage does not check its own output. Schema conformance is
         guaranteed by structured outputs; grounding is VALIDATE's job. Keeping
         them apart is what stops the generator from also being the approver.
+
+        **Zero sources takes the template branch, not an error.** RETRIEVE
+        deliberately lets an empty candidate set through so that a fringe trend
+        can be reported honestly; failing here would discard that at the last
+        step and turn the most useful thing this product can say into a
+        ``draft_failed`` run. See ``services/no_evidence.py``.
         """
         if ctx.extraction is None:
             raise StageError(self.name, "extraction stage did not run")
 
+        if _is_revision(ctx):
+            return await self._revise(ctx)
+
         payload = self._build_input(ctx)
 
-        # Zero sources is legitimate — a fringe topic with no literature should
-        # produce an honest 'no evidence' article. But the synthesis contract
-        # requires at least one source, so short-circuit rather than call the
-        # model with an empty grounding set.
         if not payload.sources:
-            raise StageError(
-                self.name,
-                "no sources survived ranking; nothing to ground an article in",
-            )
+            return self._no_evidence(ctx, payload)
 
         try:
             result = await self._client.synthesize(payload)
         except LLMError as exc:
+            # Synthesis carries the pipeline's largest token budget, so a
+            # failure here is the most expensive thing that can happen and the
+            # one least worth reporting as free. See LLMError.usage.
+            ctx.record_usage(self.name, exc.model, exc.usage)
             raise StageError(self.name, str(exc)) from exc
+
+        ctx.record_usage(self.name, result.model, result.usage)
+
+        first_cited = len(result.output.body.cited_handles())
+        first_covered = len(_covered_handles(result.output, payload.handle_set))
+        if _is_thin(result.output, payload):
+            retried = True
+            result = await self._use_more_sources(ctx, payload, result)
+        else:
+            retried = False
 
         ctx.record_metrics(
             self.name,
             {
                 "verdict": str(result.output.verdict),
                 "sources_in_prompt": len(payload.sources),
-                "handles_cited": len(result.output.all_cited_handles()),
-                "body_words": len(result.output.body.as_text().split()),
-                "input_tokens": result.usage.input_tokens,
-                "output_tokens": result.usage.output_tokens,
-                "cache_read_tokens": result.usage.cache_read_tokens,
+                "coverage_retry": retried,
+                "first_draft_handles_cited": first_cited,
+                # What the re-prompt gate counts: sources given a citation of
+                # their own. Kept beside ``handles_cited`` because the gap
+                # between the two is how a draft that lists its sources in one
+                # long bracket shows up in the ledger.
+                "first_draft_handles_covered": first_covered,
+                # Body handles, matching ``was_cited`` in PERSIST. Counting
+                # the union with the ``citations`` list reported sources the
+                # article never refers to as cited, which is the one direction
+                # this metric must not err in.
+                "handles_cited": len(result.output.body.cited_handles()),
+                "handles_covered": len(
+                    _covered_handles(result.output, payload.handle_set)
+                ),
+                "handles_listed_not_written": len(
+                    result.output.all_cited_handles()
+                    - result.output.body.cited_handles()
+                ),
+                "body_words": _body_words(result.output),
             },
         )
 
         return ctx.model_copy(
-            update={
-                "synthesis_input": payload,
-                "draft": result.output,
-                "usage": ctx.usage + result.usage,
-            }
+            update={"synthesis_input": payload, "draft": result.output}
         )
+
+    async def _revise(self, ctx: PipelineContext) -> PipelineContext:
+        """Rewrite a draft that failed validation, with the failures fed back.
+
+        Reached only through the graph's VALIDATE -> SYNTHESIZE edge, at most
+        ``MAX_REVISE_ROUNDS`` times. The payload is the one the first draft was
+        written from — reused, not rebuilt, for the reason ``synthesis_input``
+        exists at all: VALIDATE must check against the exact handle set the
+        model saw.
+
+        **The rewrite is validated like any draft; it is never waved through.**
+        If it fails again the article is stored ``validation_failed`` exactly as
+        before this loop existed. And a rewrite that errors keeps the first
+        draft, which then fails validation again and is stored the same way —
+        a failed revision must not turn a reportable draft into a failed run.
+        """
+        assert ctx.synthesis_input is not None and ctx.validation is not None
+        assert ctx.draft is not None
+        payload = ctx.synthesis_input
+        codes = sorted({failure.code for failure in ctx.validation.failures})
+        try:
+            result = await self._client.synthesize(
+                payload, feedback=revision_feedback(ctx.validation)
+            )
+        except LLMError as exc:
+            ctx.record_usage(self.name, exc.model, exc.usage)
+            logger.warning(
+                "revision failed (%s); keeping the draft that failed validation", exc
+            )
+            ctx.record_metrics(
+                self.name,
+                {
+                    "revision": True,
+                    "revision_failed": str(exc),
+                    "failures_fed_back": codes,
+                    "verdict": str(ctx.draft.verdict),
+                },
+            )
+            return ctx
+
+        ctx.record_usage(self.name, result.model, result.usage)
+        ctx.record_metrics(
+            self.name,
+            {
+                "revision": True,
+                "failures_fed_back": codes,
+                "verdict": str(result.output.verdict),
+                "sources_in_prompt": len(payload.sources),
+                "handles_cited": len(result.output.body.cited_handles()),
+                "handles_covered": len(_covered_handles(result.output, payload.handle_set)),
+                "body_words": _body_words(result.output),
+            },
+        )
+        logger.info("revised a draft that failed validation (%s)", ", ".join(codes))
+        return ctx.model_copy(update={"draft": result.output, "validation": None})
+
+    async def _use_more_sources(
+        self,
+        ctx: PipelineContext,
+        payload: SynthesisInput,
+        result: LLMResult[SynthesisOutput],
+    ) -> LLMResult[SynthesisOutput]:
+        """Ask once for the skipped sources, and keep the first draft if refused.
+
+        **This can only improve the outcome, never fail the run.** A draft is
+        already in hand and it is publishable — it passed the same contract the
+        second one has to. So a re-prompt that raises is logged and discarded
+        rather than propagated: turning a usable article into a failed run would
+        be strictly worse than shipping it, and would hand this nudge a veto over
+        the pipeline that it has no business having. Its tokens are still
+        recorded, because they were still spent.
+
+        **The second draft is kept only if it gives more sources a citation of
+        their own than the first**, which is the same question the re-prompt
+        asked. Keeping it unconditionally was tried and is wrong: live, a draft
+        citing 3 of 13 came back citing 1, and separately a 152-word ``mixed``
+        draft came back at ``no_evidence`` while citing everything. Nothing
+        downstream catches the latter — ``no_evidence`` is exempt from the
+        cited-beat rule and sits below every ceiling, so it validates cleanly
+        and publishes. Comparing raw handle counts instead would prefer a second
+        draft that lists every source in one bracket, which is exactly what
+        ``MAX_HANDLES_PER_CITATION`` refuses to count.
+
+        Note the test is coverage, not length. A second draft that says more
+        about fewer papers is not what was asked for, and a shorter draft that
+        genuinely works through more of the evidence is.
+        """
+        offered = payload.handle_set
+        covered_set = _covered_handles(result.output, offered)
+        covered = len(covered_set)
+        cited = result.output.body.cited_handles()
+        unused = sorted(offered - covered_set, key=lambda handle: int(handle[1:]))
+        # Cited, but only inside a long list. Named apart from the never-cited
+        # ones: told they were unused, a model that can see its own
+        # "[S2, S3, … S24]" has been told something false.
+        lumped = [handle for handle in unused if handle in cited]
+        uncited = [handle for handle in unused if handle not in cited]
+        logger.info(
+            "draft gives %d of %d sources a citation of their own (%d uncited, "
+            "%d only in a long list); asking once for the rest",
+            covered,
+            len(payload.sources),
+            len(uncited),
+            len(lumped),
+        )
+
+        try:
+            retry = await self._client.synthesize(
+                payload, feedback=_coverage_feedback(covered, uncited, lumped)
+            )
+        except LLMError as exc:
+            ctx.record_usage(self.name, exc.model, exc.usage)
+            logger.warning(
+                "coverage re-prompt failed (%s); keeping the first draft (%d covered)",
+                exc,
+                covered,
+            )
+            return result
+
+        ctx.record_usage(self.name, retry.model, retry.usage)
+        improved = len(_covered_handles(retry.output, offered))
+        if improved <= covered:
+            logger.info(
+                "coverage re-prompt covered %d of %d (was %d); keeping the first draft",
+                improved,
+                len(payload.sources),
+                covered,
+            )
+            return result
+
+        logger.info(
+            "coverage re-prompt covered %d of %d (was %d)",
+            improved,
+            len(payload.sources),
+            covered,
+        )
+        return retry
+
+    def _no_evidence(
+        self, ctx: PipelineContext, payload: SynthesisInput
+    ) -> PipelineContext:
+        """Take the deterministic branch: no model call, no tokens, no cost.
+
+        Records *why* the source list was empty. The two causes are the same
+        sentence to a reader and different problems to us: nothing published on
+        the topic is the product working as intended, whereas candidates
+        retrieved and then filtered away is a signal that ``min_year`` or the
+        grade floor is tighter than the corpus can satisfy. Distinguishing them
+        after the fact means reading two stages of metrics, so it is recorded
+        here where both numbers are in hand.
+        """
+        retrieved = sum(len(papers) for papers in ctx.candidates.values())
+        cause = "no_candidates_retrieved" if retrieved == 0 else "all_candidates_filtered"
+
+        draft = no_evidence_draft(payload.product, payload.target_claims)
+
+        logger.info(
+            "no usable sources for %r (%s, %d retrieved); "
+            "writing the deterministic no-evidence article",
+            payload.product,
+            cause,
+            retrieved,
+        )
+
+        ctx.record_metrics(
+            self.name,
+            {
+                "verdict": str(draft.verdict),
+                "sources_in_prompt": 0,
+                "handles_cited": 0,
+                "handles_covered": 0,
+                "handles_listed_not_written": 0,
+                "body_words": _body_words(draft),
+                "model_called": False,
+                # Recorded as False rather than omitted so that "how often does
+                # the coverage nudge fire?" is one query over every run, not one
+                # that has to know which branch each row came from.
+                "coverage_retry": False,
+                "no_evidence_cause": cause,
+                "candidates_retrieved": retrieved,
+            },
+        )
+
+        return ctx.model_copy(update={"synthesis_input": payload, "draft": draft})
 
     @staticmethod
     def _build_input(ctx: PipelineContext) -> SynthesisInput:
@@ -81,9 +352,15 @@ class SynthesizeStage:
         assert ctx.extraction is not None
 
         by_handle: dict[str, PromptSource] = {}
-        for ranked in ctx.ranked.values():
+        for claim, ranked in ctx.ranked.items():
             for entry in ranked:
-                if entry.citation_handle in by_handle:
+                if (existing := by_handle.get(entry.citation_handle)) is not None:
+                    # Still one entry in the prompt — but it now records every
+                    # claim it answers, which is what the per-claim quorum
+                    # counts against. Dropping the second claim outright, as
+                    # this did, made a shared source invisible to one of them.
+                    if claim not in existing.claims:
+                        existing.claims.append(claim)
                     continue
                 by_handle[entry.citation_handle] = PromptSource(
                     handle=entry.citation_handle,
@@ -93,6 +370,8 @@ class SynthesizeStage:
                     year=entry.paper.year,
                     study_type=entry.paper.study_type,
                     source_id=entry.source_id,
+                    claims=[claim],
+                    excerpts=ctx.excerpts.get(entry.source_id, []),
                 )
 
         ordered = sorted(by_handle.values(), key=lambda s: int(s.handle[1:]))
@@ -101,3 +380,119 @@ class SynthesizeStage:
             target_claims=ctx.extraction.target_claims,
             sources=ordered,
         )
+
+
+def _body_words(draft: SynthesisOutput) -> int:
+    """Words of article body, recorded as a metric and never used as a target.
+
+    Nothing branches on this. It is here so that "how long are articles coming
+    out?" is answerable from ``pipeline_stage_runs`` without re-parsing the
+    documents — which is how the 66-to-266-word problem was found in the first
+    place. A *threshold* on it was tried and removed: see ``MIN_CITED_FRACTION``.
+
+    ``as_text()`` is beats plus sections, which is every block
+    ``body_text_to_doc`` emits, and it still counts the ``[S1]`` markers that
+    the frontend's own word count skips. Close enough for a trend line, which is
+    all it is.
+    """
+    return len(draft.body.as_text().split())
+
+
+def _is_thin(draft: SynthesisOutput, payload: SynthesisInput) -> bool:
+    """Ignoring most of its sources, *and* given plenty. Both halves required."""
+    if len(payload.sources) < SECTIONS_EXPECTED_FROM:
+        return False
+    covered = len(_covered_handles(draft, payload.handle_set))
+    return covered < len(payload.sources) * MIN_CITED_FRACTION
+
+
+def _covered_handles(draft: SynthesisOutput, offered: set[str]) -> set[str]:
+    """The offered sources this draft gives a citation of their own.
+
+    A handle counts when some citation carrying it holds at most
+    ``MAX_HANDLES_PER_CITATION`` handles, so a source cited once on its own and
+    again in a long list still counts. A handle the prompt never offered does
+    not: it is not a source, and VALIDATE rejects the draft for it anyway.
+    """
+    covered: set[str] = set()
+    for citation in CITATION_RUN_RE.findall(draft.body.as_text()):
+        handles = extract_handles(citation)
+        if len(handles) <= MAX_HANDLES_PER_CITATION:
+            covered |= handles
+    return covered & offered
+
+
+def _coverage_feedback(covered: int, uncited: list[str], lumped: list[str]) -> str:
+    """The note appended to the user turn on a re-prompt.
+
+    Every sentence points at the *unused sources*, and the explicit refusal of
+    padding is load-bearing: an instruction to write more, handed to a model with
+    nothing left to say, produces exactly the manufactured nuance DESIGN.md §6
+    refuses. Nothing here names a word count, because nothing here wants one.
+
+    Sources cited only inside a long list are named apart from those never
+    cited, and the limit is stated, because the model cannot meet a rule it was
+    never told.
+    """
+    gaps = [f"That draft gave {covered} of the sources above a citation of their own."]
+    if uncited:
+        gaps.append(f"It never cited {len(uncited)}: {', '.join(uncited)}.")
+    if lumped:
+        gaps.append(
+            f"It cited {len(lumped)} only inside a long list of handles, which "
+            f"says nothing about what each one found: {', '.join(lumped)}."
+        )
+    return (
+        " ".join(gaps) + "\n\n"
+        "Go back through those and give each one a sentence: what it measured, "
+        "in whom, and what it found, with its handle. A citation may carry at "
+        f"most {MAX_HANDLES_PER_CITATION} handles; a longer list does not count "
+        "as using them. Take every claim in turn and check it has sources cited "
+        "against it.\n\n"
+        "Do not pad. Every sentence you add must state a specific finding from "
+        "one of the sources above and carry its handle. If a source does not "
+        "bear on any claim, say so and cite it there. If a source genuinely has "
+        "nothing to add, leave it out: an article that works through the "
+        "evidence honestly is the goal, not a longer one."
+    )
+
+
+def _is_revision(ctx: PipelineContext) -> bool:
+    """This pass was sent back by VALIDATE, with a failed report to fix."""
+    return (
+        ctx.revise_round > 0
+        and ctx.draft is not None
+        and ctx.synthesis_input is not None
+        and ctx.validation is not None
+        and not ctx.validation.passed
+    )
+
+
+#: Failure messages fed back in a revision. Past this the list is noise.
+_MAX_FAILURES_FED_BACK = 12
+
+
+def revision_feedback(report: ValidationReport) -> str:
+    """The note appended to the user turn when a draft is sent back.
+
+    It names the failures VALIDATE found, verbatim, and asks for those fixed
+    and nothing else — a rewrite told only "try again" is a fresh draft with
+    fresh mistakes. The verdict ceiling is stated when known, because
+    ``verdict_exceeds_grade`` cannot be fixed without it.
+    """
+    lines = [f"- {failure.message}" for failure in report.failures[:_MAX_FAILURES_FED_BACK]]
+    ceiling = (
+        f" The verdict may be at most '{report.verdict_ceiling.value}' for the evidence "
+        "above; it may be lower."
+        if report.verdict_ceiling is not None
+        else ""
+    )
+    return (
+        "That draft failed the citation checks, so it cannot be published as written:\n"
+        + "\n".join(lines)
+        + "\n\nRewrite it to fix exactly these problems and keep everything else. "
+        "Cite only the handles listed with the sources above, one handle per source "
+        "in square brackets like [S1], and use square brackets for nothing else. "
+        "Every sentence of the evidence beat and every section must carry at least "
+        f"one handle.{ceiling}"
+    )

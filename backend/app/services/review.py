@@ -18,10 +18,11 @@ from typing import Any
 from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.enums import ArticleStatus, StudyType
+from app.domain.enums import ArticleStatus, StudyType, Subject
 from app.domain.models import Article, ArticleSource, Source
 from app.evidence.grading import is_weak_evidence
 from app.services.card import derive_card
+from app.services.media import UnsafeMediaError, assert_media_is_ours
 from app.services.tiptap import cited_handles_in_doc
 
 logger = logging.getLogger(__name__)
@@ -44,13 +45,21 @@ class ReviewService:
         application error.
 
         Called on a debounce from the editor, so it must be cheap and
-        idempotent. **No validation runs here** — failing a reviewer's autosave
-        mid-sentence, while a citation is momentarily orphaned, would be
-        hostile. Validation happens at approve time, where it can block
-        publication rather than typing.
+        idempotent. **Citation validation does not run here** — failing a
+        reviewer's autosave mid-sentence, while a citation is momentarily
+        orphaned, would be hostile. That check happens at approve time, where
+        it can block publication rather than typing.
+
+        Media is the exception, and the difference is that there is no
+        half-typed state to be caught in: an image or video block is inserted
+        whole or not at all, so a bad one can only come from a paste of foreign
+        HTML or from a bug. Refusing it here costs a reviewer nothing and is
+        the difference between a broken `src` being noticed now and it being
+        noticed by a reader.
 
         Raises:
-            ReviewError: the article is not in ``pending_review``.
+            ReviewError: the article is not in ``pending_review``, or the
+                document references media this system did not store.
         """
         article = await self._get(article_id)
         if article.status != ArticleStatus.PENDING_REVIEW:
@@ -58,6 +67,11 @@ class ReviewService:
                 f"cannot edit an article in state '{article.status}'; "
                 "only drafts pending review are editable"
             )
+
+        try:
+            assert_media_is_ours(content)
+        except UnsafeMediaError as exc:
+            raise ReviewError(str(exc)) from exc
 
         article.edited_content = content
         await self._session.flush()
@@ -70,6 +84,11 @@ class ReviewService:
         reviewer can orphan a citation by deleting a sentence, or paste a handle
         that was never provided — invariant #2 has to survive human editing, not
         just generation.
+
+        Media is re-checked here too. ``save_edits`` already refuses a foreign
+        image or video, so this is the second lock on the same door: publishing
+        is the moment content stops being ours and starts being every reader's,
+        and it is the wrong moment to be relying on an earlier check having run.
 
         Raises:
             ReviewError: wrong status, or edited content that no longer
@@ -89,13 +108,34 @@ class ReviewService:
 
         content = article.edited_content or article.original_content
         await self._assert_citations_still_resolve(article_id, content)
+        try:
+            assert_media_is_ours(content)
+        except UnsafeMediaError as exc:
+            raise ReviewError(str(exc)) from exc
 
-        card = derive_card(article.headline, content, article.verdict)
+        card = derive_card(
+            article.headline,
+            content,
+            article.verdict,
+            generated=article.generated_imagery,
+        )
         now = datetime.now(UTC)
 
         article.card_headline = card.headline
         article.card_excerpt = card.excerpt
         article.card_verdict = card.verdict
+        # Derived here rather than uploaded separately, so the feed tile cannot
+        # show a picture that is not in the article the reader lands on.
+        #
+        # The pipeline's generated portrait cover is the one thing that is not
+        # literally in the document, and `derive_card` only reaches for it while
+        # the document's first image is still the landscape frame drawn beside
+        # it — so the tile is a reframing of the article's own picture, never an
+        # independent one. That predicate is also where the cover gets the
+        # MEDIA_SRC_RE check `assert_media_is_ours` above cannot give it, since
+        # that walks the document and the cover is not in it.
+        article.card_image = card.image
+        article.card_image_alt = card.image_alt
         article.status = ArticleStatus.PUBLISHED
         article.reviewed_by = reviewer_id
         article.reviewed_at = now
@@ -103,6 +143,122 @@ class ReviewService:
 
         await self._session.flush()
         logger.info("article %s published by reviewer %s", article_id, reviewer_id)
+
+    async def set_subject(
+        self, article_id: str, subject: Subject | None, reviewer_id: str
+    ) -> None:
+        """Classify what kind of thing this article assesses.
+
+        Editable after publication, unlike the body: the subject is metadata a
+        reviewer may get wrong or refine later, and correcting it changes a
+        colour and a browse listing rather than a word the reader was shown.
+        Set it to ``None`` to un-classify — an unclassified article renders in
+        ink, which is the design's resting state, so blank is a real answer
+        rather than a missing one.
+
+        Deliberately not derived from ``product``: that is free text, and a
+        guessed subject would put a confident colour on an unchecked
+        classification.
+        """
+        article = await self._get(article_id)
+        if article.status in (ArticleStatus.REJECTED, ArticleStatus.DRAFT_FAILED):
+            raise ReviewError(
+                f"cannot classify an article in state '{article.status}'"
+            )
+        article.subject = subject
+        await self._session.flush()
+        logger.info(
+            "article %s classified as %s by reviewer %s",
+            article_id,
+            subject or "unclassified",
+            reviewer_id,
+        )
+
+    async def card_preview(self, article_id: str) -> dict[str, Any]:
+        """What ``approve()`` would materialise onto the card columns, unwritten.
+
+        The **same** ``derive_card`` the publish path runs — not a second
+        implementation of the same rules, and pointedly not a TypeScript port
+        of them in the console. A preview computed any other way is a second
+        thing to keep in step with the first, and the day the two disagree is
+        the day the preview stops being worth looking at.
+
+        Deliberately its own method rather than four more fields on
+        ``article_detail``: this has to reflect an edit made ten seconds ago,
+        while the detail response is fetched once and cached for the length of
+        a review session. Merging them would mean invalidating the whole draft
+        on every autosave to keep one derived string fresh.
+        """
+        article = await self._get(article_id)
+        content = article.edited_content or article.original_content
+        card = derive_card(
+            article.headline,
+            content,
+            article.verdict,
+            generated=article.generated_imagery,
+        )
+        return {
+            "slug": article.slug,
+            "headline": card.headline,
+            "excerpt": card.excerpt,
+            "verdict": card.verdict,
+            "verdict_qualifier": article.verdict_qualifier,
+            "image": card.image,
+            "image_alt": card.image_alt,
+            "subject": article.subject,
+            # Publishing is what sets this. Before then, the honest answer to
+            # "when was this published" is "it would be now" — `created_at`
+            # would read as a publication date this article does not have. The
+            # tile does not render it either way; the field is here because the
+            # preview renders through the public feed's own component and that
+            # component's contract has it.
+            "published_at": article.published_at or datetime.now(UTC),
+            "image_is_generated_cover": card.image_is_generated_cover,
+        }
+
+    async def set_illustration(
+        self, article_id: str, illustration: dict[str, Any], reviewer_id: str
+    ) -> None:
+        """Record a freshly generated pair of frames on the article.
+
+        Only from ``pending_review``, the same gate ``save_edits`` uses and for
+        the same reason: a published article's picture is something a reader
+        has already been shown, and changing it is a publish decision rather
+        than an edit.
+
+        **This does not touch the document.** ``original_content`` is
+        trigger-protected and ``edited_content`` is the reviewer's live editor
+        buffer — writing either from here would either fail or clobber whatever
+        they are typing. The console swaps the image node itself and lets
+        autosave persist it, which also means the new ``src`` goes through
+        ``assert_media_is_ours`` on the way in like any other edit.
+
+        The consequence is a window where this column names a lead the document
+        does not contain yet. That is safe by construction: the pairing rule in
+        ``derive_card`` fails closed, so the worst outcome of a reviewer
+        navigating away mid-swap is a typographic tile — never a tile showing a
+        picture the article does not have.
+        """
+        article = await self._get(article_id)
+        if article.status != ArticleStatus.PENDING_REVIEW:
+            raise ReviewError(
+                f"cannot regenerate imagery for an article in state '{article.status}'; "
+                "only drafts pending review can be changed"
+            )
+        article.generated_imagery = illustration
+        await self._session.flush()
+        logger.info(
+            "article %s illustration regenerated by reviewer %s", article_id, reviewer_id
+        )
+
+    async def article_for_illustration(self, article_id: str) -> Article:
+        """The row the regenerate route needs before it spends money.
+
+        Separate from ``set_illustration`` because the generation happens
+        between them and takes seconds: holding the article across a provider
+        call would keep a transaction open for the length of it.
+        """
+        return await self._get(article_id)
 
     #: States a draft can be rejected from.
     #:
@@ -164,30 +320,32 @@ class ReviewService:
         cursor: str | None = None,
         limit: int = 20,
     ) -> tuple[list[dict[str, Any]], str | None]:
-        """The review queue.
+        """The review queue, newest first in every tab.
 
-        Pending review is oldest-first, deliberately: newest-first lets a
-        slow-moving queue strand old drafts behind fresher ones forever.
-        Terminal states are newest-first, because there the interesting rows are
-        the recent ones.
+        Pending review was oldest-first for a while, on the argument that
+        newest-first lets a slow queue strand old drafts behind fresher ones.
+        In practice the reviewer is watching the draft they just generated, and
+        it landed at the bottom of the list. The staleness argument is real but
+        it is a question about *one* row's age, which each row already answers
+        itself ("queued 3 days ago"); burying the row the reviewer is waiting
+        for is a cost paid on every visit.
 
         Also serves the ``validation_failed`` tab — those drafts are never
         approvable, but they are the system's prompt-bug feedback and must be
         visible.
         """
-        oldest_first = status == ArticleStatus.PENDING_REVIEW
-        order = Article.created_at.asc() if oldest_first else Article.created_at.desc()
-
-        statement = select(Article).where(Article.status == status).order_by(order, Article.id)
+        # Keyset pagination: the tiebreaker must sort the same direction as the
+        # key, or the ``<`` below skips rows sharing a ``created_at``.
+        statement = (
+            select(Article)
+            .where(Article.status == status)
+            .order_by(Article.created_at.desc(), Article.id.desc())
+        )
 
         if cursor:
             created_at, article_id = _decode_cursor(cursor)
             keyset = tuple_(Article.created_at, Article.id)
-            statement = statement.where(
-                keyset > (created_at, article_id)
-                if oldest_first
-                else keyset < (created_at, article_id)
-            )
+            statement = statement.where(keyset < (created_at, article_id))
 
         result = await self._session.execute(statement.limit(limit + 1))
         articles = list(result.scalars())
@@ -208,6 +366,7 @@ class ReviewService:
                 "evidence_grade": article.evidence_grade,
                 "validation_badge": _badge(article.validation_report),
                 "has_weak_evidence": is_weak_evidence(StudyType(article.evidence_grade)),
+                "subject": article.subject,
                 "created_at": article.created_at,
             }
             for article in articles
@@ -251,12 +410,25 @@ class ReviewService:
                 "was_cited": link.was_cited,
                 "relevance_score": link.relevance_score,
                 "is_weak_evidence": is_weak_evidence(StudyType(source.study_type)),
+                # Distinct from weak evidence, and shown separately. Weak means
+                # a poor basis for confidence; retracted means not a basis.
+                "retracted": source.retracted_at is not None,
+                "concern": source.concern_at is not None,
+                "retraction_note": source.retraction_note,
+                "excerpts": link.excerpts or [],
             }
             for link, source in result.all()
         ]
 
         return {
             "id": article.id,
+            # Carried so the console can link a just-published draft straight
+            # to where it landed on the public feed. Present before publication
+            # too — the slug is assigned at persist time — but only a published
+            # article resolves at /a/{slug}, which is why the console gates the
+            # link on status rather than on the field being set.
+            "slug": article.slug,
+            "subject": article.subject,
             "status": article.status,
             "topic": article.topic,
             "product": article.product,
@@ -272,6 +444,8 @@ class ReviewService:
             "validation_report": article.validation_report,
             "sources": sources,
             "pipeline_run_id": article.pipeline_run_id,
+            "retraction_flagged_at": article.retraction_flagged_at,
+            "retraction_detail": article.retraction_detail,
             "created_at": article.created_at,
         }
 

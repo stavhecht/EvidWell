@@ -1,0 +1,263 @@
+{
+  "name": "EvidWell - weekly research run",
+  "nodes": [
+    {
+      "id": "schedule",
+      "name": "Every week",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "={{ $env.RESEARCH_WEEKLY_CRON }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "start-research-run",
+      "name": "Start research run",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EVIDWELL_API_URL }}/api/automation/research/runs",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Trigger-Token",
+              "value": "={{ $env.RESEARCH_TRIGGER_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"mode\": \"weekly\"}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true,
+              "fullResponse": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "started",
+      "name": "Started?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "has-id",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "wait",
+      "name": "Wait a minute",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        -100
+      ],
+      "webhookId": "6f1c2d3e-8a4b-4c5d-9e6f-7a8b9c0d1e2f",
+      "parameters": {
+        "amount": 60,
+        "unit": "seconds"
+      }
+    },
+    {
+      "id": "status",
+      "name": "Read run status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        -100
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.EVIDWELL_API_URL }}/api/automation/research/runs/{{ $('Start research run').item.json.id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Trigger-Token",
+              "value": "={{ $env.RESEARCH_TRIGGER_TOKEN }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "still-running",
+      "name": "Still running?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1100,
+        -100
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "running",
+              "leftValue": "={{ ['queued', 'running'].includes($json.status) && $runIndex < 45 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "done",
+      "name": "Research finished",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1320,
+        0
+      ],
+      "notes": "Add a notification here (email, Slack) if wanted: $json.status, $json.label and $json.candidates are available.",
+      "parameters": {}
+    }
+  ],
+  "connections": {
+    "Every week": {
+      "main": [
+        [
+          {
+            "node": "Start research run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start research run": {
+      "main": [
+        [
+          {
+            "node": "Started?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Started?": {
+      "main": [
+        [
+          {
+            "node": "Wait a minute",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Research finished",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait a minute": {
+      "main": [
+        [
+          {
+            "node": "Read run status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read run status": {
+      "main": [
+        [
+          {
+            "node": "Still running?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Still running?": {
+      "main": [
+        [
+          {
+            "node": "Wait a minute",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Research finished",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "id": "EvidWellWeeklyRun"
+}
