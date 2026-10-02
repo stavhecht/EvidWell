@@ -1,10 +1,11 @@
-"""The two generative calls, recorded and replayable — plus two stand-ins.
+"""The generative calls, recorded and replayable — plus two stand-ins.
 
-``EvalExtractionClient`` and ``EvalSynthesisClient`` wrap whatever
-``llm/factory.py`` built (Ollama today) and implement the same Protocols, so the
-stages cannot tell them apart. They time each call, record its tokens and model,
-and keep its output in the cassette keyed by model + payload + feedback: a
-replayed draft is the draft that model wrote for exactly that prompt.
+``EvalExtractionClient``, ``EvalAppraisalClient`` and ``EvalSynthesisClient``
+wrap whatever ``llm/factory.py`` built (Ollama today) and implement the same
+Protocols, so the stages cannot tell them apart. They time each call, record its
+tokens and model, and keep its output in the cassette keyed by model + payload +
+feedback: a replayed draft is the draft that model wrote for exactly that
+prompt.
 
 Two stand-ins, for failure cases only, and named for what they are:
 
@@ -24,24 +25,41 @@ from dataclasses import asdict
 from typing import Any
 
 from app.domain.contracts import (
+    AppraisalInput,
+    AppraisalOutput,
     ArticleBody,
     CitationGroup,
+    DirectionOutput,
     ExtractionInput,
     ExtractionOutput,
+    RelevanceOutput,
     SynthesisInput,
     SynthesisOutput,
 )
 from app.domain.enums import Verdict
 from app.llm.base import (
+    AppraisalClient,
     ExtractionClient,
     LLMError,
     LLMResult,
     SynthesisClient,
     TokenUsage,
 )
+from app.llm.prompts.appraisal import (
+    APPRAISAL_SYSTEM_PROMPT,
+    DIRECTION_SYSTEM_PROMPT,
+    RELEVANCE_SYSTEM_PROMPT,
+)
 from evaluation.harness.cassette import Cassette, stable_key
 from evaluation.harness.trace import TraceRecorder
 from evaluation.schema import FaultSpec
+
+#: The system prompt behind each appraisal call, keyed by operation name.
+_APPRAISAL_PROMPTS = {
+    "appraise": APPRAISAL_SYSTEM_PROMPT,
+    "relevance": RELEVANCE_SYSTEM_PROMPT,
+    "direction": DIRECTION_SYSTEM_PROMPT,
+}
 
 
 def feedback_kind(feedback: str | None) -> str:
@@ -53,6 +71,19 @@ def feedback_kind(feedback: str | None) -> str:
     if feedback.startswith("That draft gave"):
         return "coverage"
     return "other"
+
+
+def synthesis_key(model_id: str, payload: SynthesisInput, feedback: str | None) -> str:
+    """The cassette key for one synthesis call: what the model is *shown*.
+
+    ``PromptSource.stances`` is left out. It rides on the payload only so
+    VALIDATE can read it and ``render_source_block`` never renders it, so it
+    changes nothing the model sees — and keying on it would have turned every
+    recording made before APPRAISE existed into a miss, re-running every
+    synthesis live and sampling a new draft.
+    """
+    shown = payload.model_dump(mode="json", exclude={"sources": {"__all__": {"stances"}}})
+    return stable_key("synthesize", model_id, shown, feedback or "")
 
 
 def _usage_dict(usage: TokenUsage) -> dict[str, int]:
@@ -201,9 +232,7 @@ class EvalSynthesisClient(_Recorded):
                 "synthesis call failed: simulated outage (eval fault)", retryable=True
             )
 
-        key = stable_key(
-            "synthesize", self._model_id, payload.model_dump(mode="json"), feedback or ""
-        )
+        key = synthesis_key(self._model_id, payload, feedback)
         hit = self._lookup(key)
         if hit is not None:
             stored, latency = hit
@@ -275,6 +304,160 @@ class EvalSynthesisClient(_Recorded):
         )
         self._recorder.trace.drafts.append(
             {"kind": kind, "output": result.output.model_dump(mode="json")}
+        )
+
+
+class EvalAppraisalClient(_Recorded):
+    """APPRAISE's calls, in either mode, recorded and replayable like the other
+    model calls.
+
+    Each output keeps what production drops once the label is read — the
+    quotes, or the relevance call's ``outcome_measured`` and the direction
+    call's ``finding``. When a label is wrong, those say whether the model
+    misread the abstract or misapplied the label.
+    """
+
+    def __init__(self, inner: AppraisalClient | None, *args: Any) -> None:
+        super().__init__(*args)
+        self._inner = inner
+
+    async def appraise(self, payload: AppraisalInput) -> LLMResult[AppraisalOutput]:
+        return await self._recorded(
+            "appraise",
+            payload,
+            AppraisalOutput,
+            lambda inner: inner.appraise(payload),
+        )
+
+    async def relevance(self, payload: AppraisalInput) -> LLMResult[RelevanceOutput]:
+        return await self._recorded(
+            "relevance",
+            payload,
+            RelevanceOutput,
+            lambda inner: inner.relevance(payload),
+        )
+
+    async def direction(self, payload: AppraisalInput) -> LLMResult[DirectionOutput]:
+        return await self._recorded(
+            "direction",
+            payload,
+            DirectionOutput,
+            lambda inner: inner.direction(payload),
+        )
+
+    async def _recorded(
+        self,
+        operation: str,
+        payload: AppraisalInput,
+        output_type: type[Any],
+        call: Any,
+    ) -> LLMResult[Any]:
+        request = {
+            "claim": payload.claim,
+            "handles": [source.handle for source in payload.sources],
+        }
+        started = time.monotonic()
+        if self._fault is not None:
+            self._recorder.record(
+                tool="llm_appraisal",
+                operation=operation,
+                request=request,
+                status="fault",
+                fault=self._fault.kind,
+                error="simulated appraisal failure",
+                model=self._model_id,
+            )
+            raise LLMError(
+                f"appraisal {operation} call failed: simulated outage (eval fault)",
+                retryable=True,
+            )
+
+        # The prompt is part of the key, unlike synthesis's: these prompts are
+        # being tuned against the eval, and a key without them would replay the
+        # old prompt's answers under the new one with nothing to say so.
+        key = stable_key(
+            f"appraise_{operation}",
+            self._model_id,
+            _APPRAISAL_PROMPTS[operation],
+            payload.model_dump(mode="json"),
+        )
+        hit = self._lookup(key)
+        if hit is not None:
+            stored, latency = hit
+            result = LLMResult(
+                output=output_type.model_validate(stored["output"]),
+                usage=TokenUsage(**stored["usage"]),
+                model=stored["model"],
+            )
+            self._note(
+                operation, request, result, cached=True, latency=latency, started=started
+            )
+            return result
+        if self._mode == "replay":
+            self._recorder.record(
+                tool="llm_appraisal",
+                operation=operation,
+                request=request,
+                status="cassette_miss",
+            )
+            raise LLMError("cassette miss (replay mode)")
+        if self._inner is None:
+            raise LLMError("no appraisal client is configured")
+        try:
+            result = await call(self._inner)
+        except LLMError as exc:
+            self._recorder.record(
+                tool="llm_appraisal",
+                operation=operation,
+                request=request,
+                status="error",
+                error=str(exc),
+                latency_ms=_ms(started),
+                live_latency_ms=_ms(started),
+                model=exc.model or self._model_id,
+                usage=_usage_dict(exc.usage),
+            )
+            raise
+        latency = _ms(started)
+        self._cassette.put(
+            "llm",
+            key,
+            {
+                "output": result.output.model_dump(mode="json"),
+                "usage": _usage_dict(result.usage),
+                "model": result.model,
+            },
+            latency,
+        )
+        self._note(operation, request, result, cached=False, latency=latency, started=started)
+        return result
+
+    def _note(
+        self,
+        operation: str,
+        request: dict[str, Any],
+        result: LLMResult[Any],
+        *,
+        cached: bool,
+        latency: float | None,
+        started: float,
+    ) -> None:
+        self._recorder.record(
+            tool="llm_appraisal",
+            operation=operation,
+            request=request,
+            cached=cached,
+            latency_ms=_ms(started),
+            live_latency_ms=latency,
+            model=result.model,
+            usage=_usage_dict(result.usage),
+        )
+        self._recorder.trace.appraisals.append(
+            {
+                "claim": request["claim"],
+                "call": operation,
+                "output": result.output.model_dump(mode="json"),
+            }
         )
 
 

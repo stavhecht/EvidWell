@@ -10,6 +10,7 @@ write — or worse, as silently degraded retrieval.
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -57,6 +58,17 @@ class Settings(BaseSettings):
     #: `ollama pull llama3.1:8b`.
     ollama_extraction_model: str = "llama3.1:8b"
     ollama_synthesis_model: str = "llama3.1:8b"
+    #: The APPRAISE call (which way each source points). Not the synthesis
+    #: model, on measurement: over 96 hand-labelled (source, claim) pairs on
+    #: 2026-10-02, qwen2.5:7b got the direction of studies that test the claim
+    #: right 70% of the time and *flipped* 15 of them (it reads good news as
+    #: support — a coffee study finding a benefit labelled as supporting "has
+    #: no effect on heart health"), while llama3.1:8b got 98% and flipped none.
+    #: A flipped label is the error that would push a verdict the wrong way.
+    #: llama3.1:8b is also the extraction model, so no extra model is pulled,
+    #: and it is often still resident from EXTRACT when APPRAISE runs.
+    #: Empty means the synthesis model.
+    ollama_appraisal_model: str = "llama3.1:8b"
 
     # --- Claude (hosted; used when llm_provider='anthropic') ---
     anthropic_api_key: str = ""
@@ -72,6 +84,9 @@ class Settings(BaseSettings):
     #: re-running that check.
     extraction_model: str = "claude-sonnet-5"
     synthesis_model: str = "claude-sonnet-5"
+    #: Empty means ``synthesis_model``. Anything else needs an entry in
+    #: ``llm/pricing.py`` or its cost reports as unknown.
+    appraisal_model: str = ""
 
     # --- embeddings ---
     embedding_provider: str = "ollama"  # 'ollama' | 'voyage' | 'openai'
@@ -127,6 +142,18 @@ class Settings(BaseSettings):
     #: Six papers at two ~300-word excerpts each is about 5,000 prompt tokens;
     #: raising it eats into the same Ollama context window as `retrieval_top_k`.
     full_text_max_papers: int = 6
+    #: Whether APPRAISE labels each ranked source's direction (supports / no
+    #: effect / contradicts) per claim — one model call per claim. Off, the
+    #: stage records ``cause: disabled`` and the article is drafted exactly as
+    #: before it existed; nothing downstream requires the labels yet.
+    appraisal_enabled: bool = True
+    #: How APPRAISE asks: ``one_call`` (quote the abstract's sentence about the
+    #: claim's outcome, then label it) or ``two_call`` (relevance first, then a
+    #: direction call shown only the relevant sources). One call is the default
+    #: on measurement — level on flipped directions, slightly ahead on the rest,
+    #: half the calls (CLAUDE.md, APPRAISE). Two calls is kept for re-measuring
+    #: when the appraisal model changes.
+    appraisal_mode: Literal["one_call", "two_call"] = "one_call"
 
     # --- pipeline ---
     worker_poll_interval_seconds: float = 5.0

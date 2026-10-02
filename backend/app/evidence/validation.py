@@ -30,15 +30,17 @@ from app.domain.contracts import (
     ValidationFailure,
     ValidationReport,
 )
-from app.domain.enums import StudyType, Verdict
+from app.domain.enums import Stance, StudyType, Verdict
 from app.domain.models import Source
 from app.evidence import numbers
 from app.evidence.grading import (
+    AGAINST_STANCES,
     QUORUM_FOR_SUPPORTED,
     VERDICT_STRENGTH,
     best_grade,
     max_verdict_for_claims,
     max_verdict_for_sources,
+    strong_by_direction,
 )
 from app.services.tiptap import MalformedBodyError, body_text_to_doc
 
@@ -367,6 +369,108 @@ def check_no_evidence_cites_nothing(output: SynthesisOutput) -> list[ValidationF
     ]
 
 
+#: The warnings ``check_verdict_against_stance`` raises. Named together so the
+#: VALIDATE metrics can say whether a draft disagreed with its appraisal.
+STANCE_WARNING_CODES = frozenset({"verdict_against_stance", "refutation_understated"})
+
+
+def check_verdict_against_stance(
+    output: SynthesisOutput, resolved: list[ResolvedSource], payload: SynthesisInput
+) -> tuple[dict[str, dict[str, int]] | None, list[ValidationFailure]]:
+    """Check 8 — does the verdict point the way its appraised sources do?
+
+    **Warnings only, never a failure.** The labels come from a model call
+    (APPRAISE), so unlike every other check in this module this one rests on
+    something generated — and their accuracy is not measured yet. Until it is,
+    they may tell a reviewer where to look and nothing more.
+
+    Two disagreements are worth a reviewer's eye:
+
+    * ``supported`` while, for some claim, the cited trials and reviews that
+      found no effect are at least as many as those that found it.
+    * ``no_evidence`` or ``weak`` while, for some claim, at least
+      ``QUORUM_FOR_SUPPORTED`` cited trials or reviews tested it and found no
+      effect, and outnumber those that found one. That is a refuted claim
+      written up as an untested one — the readers' gloss for ``no_evidence``
+      says no study tested it — and there is no verdict for it yet.
+
+    Returns the per-claim tally (see ``grading.strong_by_direction``) for the
+    report, or None when nothing in the payload was appraised, which must read
+    as "not recorded" rather than as no conflict.
+    """
+    if not any(source.stances for source in payload.sources):
+        return None, []
+
+    cited = {source.source_id for source in resolved}
+    pairs: dict[str, list[tuple[StudyType, Stance | None]]] = {
+        claim: [] for claim in payload.target_claims
+    }
+    against: dict[str, list[str]] = {claim: [] for claim in payload.target_claims}
+    for source in payload.sources:
+        if source.source_id not in cited:
+            continue
+        for claim in source.claims:
+            if claim not in pairs:
+                continue
+            stance = source.stances.get(claim)
+            pairs[claim].append((source.study_type, stance))
+            if stance in AGAINST_STANCES:
+                against[claim].append(source.handle)
+
+    tally = {claim: strong_by_direction(cited_pairs) for claim, cited_pairs in pairs.items()}
+
+    warnings: list[ValidationFailure] = []
+    if output.verdict is Verdict.SUPPORTED:
+        conflicted = sorted(
+            claim
+            for claim, counts in tally.items()
+            if counts["against"] and counts["against"] >= counts["for"]
+        )
+        if conflicted:
+            warnings.append(
+                ValidationFailure(
+                    code="verdict_against_stance",
+                    message=(
+                        "the verdict is supported, but for "
+                        + "; ".join(
+                            f"“{claim}” {tally[claim]['for']} cited trial(s) or review(s) "
+                            f"were appraised as finding the effect and "
+                            f"{tally[claim]['against']} as finding none or the opposite "
+                            f"({_format_handles(set(against[claim]))})"
+                            for claim in conflicted
+                        )
+                        + ". Check those sources against the verdict."
+                    ),
+                    detail={"claims": conflicted, "tally": tally},
+                )
+            )
+    elif output.verdict in (Verdict.NO_EVIDENCE, Verdict.WEAK):
+        refuted = sorted(
+            claim
+            for claim, counts in tally.items()
+            if counts["against"] >= QUORUM_FOR_SUPPORTED and counts["against"] > counts["for"]
+        )
+        if refuted:
+            warnings.append(
+                ValidationFailure(
+                    code="refutation_understated",
+                    message=(
+                        f"the verdict is {output.verdict}, but "
+                        + "; ".join(
+                            f"for “{claim}” {tally[claim]['against']} cited trial(s) or "
+                            f"review(s) were appraised as testing it and finding no effect "
+                            f"or the opposite ({_format_handles(set(against[claim]))})"
+                            for claim in refuted
+                        )
+                        + ". The claim may have been tested and not borne out, which "
+                        "this verdict does not say."
+                    ),
+                    detail={"claims": refuted, "tally": tally},
+                )
+            )
+    return tally, warnings
+
+
 def check_body_parses(output: SynthesisOutput) -> list[ValidationFailure]:
     """Check 5 — the body can be turned into a document.
 
@@ -432,12 +536,17 @@ async def validate_draft(
     )
     failures.extend(verdict_failures)
 
+    # Warnings in every round: nothing is enforced on the labels yet.
+    stance_tally, stance_warnings = check_verdict_against_stance(output, resolved, payload)
+    warnings.extend(stance_warnings)
+
     report = ValidationReport(
         passed=not failures,
         citations_total=len(cited),
         citations_resolved=len(resolved),
         best_evidence_grade=grade,
         verdict_ceiling=ceiling,
+        stance_tally=stance_tally,
         failures=failures,
         warnings=warnings,
     )

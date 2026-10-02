@@ -114,6 +114,10 @@ class Trace(BaseModel):
     papers: dict[str, PaperRecord] = Field(default_factory=dict)
     rounds: list[RetrievalRound] = Field(default_factory=list)
     excerpts: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    #: APPRAISE's labels, claim -> source id -> stance, as the stage kept them.
+    stances: dict[str, dict[str, str]] = Field(default_factory=dict)
+    #: Each appraisal call's raw output, findings included.
+    appraisals: list[dict[str, Any]] = Field(default_factory=list)
     synthesis_input: dict[str, Any] | None = None
     #: Every synthesis call's output, in call order, tagged first / coverage /
     #: revision. The stage decides which one it keeps; ``final_draft`` is that.

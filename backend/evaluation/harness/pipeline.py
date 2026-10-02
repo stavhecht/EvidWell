@@ -46,10 +46,10 @@ from app.config import Settings, get_settings
 from app.domain.contracts import CandidatePaper
 from app.domain.enums import SourceApi, Verdict
 from app.evidence.grading import classify_study_type
-from app.llm.base import ExtractionClient, SynthesisClient
+from app.llm.base import AppraisalClient, ExtractionClient, SynthesisClient
 from app.llm.embeddings.base import EmbeddingProvider
 from app.llm.embeddings.factory import build_embedding_provider
-from app.llm.factory import build_generative_clients
+from app.llm.factory import build_appraisal_client, build_generative_clients
 from app.pipeline.graph import (
     MAX_REFINE_ROUNDS,
     MAX_REVISE_ROUNDS,
@@ -58,6 +58,7 @@ from app.pipeline.graph import (
     recursion_limit,
 )
 from app.pipeline.stages import PipelineContext, Stage, StageError, StageName
+from app.pipeline.steps.appraise import AppraiseStage
 from app.pipeline.steps.extract import ExtractStage
 from app.pipeline.steps.full_text import FullTextStage
 from app.pipeline.steps.persist import ValidateStage
@@ -82,6 +83,7 @@ from evaluation.harness.embeddings import CachingEmbedder
 from evaluation.harness.faults import FaultInjector
 from evaluation.harness.http import EvalHttp
 from evaluation.harness.llm import (
+    EvalAppraisalClient,
     EvalExtractionClient,
     EvalSynthesisClient,
     HallucinatingSynthesisClient,
@@ -121,6 +123,9 @@ class EvalEnvironment:
     extraction: ExtractionClient | None
     synthesis: SynthesisClient | None
     embedder: EmbeddingProvider | None
+    #: None when ``APPRAISAL_ENABLED`` is off — APPRAISE then records
+    #: ``cause: disabled``, exactly as it does in production.
+    appraisal: AppraisalClient | None = None
     #: Component -> why it is unavailable. A case needing one is SKIPPED.
     unavailable: dict[str, str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
@@ -134,8 +139,11 @@ class EvalEnvironment:
 
         extraction: ExtractionClient | None = None
         synthesis: SynthesisClient | None = None
+        appraisal: AppraisalClient | None = None
         try:
             extraction, synthesis = build_generative_clients(settings)
+            if settings.appraisal_enabled:
+                appraisal = build_appraisal_client(settings)
         except Exception as exc:
             unavailable["llm"] = f"generative clients could not be built: {exc}"
 
@@ -154,6 +162,7 @@ class EvalEnvironment:
             extraction=extraction,
             synthesis=synthesis,
             embedder=embedder,
+            appraisal=appraisal,
             unavailable=unavailable,
         )
         if mode != "replay":
@@ -183,9 +192,10 @@ class EvalEnvironment:
         def absent(models: list[str]) -> list[str]:
             return [m for m in models if m not in names and f"{m}:latest" not in names]
 
-        missing_llm = absent(
-            [self.settings.ollama_extraction_model, self.settings.ollama_synthesis_model]
-        )
+        wanted = [self.settings.ollama_extraction_model, self.settings.ollama_synthesis_model]
+        if self.settings.appraisal_enabled:
+            wanted.append(self._ollama_appraisal_model())
+        missing_llm = absent(wanted)
         if missing_llm:
             self.unavailable.setdefault(
                 "llm", f"ollama is missing model(s): {', '.join(missing_llm)}"
@@ -209,13 +219,27 @@ class EvalEnvironment:
             "synthesis_model": (
                 s.ollama_synthesis_model if provider == "ollama" else s.synthesis_model
             ),
+            # Empty settings mean the synthesis model, as in llm/factory.py.
+            "appraisal_model": (
+                (
+                    self._ollama_appraisal_model()
+                    if provider == "ollama"
+                    else s.appraisal_model or s.synthesis_model
+                )
+                if s.appraisal_enabled
+                else None
+            ),
             "embedding_model": self.embedder.model_id if self.embedder else None,
             "enabled_providers": list(s.enabled_providers),
             "retrieval_top_k": s.retrieval_top_k,
             "retrieval_min_year": s.retrieval_min_year,
             "full_text_max_papers": s.full_text_max_papers,
+            "appraisal_mode": s.appraisal_mode if s.appraisal_enabled else None,
             "mode": self.mode,
         }
+
+    def _ollama_appraisal_model(self) -> str:
+        return self.settings.ollama_appraisal_model or self.settings.ollama_synthesis_model
 
     def model_id(self, call: str) -> str:
         info = self.describe()
@@ -245,6 +269,7 @@ def check_stage_parity(settings: Settings) -> list[str]:
         StageName.RETRIEVE,
         StageName.RANK,
         StageName.FULL_TEXT,
+        StageName.APPRAISE,
         StageName.SYNTHESIZE,
         StageName.VALIDATE,
     ]
@@ -422,6 +447,11 @@ def _snapshot(trace: Trace, stage: StageName, ctx: PipelineContext) -> None:
             source_id: [excerpt.model_dump() for excerpt in excerpts]
             for source_id, excerpts in ctx.excerpts.items()
         }
+    elif stage is StageName.APPRAISE:
+        trace.stances = {
+            claim: {source_id: str(stance) for source_id, stance in labels.items()}
+            for claim, labels in ctx.stances.items()
+        }
     elif stage is StageName.SYNTHESIZE:
         if ctx.synthesis_input is not None:
             trace.synthesis_input = ctx.synthesis_input.model_dump(mode="json")
@@ -537,6 +567,19 @@ def build_stages(
             synthesis_fault,
         )
 
+    appraisal = (
+        EvalAppraisalClient(
+            env.appraisal,
+            env.model_id("appraisal"),
+            env.cassette,
+            env.mode,
+            recorder,
+            faults.component("llm_appraisal"),
+        )
+        if env.settings.appraisal_enabled
+        else None
+    )
+
     stages: list[Stage] = [
         ExtractStage(extraction),
         RetrieveStage(
@@ -555,6 +598,7 @@ def build_stages(
             RerankConfig(top_k=settings.retrieval_top_k, min_year=settings.retrieval_min_year),
         ),
         FullTextStage(EuropePMCFullText(europe_pmc), embedder, settings.full_text_max_papers),
+        AppraiseStage(appraisal, two_call=settings.appraisal_mode == "two_call"),
         SynthesizeStage(synthesis),
         ValidateStage(MemorySession(store)),  # type: ignore[arg-type]
     ]

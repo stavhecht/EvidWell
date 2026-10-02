@@ -21,7 +21,8 @@ python -m scripts.migrate                # applies migrations via asyncpg; no ps
                                          # can be rebuilt; the file's header states that
                                          # condition. 0002 swaps the subject enum
                                          # for editorial categories; 0003 moves the
-                                         # research agent onto them. Next is 0004.
+                                         # research agent onto them. 0004 adds
+                                         # article_sources.stance (APPRAISE). Next is 0005.
 python -m scripts.migrate --status
 python -m scripts.seed_admin --email you@example.com --name "Your Name"
 
@@ -140,17 +141,19 @@ the LLM generates under. If a stage's shape isn't in that file, it isn't defined
 (sentence counts, claim caps) are validators there rather than a global word count, so thin
 evidence yields a short article instead of padding.
 
-**The pipeline is eight ordered stages** — extract → retrieve → rank → full_text → synthesize →
-illustrate → validate → persist — in `pipeline/steps/`, driven by `pipeline/orchestrator.py`.
+**The pipeline is nine ordered stages** — extract → retrieve → rank → full_text → appraise →
+synthesize → illustrate → validate → persist — in `pipeline/steps/`, driven by `pipeline/orchestrator.py`.
 Each stage is `(input, ctx) -> output` and maps 1:1 onto a future Step Functions state, so keep
 stages free of transport concerns. `ILLUSTRATE` sits where it does for a reason at both ends:
 it needs `ctx.draft`, so it must follow SYNTHESIZE, and **PERSIST must stay last** because its
 write commits atomically with the run-completion row (see below). `FULL_TEXT` follows RANK so it
-reads only papers that made the cut, after the refinement loop has finished with them.
+reads only papers that made the cut, after the refinement loop has finished with them, and
+`APPRAISE` follows it for the same reason; the revision loop returns to SYNTHESIZE, not to it.
 `pipeline_stage_runs.ordinal` comes from list position *offset by the refinement round*, so runs
 recorded before illustrate existed carry `validate` at 4 and `persist` at 5 rather than 5 and 6,
-and runs before full_text (2026-09-29) carry everything from synthesize on one lower — correct
-about the pipeline they ran on, deliberately not backfilled. The orchestrator writes `pipeline_runs` / `pipeline_stage_runs` through
+and runs before full_text (2026-09-29) carry everything from synthesize on one lower, and runs
+before appraise (2026-10-02) one lower again — correct about the pipeline they ran on,
+deliberately not backfilled. The orchestrator writes `pipeline_runs` / `pipeline_stage_runs` through
 a **separate session factory**, so bookkeeping survives a rolled-back article write.
 
 **Ordering is a LangGraph `StateGraph` (`pipeline/graph.py`); everything else stayed in the
@@ -175,8 +178,8 @@ reuse RETRIEVE's list index.** `_run_stage` writes `ordinal + refine_round * len
 this wrong and the `IntegrityError` escapes the orchestrator entirely — it is raised by
 `_record_stage_start`, *before* the try block that converts stage failures — and crashes the
 worker's poll loop, leaving the run neither failed nor completed. The offset keeps ordinals
-monotonic in execution order (0..7 for an ordinary run; with one refinement 0..2, then 9, 10,
-then 11..15) and is a no-op on round 0, so an ordinary run records exactly what it always did. The **commit** boundary still keys on list
+monotonic in execution order (0..8 for an ordinary run; with one refinement 0..2, then 10, 11,
+then 12..17) and is a no-op on round 0, so an ordinary run records exactly what it always did. The **commit** boundary still keys on list
 position: "is this the last stage" is a question about the pipeline's shape, not about how many
 times it has looped. `tests/unitTest/test_orchestrator_transactions.py::test_a_refinement_pass_does_not_collide_with_its_own_stage_row`
 fails with an `IntegrityError` without the offset.
@@ -319,6 +322,89 @@ question, a sentence of more than eight words, or `unspecified` as an anchor —
 `_mesh_within` has had its chance to find a known substance inside it. **Identical searches
 run once per RETRIEVE** (`searches_shared`): two claims reducing to the same terms used to send
 every provider the same request twice.
+
+**APPRAISE records which way each source points; it changes no verdict yet.** The verdict scale
+measures support, and the cap counts a cited source toward a claim by what it was *retrieved
+for*, never by what it *found* — so two RCTs that found nothing licensed `supported` exactly as two
+that found an effect did, and on 2026-10-02 eight drafts refuting a claim ("creatine damages the
+kidneys") read `no_evidence` while citing the trials that refuted it. Retrieval was never the gap:
+queries are `<substance> AND <outcome>` with directional verbs stopworded, so null trials arrive.
+`pipeline/steps/appraise.py` makes one call per claim over its ranked sources and labels each
+pair `supports | no_effect | contradicts | unclear | off_topic`, relative to the claim *as
+written* (no kidney harm found is `no_effect` for the harm claim). This is phase 1 of a two-phase
+plan; phase 2 is a `not_supported` verdict with the same quorum as `supported` and a cap that
+counts sources by direction, and it waits on the labels' measured accuracy. Six things about it:
+
+- **It never fails a run**, like FULL_TEXT and ILLUSTRATE: `metrics.appraise.cause` is
+  `disabled`, `no_sources`, `model_error`, `partial_model_error` or `unexpected`, and the draft
+  proceeds exactly as it did before the stage existed. `APPRAISAL_ENABLED=false` switches it off.
+- **A missing label means not appraised, never `unclear`.** A skipped handle stays absent, an
+  invented one is dropped, and `article_sources.stance` is NULL for it (migration 0004) — the
+  same rule as `retraction_checked_at IS NULL`.
+- **The synthesis model is not shown the labels**, by decision. `PromptSource.stances` carries
+  them to VALIDATE and `render_source_block` ignores them; a test pins that the rendered prompt is
+  identical with and without them. Two independent readings are what make a disagreement
+  visible. If the evaluation shows the *article* model is usually the one misreading, render them.
+- **It only warns.** `check_verdict_against_stance` raises `verdict_against_stance` (`supported`
+  while trials and reviews that found nothing are at least as many as those that found the effect)
+  and `refutation_understated` (`no_evidence`/`weak` while ≥2 of them found nothing and outnumber
+  the rest) as *warnings* in every round, because the labels come from a model and are unmeasured.
+  `ValidationReport.stance_tally` records the per-claim counts on every report (None when nothing
+  was appraised), so phase 2's effect can be read off real articles before anyone builds it.
+- **`Stance` has no docstring** — it is part of `AppraisalOutput`, the appraisal model's grammar,
+  and a docstring would reach the model as the enum's description. Same trap as `Category`.
+- **It runs on `llama3.1:8b`, not the synthesis model, on measurement** (`OLLAMA_APPRAISAL_MODEL`
+  default). Over 132 blind-labelled (source, claim) pairs on 2026-10-02, qwen2.5:7b *flipped* the
+  direction of 15 of 54 studies that test the claim — it reads good news as support, so a coffee
+  study finding a heart benefit "supported" the claim "has no effect on heart health" — while
+  llama flipped none. A flipped label is the error that would push a verdict the wrong way.
+- **Relevance comes before direction, in one call, anchored on a quote.** The commonest error
+  on both models was giving a direction to a study that measured something else ("colds were
+  shorter" counted for "prevents colds"; melatonin-for-migraine for falling asleep faster). The
+  model now writes `claim_outcome` once — the *change* the claim promises, not just its topic —
+  then per source a word-for-word `quote` of the abstract's sentence reporting that outcome (or
+  "none"), `reports_claim_outcome`, and only then `stance`. `appraise.label` stores `off_topic`
+  when there is no quote or the boolean is false (`metrics.appraise.relevance_overrides`).
+- **Four designs were measured on 2026-10-02 (llama3.1:8b, 132 blind-labelled pairs, 11
+  claims, three held out from the prompt work); this one won.** Right direction overall /
+  flipped / off-topic caught: direction alone 61% / 0 / 23%; one call with free-text summaries
+  72–75% / 5 / 72%; **one call with quotes (current) 79% / 2 / 75%**; two calls, relevance then
+  direction on the relevant sources only, 78% / 2 / 69%. The two-call design looked best when
+  *simulated* from earlier runs (80% / 0 / 72%) and lost that edge when built — the "0 flips"
+  was partly luck on those items; the two flipping designs flipped *different* studies, so ~3%
+  looks like this model's floor. The quote design is also one call (~60 s a claim) against two
+  (~78 s).
+- **Both leading designs are in the tree: `APPRAISAL_MODE=one_call` (default) | `two_call`.** The
+  winner is a fact about the model, not the task — a larger or hosted model may reverse it — so
+  the two-call mode (`RelevanceOutput`, then `DirectionOutput` shown only the relevant sources;
+  a claim with nothing relevant skips the second call) is kept as a tested mode rather than
+  deleted. Re-measure before switching: `metrics.appraise.mode` records which one ran, and the
+  one-call prompt's bytes are what the numbers above describe.
+- **A refutation must quote the outcome (`appraise.label`, `metrics.appraise.outcome_guard_overrides`).**
+  After the designs above, the commonest directional error was a *made-up refutation* — 11 of 131
+  labels — where llama quoted a sentence about something else ("increases in strength" for a
+  claim about endurance) and called it `no_effect`. A `no_effect` or `contradicts` label whose
+  quote shares no word (up to a suffix) with `claim_outcome` is now stored `off_topic`; `supports`
+  is exempt, because synonyms ("TG") would turn real support into a false off-topic call.
+  Measured: made-up refutations 11 → 6, flips 2 → 0, but real refutations missed 9 → 16 (a quote
+  like "the pooled RR was 0.96" names no outcome). It cannot see a shared word answering a
+  different question ("muscle strength" against "muscle gain"). **A prompt rule against the same
+  error was tried and reverted**: "silence is not a result" left made-up refutations at 12 and
+  made every other number slightly worse — llama does not follow it, so the rule is in code.
+- **The eval keys appraisal recordings by prompt too** (`harness/llm.py::_APPRAISAL_PROMPTS`), so
+  a prompt edit re-runs APPRAISE instead of replaying the old prompt's answers. Synthesis
+  recordings are still keyed by model + payload + feedback only: after editing the *synthesis*
+  prompt, run the eval with `--mode live` or the drafts are the old prompt's.
+- **`items` has `min_length=1`.** llama once wrote `claim_outcome` and stopped with an empty
+  list; the bound puts `minItems` in the grammar and sends an empty answer through the repair
+  retry rather than leaving every source unappraised.
+- **Cost: one call per claim, ~55–110 s each on llama** (~12 abstracts, ~6,600 input tokens) —
+  up to six per run. The evaluation reports `source_stance_accuracy`,
+  `source_stance_direction_accuracy`, `stance_coverage` and `stance_disagreement_rate` as INFO,
+  scored against hand labels in a case's `expected_stances` — labelled from the abstract only,
+  because that is all APPRAISE sees, and keyed **per claim** (one paper can point different
+  ways for two claims). Eleven cases carry the 132 labels the designs above were measured on. The prompt's worked examples deliberately name no claim in
+  the evaluation set; the first version used creatine-and-kidneys, which is case `adv_010`.
 
 **Every query must name a substance, and failing to is a stage failure — not a warning.**
 `QueryStrategy.build()` takes `product` and `ingredients` separately: ingredients name the

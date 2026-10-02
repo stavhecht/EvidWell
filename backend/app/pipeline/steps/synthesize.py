@@ -371,6 +371,8 @@ class SynthesizeStage:
         by_handle: dict[str, PromptSource] = {}
         for claim, ranked in ctx.ranked.items():
             for entry in ranked:
+                # For VALIDATE only: render_source_block does not show it.
+                stance = ctx.stances.get(claim, {}).get(entry.source_id)
                 if (existing := by_handle.get(entry.citation_handle)) is not None:
                     # Still one entry in the prompt — but it now records every
                     # claim it answers, which is what the per-claim quorum
@@ -378,6 +380,8 @@ class SynthesizeStage:
                     # this did, made a shared source invisible to one of them.
                     if claim not in existing.claims:
                         existing.claims.append(claim)
+                    if stance is not None:
+                        existing.stances[claim] = stance
                     continue
                 by_handle[entry.citation_handle] = PromptSource(
                     handle=entry.citation_handle,
@@ -389,6 +393,7 @@ class SynthesizeStage:
                     source_id=entry.source_id,
                     claims=[claim],
                     excerpts=ctx.excerpts.get(entry.source_id, []),
+                    stances={claim: stance} if stance is not None else {},
                 )
 
         ordered = sorted(by_handle.values(), key=lambda s: int(s.handle[1:]))

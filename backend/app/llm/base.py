@@ -11,8 +11,12 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from app.domain.contracts import (
+    AppraisalInput,
+    AppraisalOutput,
+    DirectionOutput,
     ExtractionInput,
     ExtractionOutput,
+    RelevanceOutput,
     SynthesisInput,
     SynthesisOutput,
 )
@@ -92,6 +96,30 @@ class SynthesisClient(Protocol):
         Keyword-only and defaulted so that a caller which does not re-prompt is
         written the same way it always was.
         """
+        ...
+
+
+class AppraisalClient(Protocol):
+    """APPRAISE's calls — which way each ranked source points for one claim.
+    ``APPRAISAL_MODE`` decides whether the stage uses ``appraise`` or the
+    ``relevance`` and ``direction`` pair.
+
+    Labels only. What a label is allowed to change (today: nothing but a
+    reviewer warning) is decided in ``evidence/validation.py``, not here.
+    """
+
+    async def appraise(self, payload: AppraisalInput) -> LLMResult[AppraisalOutput]:
+        """``one_call`` mode: label every source in ``payload`` against its claim."""
+        ...
+
+    async def relevance(self, payload: AppraisalInput) -> LLMResult[RelevanceOutput]:
+        """``two_call`` mode, first call: whether each source measured the claim's
+        outcome."""
+        ...
+
+    async def direction(self, payload: AppraisalInput) -> LLMResult[DirectionOutput]:
+        """``two_call`` mode, second call: which way each source points. Given
+        only the sources the first call accepted."""
         ...
 
 

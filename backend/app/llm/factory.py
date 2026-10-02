@@ -19,12 +19,14 @@ import logging
 
 from app.config import Settings
 from app.llm.anthropic_client import (
+    AnthropicAppraisalClient,
     AnthropicExtractionClient,
     AnthropicSynthesisClient,
     build_anthropic_client,
 )
-from app.llm.base import ExtractionClient, LLMError, SynthesisClient
+from app.llm.base import AppraisalClient, ExtractionClient, LLMError, SynthesisClient
 from app.llm.ollama_client import (
+    OllamaAppraisalClient,
     OllamaExtractionClient,
     OllamaSynthesisClient,
     build_ollama_client,
@@ -73,6 +75,43 @@ def build_generative_clients(
         return (
             AnthropicExtractionClient(anthropic_client, settings.extraction_model),
             AnthropicSynthesisClient(anthropic_client, settings.synthesis_model),
+        )
+
+    raise LLMError(
+        f"unknown llm_provider {settings.llm_provider!r}; "
+        "expected 'ollama' or 'anthropic'"
+    )
+
+
+def build_appraisal_client(settings: Settings) -> AppraisalClient:
+    """The client for APPRAISE, on the configured provider.
+
+    A function of its own rather than a third element of
+    ``build_generative_clients``'s tuple, so callers that only need the two
+    original calls are unchanged.
+    It opens its own transport; one more connection pool is cheap next to a
+    model call. An empty model setting means the synthesis model.
+
+    Raises:
+        LLMError: unknown provider name, or a hosted provider with no API key.
+    """
+    name = settings.llm_provider.lower()
+
+    if name == "ollama":
+        model = settings.ollama_appraisal_model or settings.ollama_synthesis_model
+        logger.info("appraisal: ollama (%s)", model)
+        return OllamaAppraisalClient(
+            build_ollama_client(settings.ollama_base_url, settings.ollama_timeout_seconds),
+            model,
+        )
+
+    if name == "anthropic":
+        if not settings.anthropic_api_key:
+            raise LLMError("ANTHROPIC_API_KEY is not set (llm_provider='anthropic')")
+        model = settings.appraisal_model or settings.synthesis_model
+        logger.info("appraisal: anthropic (%s)", model)
+        return AnthropicAppraisalClient(
+            build_anthropic_client(settings.anthropic_api_key), model
         )
 
     raise LLMError(

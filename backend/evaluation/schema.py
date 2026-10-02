@@ -28,7 +28,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.domain.enums import Verdict
+from app.domain.enums import Stance, Verdict
 
 
 class Category(StrEnum):
@@ -165,7 +165,8 @@ class FaultSpec(BaseModel):
     ``target`` is a tool name as the trace records it (``pubmed``,
     ``europe_pmc``, ``openalex``, ``europe_pmc_lookup``, ``europe_pmc_fulltext``),
     ``all_search`` for every search provider at once, or a component
-    (``llm_extraction``, ``llm_synthesis``, ``embeddings``, ``vector_store``).
+    (``llm_extraction``, ``llm_appraisal``, ``llm_synthesis``, ``embeddings``,
+    ``vector_store``).
     """
 
     target: str
@@ -254,6 +255,18 @@ class EvalCase(BaseModel):
     relevant_ids: list[str] = Field(default_factory=list)
     requires_recency: bool = False
 
+    # --- appraisal --------------------------------------------------------------
+    #: Hand-labelled direction of known papers, **per claim**: claim text, as
+    #: extraction worded it in the recorded run, to ``pmid:<id>`` / ``doi:<doi>``
+    #: to stance. Per claim because a label is about a (paper, claim) pair — the
+    #: same coffee trial ``supports`` "has no effect on heart health" and
+    #: ``no_effect`` for "is bad for heart health". Labelled from the abstract
+    #: against the claim as written, never from what is known about the
+    #: substance elsewhere: APPRAISE is only shown the abstract. Scored only
+    #: where APPRAISE labelled that paper for that claim; a claim worded
+    #: differently in a new run is reported as unmatched, not scored.
+    expected_stances: dict[str, dict[str, Stance]] = Field(default_factory=dict)
+
     # --- tools ----------------------------------------------------------------
     expected_tools: list[str] | None = None
     forbidden_tools: list[str] = Field(default_factory=list)
@@ -288,6 +301,17 @@ class EvalCase(BaseModel):
             raise ValueError(f"{self.id}: a case needs a query, turns or a research_scenario")
         if self.query and self.turns:
             raise ValueError(f"{self.id}: give either query or turns, not both")
+        malformed = [
+            key
+            for labels in self.expected_stances.values()
+            for key in labels
+            if not key.startswith(("pmid:", "doi:"))
+        ]
+        if malformed:
+            raise ValueError(
+                f"{self.id}: expected_stances keys must be pmid:<id> or doi:<doi>, "
+                f"got {malformed}"
+            )
         return self
 
     @property

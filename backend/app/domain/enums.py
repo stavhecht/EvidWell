@@ -34,6 +34,34 @@ class Verdict(StrEnum):
     NO_EVIDENCE = "no_evidence"
 
 
+# Which way one source's reported finding points, for one claim.
+#
+# Assigned by the APPRAISE stage (``pipeline/steps/appraise.py``) from the
+# abstract, and recorded per (source, claim) on ``article_sources.stance``. It
+# is a reading of what the paper *found*, which is a different fact from the
+# claim it was *retrieved for* — the verdict scale above measures only support,
+# and without this nothing in the system could tell a trial that found the
+# effect from one that tested for it and found none.
+#
+# **Relative to the claim as written.** For "creatine damages the kidneys", a
+# trial that found no kidney harm is ``NO_EFFECT``: the claim was tested and not
+# borne out. It is not ``SUPPORTS`` because the result was reassuring.
+#
+# ``UNCLEAR`` is a real answer (the abstract states no result for this outcome);
+# a source the model never labelled has **no** stance at all — ``NULL`` in the
+# column — and must never be read as any of these.
+#
+# **No docstring, on purpose.** This enum is part of ``AppraisalOutput``, the
+# appraisal model's generation grammar, and Pydantic would put a docstring there
+# as the enum's description — the same trap as ``research.contracts.Category``.
+class Stance(StrEnum):
+    SUPPORTS = "supports"
+    NO_EFFECT = "no_effect"
+    CONTRADICTS = "contradicts"
+    UNCLEAR = "unclear"
+    OFF_TOPIC = "off_topic"
+
+
 class StudyType(StrEnum):
     """Evidence-quality hierarchy, weakest to strongest.
 

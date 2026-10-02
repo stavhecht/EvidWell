@@ -11,6 +11,13 @@
 
 export type Verdict = "supported" | "mixed" | "weak" | "no_evidence";
 
+/**
+ * Which way one source's finding points for one claim, as the pipeline's
+ * APPRAISE stage read its abstract. Relative to the claim as written: a trial
+ * finding no harm for "X damages the kidneys" is `no_effect`.
+ */
+export type Stance = "supports" | "no_effect" | "contradicts" | "unclear" | "off_topic";
+
 export type StudyType =
   | "unknown"
   | "in_vitro"
@@ -250,6 +257,12 @@ export interface ReviewSource extends Source {
    * Empty for most sources; only a few open-access papers get them.
    */
   excerpts: Excerpt[];
+  /**
+   * Which way APPRAISE found this source pointing for `claim`. `null` means
+   * not appraised (an older article, appraisal off, or the call failed), which
+   * is not the same as `unclear`.
+   */
+  stance: Stance | null;
 }
 
 /** A passage from a paper's full text. `section` is its heading, e.g. "Results". */

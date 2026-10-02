@@ -34,6 +34,7 @@ from app.domain.contracts import (
     SynthesisOutput,
     ValidationReport,
 )
+from app.domain.enums import Stance
 from app.llm.base import TokenUsage
 
 
@@ -46,7 +47,8 @@ class StageName(StrEnum):
     inserted at position 4, so runs recorded before it existed carry
     ``validate`` at ordinal 4 and ``persist`` at 5 rather than 5 and 6.
     ``FULL_TEXT`` was then inserted at position 3 (2026-09-29), shifting every
-    later stage up by one again. Nothing joins the number to the name — the
+    later stage up by one again, and ``APPRAISE`` at position 4 (2026-10-02)
+    did the same. Nothing joins the number to the name — the
     column only orders a single run's stages for display — so the old rows are
     correct about the pipeline they ran on. Do not backfill them into a claim
     about a pipeline that did not exist yet.
@@ -61,6 +63,7 @@ class StageName(StrEnum):
     RETRIEVE = "retrieve"
     RANK = "rank"
     FULL_TEXT = "full_text"
+    APPRAISE = "appraise"
     SYNTHESIZE = "synthesize"
     ILLUSTRATE = "illustrate"
     VALIDATE = "validate"
@@ -124,6 +127,13 @@ class PipelineContext(BaseModel):
     #: source id. Empty when none were chosen or Europe PMC could not be
     #: reached — an ordinary outcome: the article is then written from abstracts.
     excerpts: dict[str, list[Excerpt]] = Field(default_factory=dict)
+
+    # APPRAISE
+    #: Which way each ranked source points, keyed claim -> source id. A pair
+    #: missing here was not appraised (the stage was off, its call failed, or
+    #: the model skipped the handle) — never read that as ``unclear``. Built
+    #: once, after the refinement loop, and reused unchanged by a revision.
+    stances: dict[str, dict[str, Stance]] = Field(default_factory=dict)
 
     # SYNTHESIZE
     #: The exact payload rendered into the synthesis prompt. Carried forward

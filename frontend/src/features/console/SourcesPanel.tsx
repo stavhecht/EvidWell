@@ -29,6 +29,7 @@ import { useEffect, useRef } from "react";
 import { GradeBar } from "@/features/evidence/GradeBar";
 import {
   GRADE_NOTES,
+  STANCE_LABELS,
   STUDY_TYPE_LABELS,
   VERDICT_LABELS,
   VERDICT_ORDER,
@@ -66,6 +67,10 @@ interface Props {
 
 export function SourcesPanel({ sources, focusedHandle }: Props) {
   const byClaim = groupByClaim(sources);
+  // Articles drafted before APPRAISE existed have no labels at all; saying
+  // "direction not checked" on every one of their rows would be noise. Once
+  // any source carries a label, a missing one is worth saying.
+  const appraised = sources.some((source) => source.stance !== null);
 
   return (
     <div className={PANEL_BLOCK}>
@@ -80,6 +85,7 @@ export function SourcesPanel({ sources, focusedHandle }: Props) {
                 key={source.sourceId + claim}
                 source={source}
                 focused={focusedHandle === source.citationHandle}
+                appraised={appraised}
               />
             ))}
           </ul>
@@ -89,7 +95,15 @@ export function SourcesPanel({ sources, focusedHandle }: Props) {
   );
 }
 
-function SourceRow({ source, focused }: { source: ReviewSource; focused: boolean }) {
+function SourceRow({
+  source,
+  focused,
+  appraised,
+}: {
+  source: ReviewSource;
+  focused: boolean;
+  appraised: boolean;
+}) {
   const ref = useRef<HTMLLIElement>(null);
 
   useEffect(() => {
@@ -117,6 +131,12 @@ function SourceRow({ source, focused }: { source: ReviewSource; focused: boolean
         {STUDY_TYPE_LABELS[source.studyType]} ·{" "}
         {source.wasCited ? "cited" : "retrieved, not cited"}
       </div>
+      {appraised ? (
+        <div className={PANEL_SOURCE_META}>
+          Appraised:{" "}
+          {source.stance !== null ? STANCE_LABELS[source.stance] : "direction not checked"}
+        </div>
+      ) : null}
       <div className={PANEL_SOURCE_META}>
         {[
           source.journal,

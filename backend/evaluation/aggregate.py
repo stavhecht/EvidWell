@@ -65,6 +65,10 @@ DESCRIPTIONS = {
     "recency_cited_fraction": "cited sources from the last N years, on 'latest' queries",
     "expected_claims_present_rate": "expected claims the judge found in the article",
     "forbidden_claim_rate": "articles asserting a forbidden claim or phrase",
+    "source_stance_accuracy": "APPRAISE labels matching the case's hand labels (exact)",
+    "source_stance_direction_accuracy": "APPRAISE labels pointing the right way",
+    "stance_coverage": "ranked (source, claim) pairs APPRAISE labelled",
+    "stance_disagreement_rate": "final drafts whose verdict ran against their sources' labels",
     "failure_recovery_rate": "failure cases ending controlled, bounded and unfabricated",
     "fallback_success_rate": "failure cases whose fallback tool still answered",
     "infinite_loop_rate": "failure cases that looped or never terminated",
@@ -380,6 +384,33 @@ def aggregate(results: list[dict[str, Any]], ks: list[int]) -> dict[str, dict[st
                 or any(c["asserted"] for c in a["forbidden_claims"])
             ),
         ),
+    )
+
+    # --- appraisal (recorded, gates nothing yet; INFO until thresholds are set) --
+    # Pooled over (source, claim) pairs rather than averaged per case: one case
+    # with twelve labelled gold papers says more than one with a single paper.
+    st = [r["stance"] for r in quality if (r.get("stance") or {}).get("applicable")]
+    scored = sum(s["scored"] for s in st)
+    put(
+        "source_stance_accuracy",
+        "answers",
+        (sum(s["correct"] for s in st) / scored if scored else None, scored),
+    )
+    put(
+        "source_stance_direction_accuracy",
+        "answers",
+        (sum(s["direction_correct"] for s in st) / scored if scored else None, scored),
+    )
+    offered = sum(s["offered"] for s in st)
+    put(
+        "stance_coverage",
+        "answers",
+        (sum(s["labelled"] for s in st) / offered if offered else None, offered),
+    )
+    put(
+        "stance_disagreement_rate",
+        "answers",
+        _rate([s for s in st if s["disagrees"] is not None], lambda s: s["disagrees"]),
     )
 
     # --- failure handling --------------------------------------------------------

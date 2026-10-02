@@ -25,7 +25,7 @@ from app.domain.models import PipelineRun, PipelineStageRun
 from app.imagery.factory import build_image_client
 from app.llm.base import TokenUsage
 from app.llm.embeddings.factory import build_embedding_provider
-from app.llm.factory import build_generative_clients
+from app.llm.factory import build_appraisal_client, build_generative_clients
 from app.pipeline.graph import (
     MAX_REFINE_ROUNDS,
     build_pipeline_graph,
@@ -38,6 +38,7 @@ from app.pipeline.stages import (
     StageName,
     StageUsage,
 )
+from app.pipeline.steps.appraise import AppraiseStage
 from app.pipeline.steps.extract import ExtractStage
 from app.pipeline.steps.full_text import FullTextStage
 from app.pipeline.steps.illustrate import IllustrateStage, IllustrationConfig
@@ -201,15 +202,15 @@ class PipelineOrchestrator:
         worker's poll loop, outside any stage's failure handling.
 
         Offsetting by the round keeps every row unique without a migration, and
-        keeps the numbers monotonic in execution order — round 0 runs 0..6, and a
-        run that refines continues 8, 9, then 10..13 — which is what the console
+        keeps the numbers monotonic in execution order — round 0 runs 0..8, and a
+        run that refines continues 10, 11, then 12..17 — which is what the console
         sorts on. On ``refine_round`` 0 this is exactly the list position, so an
         ordinary run records precisely the ordinals it always did.
 
         The VALIDATE -> SYNTHESIZE revision loop adds its round to the same
         offset. Refinement always happens before revision (RANK precedes
         VALIDATE), so the sum still only grows in execution order: a run that
-        does both writes its second SYNTHESIZE at 4 + 2 * len(stages).
+        does both writes its second SYNTHESIZE at 5 + 2 * len(stages).
 
         The *commit* boundary still keys on the list position, because "is this
         the last stage" is a question about the pipeline's shape and not about
@@ -531,7 +532,7 @@ class PipelineOrchestrator:
 
 
 def build_default_pipeline(session: AsyncSession, settings: Settings) -> list[Stage]:
-    """Assemble the eight stages with their dependencies.
+    """Assemble the nine stages with their dependencies.
 
     The single place where concrete clients (Ollama or Claude, an embedding
     provider, PubMed) are bound to the Protocols the stages depend on — so
@@ -570,6 +571,15 @@ def build_default_pipeline(session: AsyncSession, settings: Settings) -> list[St
         # after the refinement loop for the same reason: RANK's conditional
         # edge sends a thin run back to RETRIEVE before this ever runs.
         FullTextStage(EuropePMCFullText(europe_pmc), embedder, settings.full_text_max_papers),
+        # After the refinement loop, so it labels the final ranked set once, and
+        # before SYNTHESIZE, which copies the labels onto the prompt payload for
+        # VALIDATE (without rendering them). The revision loop goes back to
+        # SYNTHESIZE, not here, and reuses them. Constructed with no client
+        # when switched off, for the same reason as IllustrateStage below.
+        AppraiseStage(
+            build_appraisal_client(settings) if settings.appraisal_enabled else None,
+            two_call=settings.appraisal_mode == "two_call",
+        ),
         SynthesizeStage(synthesis_client),
         # After SYNTHESIZE because it illustrates the draft, and before PERSIST
         # because PERSIST has to stay last: its write commits together with the

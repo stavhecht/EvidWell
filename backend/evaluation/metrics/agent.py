@@ -40,6 +40,8 @@ from evaluation.schema import TERMINATED, Behavior, EvalCase, Outcome
 MAX_SYNTHESIS_CALLS = 1 + 1 + MAX_REVISE_ROUNDS
 #: A run that makes more HTTP calls than this is running away, whatever the cause.
 HTTP_CALL_BUDGET = 400
+#: Model calls, as the trace names them. Everything else but embeddings is HTTP.
+LLM_TOOLS = frozenset({"llm_extraction", "llm_appraisal", "llm_synthesis"})
 
 
 def expected_tools(case: EvalCase, enabled: list[str]) -> set[str]:
@@ -65,9 +67,7 @@ def _calls(trace: dict[str, Any]) -> list[dict[str, Any]]:
 
 def call_statistics(trace: dict[str, Any]) -> dict[str, Any]:
     calls = _calls(trace)
-    http = [
-        c for c in calls if c["tool"] not in {"llm_extraction", "llm_synthesis", "embeddings"}
-    ]
+    http = [c for c in calls if c["tool"] not in LLM_TOOLS | {"embeddings"}]
     # Same request, in order. A repeat right after a throttle is a retry.
     by_request: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for call in http:
@@ -96,7 +96,7 @@ def call_statistics(trace: dict[str, Any]) -> dict[str, Any]:
         "http_calls": len(http),
         "http_live": sum(1 for c in http if not c.get("cached") and c["status"] != "fault"),
         "http_cached": sum(1 for c in http if c.get("cached")),
-        "llm_calls": sum(1 for c in calls if c["tool"] in {"llm_extraction", "llm_synthesis"}),
+        "llm_calls": sum(1 for c in calls if c["tool"] in LLM_TOOLS),
         "synthesis_calls": per_tool["llm_synthesis"],
         "embedding_calls": per_tool["embeddings"],
         "per_tool": dict(per_tool),

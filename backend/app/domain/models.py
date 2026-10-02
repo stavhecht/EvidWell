@@ -50,6 +50,7 @@ from app.domain.enums import (
     ResearchRunStatus,
     RunOrigin,
     RunStatus,
+    Stance,
     StudyType,
     Subject,
     UserRole,
@@ -312,6 +313,9 @@ class ArticleSource(Base):
     #: The full-text excerpts shown to the synthesis model for this source, as
     #: a list of {"section", "text"}. NULL when none were shown.
     excerpts: Mapped[list[dict[str, str | None]] | None] = mapped_column(NullableJSONB)
+    #: Which way APPRAISE found this source pointing for this claim. NULL means
+    #: not appraised, never ``unclear`` (migration 0004).
+    stance: Mapped[Stance | None] = mapped_column(pg_enum(Stance, "source_stance"))
 
     article: Mapped[Article] = relationship(back_populates="sources")
     source: Mapped[Source] = relationship()

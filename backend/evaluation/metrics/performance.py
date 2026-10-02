@@ -77,6 +77,7 @@ def case_performance(trace: dict[str, Any]) -> dict[str, Any]:
         "live_latency_ms_by_tool": dict(by_tool),
         "search_live_ms": sum(sum(by_tool[t]) for t in search_tools if t in by_tool),
         "llm_live_ms": sum(by_tool.get("llm_extraction", []))
+        + sum(by_tool.get("llm_appraisal", []))
         + sum(by_tool.get("llm_synthesis", [])),
         "retrieval_s": (by_stage.get("retrieve", 0) + by_stage.get("rank", 0)) / 1000,
         "calls": len(calls),

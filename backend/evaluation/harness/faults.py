@@ -19,7 +19,9 @@ from evaluation.harness.trace import SEARCH_TOOLS
 from evaluation.schema import FaultSpec
 
 #: Components that are faulted by their eval wrapper rather than over HTTP.
-COMPONENT_TARGETS = frozenset({"llm_extraction", "llm_synthesis", "embeddings", "vector_store"})
+COMPONENT_TARGETS = frozenset(
+    {"llm_extraction", "llm_appraisal", "llm_synthesis", "embeddings", "vector_store"}
+)
 
 
 class FaultInjector:

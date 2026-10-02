@@ -24,6 +24,7 @@ from app.domain.enums import (
     ResearchRunMode,
     ResearchRunStatus,
     RunStatus,
+    Stance,
     StudyType,
     Subject,
     UserRole,
@@ -126,6 +127,9 @@ class ReviewSourceOut(CamelModel):
     #: may quote a number from one of these that the abstract does not state,
     #: so the reviewer needs them to check it. Empty for most sources.
     excerpts: list[ExcerptOut] = Field(default_factory=list)
+    #: Which way APPRAISE found this source pointing for ``claim``. ``None``
+    #: means not appraised, which the desk must say rather than leave blank.
+    stance: Stance | None = None
 
 
 class ValidationFailureOut(CamelModel):

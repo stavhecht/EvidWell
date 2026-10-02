@@ -32,7 +32,7 @@ from evaluation.evaluators.text import (
     statements,
 )
 from evaluation.harness.trace import SEARCH_TOOLS, Trace
-from evaluation.metrics import agent, answers, citations, performance, retrieval
+from evaluation.metrics import agent, answers, citations, performance, retrieval, stance
 from evaluation.schema import Behavior, EvalCase, Outcome
 
 logger = logging.getLogger(__name__)
@@ -133,6 +133,15 @@ async def score_case(case: EvalCase, trace: Trace, ev: Evaluators) -> dict[str, 
     _score_query(case, t, checks, result)
     _score_agent(case, t, checks, result, enabled)
     _score_retrieval(case, t, checks, result, ev)
+    # Recorded, not checked: the labels gate nothing yet, so a case should not
+    # pass or fail on them. They are aggregated as INFO metrics.
+    result["stance"] = stance.evaluate(
+        t,
+        {
+            claim: {key: str(value) for key, value in labels.items()}
+            for claim, labels in case.expected_stances.items()
+        },
+    )
     if t.get("final_draft"):
         await _score_answer(case, t, checks, result, ev)
     if case.is_failure_case:
