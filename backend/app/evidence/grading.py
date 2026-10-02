@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import re
 
-from app.domain.enums import EVIDENCE_RANK, StudyType, Verdict
+from app.domain.enums import EVIDENCE_RANK, Stance, StudyType, Verdict
 
 #: Verdict ceiling by the strongest study type among cited sources.
 #:
@@ -283,6 +283,36 @@ def max_verdict_for_claims(by_claim: dict[str, list[StudyType]]) -> Verdict:
         (max_verdict_for_sources(types) for types in by_claim.values()),
         key=lambda verdict: VERDICT_STRENGTH[verdict],
     )
+
+
+#: Stances that count against a claim: it was tested and not borne out.
+AGAINST_STANCES: frozenset[Stance] = frozenset({Stance.NO_EFFECT, Stance.CONTRADICTS})
+
+
+def strong_by_direction(cited: list[tuple[StudyType, Stance | None]]) -> dict[str, int]:
+    """Which way the supported-tier sources cited for one claim point.
+
+    Counts only the study types whose ceiling is ``supported`` — the set the
+    quorum counts — because a confident verdict in either direction could only
+    rest on those. ``unclear`` and ``off_topic`` count in neither direction;
+    ``unlabelled`` is sources APPRAISE never labelled, kept apart so "no
+    conflict" cannot be read off a claim nobody looked at.
+
+    Recorded on every report and enforced nowhere yet: the verdict cap above is
+    still stance-blind, and this only drives a reviewer warning while the
+    labels' accuracy is measured (CLAUDE.md, APPRAISE).
+    """
+    tally = {"for": 0, "against": 0, "unlabelled": 0}
+    for study_type, stance in cited:
+        if VERDICT_CEILING[study_type] is not Verdict.SUPPORTED:
+            continue
+        if stance is None:
+            tally["unlabelled"] += 1
+        elif stance is Stance.SUPPORTS:
+            tally["for"] += 1
+        elif stance in AGAINST_STANCES:
+            tally["against"] += 1
+    return tally
 
 
 def max_verdict_for_grade(best_grade: StudyType) -> Verdict:

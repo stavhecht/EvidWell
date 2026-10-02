@@ -24,7 +24,7 @@ from pydantic import (
     model_validator,
 )
 
-from app.domain.enums import SourceApi, StudyType, Verdict
+from app.domain.enums import SourceApi, Stance, StudyType, Verdict
 
 #: One inline citation marker as the model emits it: ``[S1]``, or ``[S1, S5]``
 #: when several sources back one statement.
@@ -71,7 +71,7 @@ _HANDLE_IN_MARKER_RE = re.compile(r"S\d+")
 #: into a GBNF grammar and its converter does not understand the ``\d`` escape:
 #: with ``\d`` the whole request fails at 400 "failed to parse grammar", which
 #: breaks every synthesis call rather than just a malformed one. Verified
-#: against llama3.1:8b — see tests/test_content.py.
+#: against llama3.1:8b — see tests/unitTest/test_content.py.
 CitationHandle = Annotated[str, StringConstraints(pattern=r"^S[0-9]+$")]
 
 #: The shorthand a model reaches for when every source backs the same claim:
@@ -92,7 +92,17 @@ _SENTENCE_RE = re.compile(r"[.!?](?:\s|$)")
 
 
 def count_sentences(text: str) -> int:
-    return len([s for s in _SENTENCE_RE.split(text.strip()) if s.strip()])
+    """Sentences, counted with citation markers removed.
+
+    A marker after the full stop ("…fell. [S5]") would otherwise be split off
+    as a sentence of its own, and models place markers there often. Measured
+    2026-10-01: a correct five-sentence evidence beat ending ". [S5]" counted
+    as six, failed the contract twice, and the whole run failed with no
+    article. Removing a marker never merges two sentences, so this still never
+    under-counts.
+    """
+    stripped = CITATION_MARKER_RE.sub("", text)
+    return len([s for s in _SENTENCE_RE.split(stripped.strip()) if s.strip()])
 
 
 def extract_handles(text: str) -> set[str]:
@@ -228,6 +238,214 @@ class RankedSource(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Appraisal — which way each ranked source points, per claim
+# ---------------------------------------------------------------------------
+
+
+class AppraisalSource(BaseModel):
+    """One ranked source as the appraisal prompt renders it."""
+
+    handle: str = Field(pattern=r"^S\d+$")
+    title: str
+    abstract: str
+    study_type: StudyType
+
+
+class AppraisalInput(BaseModel):
+    """One claim and the sources RANK kept for it.
+
+    One call per claim rather than one per article: a label is a judgement
+    about a (source, claim) pair, and a paper retrieved for two claims can
+    point different ways on each.
+    """
+
+    product: str
+    claim: str
+    sources: list[AppraisalSource] = Field(min_length=1)
+
+
+class AppraisalItem(BaseModel):
+    """One source's label, reasoned in the order the fields are declared.
+
+    The order is the method, because a small model fills the grammar top to
+    bottom: find the abstract's own sentence about the claim's outcome, say
+    whether it really is about that outcome, then label *that sentence*.
+
+    A verbatim ``quote`` replaced two free-text fields (what the study measured,
+    and what it found), each for a measured failure on 2026-10-02. A summary of
+    what a study measured named its headline topic and dropped secondary
+    outcomes, so a vitamin D review reporting hip fractures was summarised as
+    "bone density" and ruled off topic. And a paraphrased finding could
+    disagree with the label beside it ("significantly improved muscle strength"
+    labelled ``no_effect``). Searching the abstract for the outcome finds it
+    wherever it is reported, and a label of a quoted sentence has one thing to
+    agree with. ``appraise.label`` stores ``off_topic`` when there is no quote
+    or ``reports_claim_outcome`` is false. The quote is dropped once the label
+    is read.
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "description": "The abstract's sentence about the claim's outcome, and its label."
+        }
+    )
+
+    handle: CitationHandle = Field(description="The source's handle, e.g. S3.")
+    quote: str = Field(
+        description=(
+            "The sentence from this abstract that reports a result for claim_outcome, "
+            "copied word for word, or none."
+        )
+    )
+    reports_claim_outcome: bool = Field(
+        description=(
+            "true only if quote reports a result for claim_outcome itself. false for a "
+            "related outcome, and false when quote is none."
+        )
+    )
+    stance: Stance = Field(
+        description=(
+            "supports: the quote reports the claimed effect. no_effect: it reports no "
+            "meaningful difference. contradicts: it reports the opposite. unclear: the "
+            "result is split or uncertain. off_topic: there is no quote."
+        )
+    )
+
+
+class AppraisalOutput(BaseModel):
+    """Structured-output schema for the appraisal call.
+
+    ``claim_outcome`` is written once, before any source, so every
+    ``reports_claim_outcome`` is a comparison against one stated outcome rather
+    than against the model's shifting sense of what the claim meant. It names
+    the *change* the claim promises, because naming only the topic was measured
+    to let related outcomes through: "common cold" for "prevents the common
+    cold" admitted a study of how long colds last.
+    The grammar cannot force one item per handle, so ``AppraiseStage`` treats
+    a missing handle as *not appraised* and drops an invented one. It can force
+    *at least one*, and must: measured 2026-10-02, llama3.1:8b once wrote
+    ``claim_outcome`` and stopped, returning an empty list for all twelve
+    sources. ``min_length`` puts ``minItems`` in the grammar, and if a build
+    ignores it, the validator sends the call through ``_chat``'s one repair
+    retry instead of letting an empty answer through.
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "description": "The claim's outcome, then one label for every source listed."
+        }
+    )
+
+    claim_outcome: str = Field(
+        description=(
+            "What the claim says changes, in a few words, e.g. for 'prevents headaches': "
+            "how often headaches happen."
+        )
+    )
+    items: list[AppraisalItem] = Field(min_length=1)
+
+
+class RelevanceItem(BaseModel):
+    """Whether one source measured the claim's outcome — APPRAISAL_MODE=two_call.
+
+    The two-call mode asks relevance and direction separately, so the direction
+    call is never shown a study of something else. Measured 2026-10-02 it was
+    level with the one-call quote design on flipped directions and a little
+    behind on the rest, at twice the calls; it is kept so the comparison can be
+    re-run when the model changes (see pipeline/steps/appraise.py).
+
+    outcome_measured is written before the boolean on purpose: naming what
+    the study measured is what makes a related-but-different outcome visible
+    ("colds were shorter" against a claim about catching colds).
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "description": "What one study measured, and whether it is the claim's outcome."
+        }
+    )
+
+    handle: CitationHandle = Field(description="The source's handle, e.g. S3.")
+    outcome_measured: str = Field(
+        description="What this study measured, in a few words, e.g. 'mood and reaction time'."
+    )
+    measures_claim_outcome: bool = Field(
+        description=(
+            "true only if outcome_measured includes the claim's own outcome. A related "
+            "outcome, a different condition or a different substance is false. A text "
+            "that reports no result is false."
+        )
+    )
+
+
+class RelevanceOutput(BaseModel):
+    """Structured-output schema for the relevance call.
+
+    ``claim_outcome`` is written once, before any source, so every
+    ``measures_claim_outcome`` is a comparison against one stated outcome
+    rather than against the model's shifting sense of what the claim meant.
+
+    ``items`` has ``min_length=1``: measured, the model once wrote
+    ``claim_outcome`` and stopped with an empty list. The bound puts
+    ``minItems`` in the grammar, and if a build ignores it the validator sends
+    the call through ``_chat``'s repair retry instead of letting it through.
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "description": "The claim's outcome, then for every source whether it measured it."
+        }
+    )
+
+    claim_outcome: str = Field(
+        description=(
+            "The outcome the claim is about, in a few words, e.g. for 'improves memory': "
+            "memory."
+        )
+    )
+    items: list[RelevanceItem] = Field(min_length=1)
+
+
+class DirectionItem(BaseModel):
+    """One relevant source's direction. ``finding`` comes first on purpose:
+    writing down what the abstract reports before choosing a label is the
+    reasoning step. Only sources the relevance call accepted are asked about.
+    The finding is dropped once the label is read."""
+
+    model_config = ConfigDict(
+        json_schema_extra={"description": "What one source found for the claim."}
+    )
+
+    handle: CitationHandle = Field(description="The source's handle, e.g. S3.")
+    finding: str = Field(
+        description=(
+            "In one short sentence, what this abstract reports for the claim's "
+            "outcome, in its own words."
+        )
+    )
+    stance: Stance = Field(
+        description=(
+            "supports: found the claimed effect. no_effect: tested it and found no "
+            "meaningful difference. contradicts: found the opposite. unclear: no "
+            "result stated for this outcome. off_topic: does not test this claim."
+        )
+    )
+
+
+class DirectionOutput(BaseModel):
+    """Structured-output schema for the direction call. ``min_length=1`` for
+    the same reason as ``RelevanceOutput``."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "description": "One label for every source listed, saying which way it points."
+        }
+    )
+
+    items: list[DirectionItem] = Field(min_length=1)
+
+
+# ---------------------------------------------------------------------------
 # LLM call 2 — synthesis (RAG generation)
 # ---------------------------------------------------------------------------
 
@@ -276,6 +494,13 @@ class PromptSource(BaseModel):
     #: Full-text passages, for the few open-access papers FULL_TEXT chose.
     #: Empty for every other source — which says nothing about its quality.
     excerpts: list[Excerpt] = Field(default_factory=list)
+    #: Which way APPRAISE found this source pointing, per claim it was
+    #: retrieved for. Carried, like ``claims``, purely so validation can read
+    #: it — ``render_source_block`` deliberately does **not** show it to the
+    #: synthesis model, so the two readings stay independent and a
+    #: disagreement between them is visible. A claim missing here was not
+    #: appraised, which is not the same as ``unclear``.
+    stances: dict[str, Stance] = Field(default_factory=dict)
 
 
 class SynthesisInput(BaseModel):
@@ -645,7 +870,8 @@ class Illustration(BaseModel):
 class ValidationFailure(BaseModel):
     code: str = Field(
         description="hallucinated_handle | unresolvable_source | uncited_beat "
-        "| verdict_exceeds_grade | malformed_body"
+        "| uncited_section | verdict_exceeds_grade | malformed_body | unsourced_number "
+        "| no_evidence_with_citations"
     )
     message: str
     detail: dict[str, object] = Field(default_factory=dict)
@@ -677,7 +903,19 @@ class ValidationReport(BaseModel):
     #: ``no_evidence``, which is a real verdict and the falsest thing a default
     #: could say here.
     verdict_ceiling: Verdict | None = None
+    #: Per claim, how the cited trials and reviews were appraised: ``for``,
+    #: ``against`` (no effect or the opposite) and ``unlabelled``
+    #: (``grading.strong_by_direction``). None when nothing was appraised —
+    #: the stage was off or failed, or the report predates it — which must not
+    #: read as "no conflict". Recorded so the effect of letting these labels
+    #: gate a verdict can be measured on real articles before anyone does it.
+    stance_tally: dict[str, dict[str, int]] | None = None
     failures: list[ValidationFailure] = Field(default_factory=list)
+    #: Problems a reviewer should look at that do not block the draft. A check
+    #: that is usually a mistake but sometimes honest — a ``no_evidence``
+    #: verdict citing studies that found *no effect* — fails the first draft so
+    #: the model is asked once, and lands here if the rewrite keeps it.
+    warnings: list[ValidationFailure] = Field(default_factory=list)
 
     @property
     def badge(self) -> str:

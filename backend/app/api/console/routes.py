@@ -414,9 +414,10 @@ async def regenerate_illustration(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=(
-                "Image generation is not configured on this server. Set "
-                "IMAGE_GEN_KEY to a Hugging Face token with the 'Make calls to "
-                "Inference Providers' permission."
+                "Image generation is off or not configured on this server. "
+                "It needs IMAGE_PROVIDER=huggingface and IMAGE_GEN_KEY set to a "
+                "Hugging Face token with the 'Make calls to Inference "
+                "Providers' permission."
             ),
         )
 

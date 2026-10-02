@@ -1,0 +1,23 @@
+// The stable regression subset: references to cases defined in the other files.
+{"ref": "basic_002"}
+{"ref": "basic_005"}
+{"ref": "basic_007"}
+{"ref": "basic_016"}
+{"ref": "mp_001"}
+{"ref": "latest_001"}
+{"ref": "acad_001"}
+{"ref": "acad_003"}
+{"ref": "noans_001"}
+{"ref": "noans_004"}
+{"ref": "conf_003"}
+{"ref": "mt_001"}
+{"ref": "adv_001"}
+{"ref": "adv_010"}
+{"ref": "adv_018"}
+{"ref": "adv_021"}
+{"ref": "fail_001"}
+{"ref": "fail_008"}
+{"ref": "fail_010"}
+{"ref": "fail_015"}
+{"ref": "fail_r03"}
+{"ref": "fail_r07"}

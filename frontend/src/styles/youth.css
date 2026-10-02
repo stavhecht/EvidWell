@@ -90,11 +90,15 @@
        Colour says what kind of thing is being assessed, never how it scored.
        Nothing green, nothing amber, and no hue on the verdict axis, so a feed
        of tiles cannot read as a traffic light. See `subject.ts`. */
-    --ew-cat-supplement: #9b2312;
-    --ew-cat-device: #1b4c72;
-    --ew-cat-protocol: #4a2a6b;
-    --ew-cat-food: #0f5c5c;
-    --ew-cat-topical: #6d4326;
+    --ew-cat-supplements: #9b2312;
+    --ew-cat-fitness: #1b4c72;
+    --ew-cat-sleep-recovery: #4a2a6b;
+    --ew-cat-nutrition: #0f5c5c;
+    --ew-cat-lifestyle: #6d4326;
+    --ew-cat-preventive-health: #2e3a87;
+    --ew-cat-general-health: #8a1d5a;
+    --ew-cat-wellness: #00607a;
+    --ew-cat-other: #4b5560;
 
     /* ── Verdict prominence — the comp's `coequal` setting ──────────────────
        The verdict label and the headline carry equal weight: the label is small
@@ -198,11 +202,15 @@
     --ew-panel: #2a2726;
     --ew-panel-fg: #f2efea;
 
-    --ew-cat-supplement: #f2775c;
-    --ew-cat-device: #6fa8d6;
-    --ew-cat-protocol: #b18cd9;
-    --ew-cat-food: #4fb3ad;
-    --ew-cat-topical: #c08a63;
+    --ew-cat-supplements: #f2775c;
+    --ew-cat-fitness: #6fa8d6;
+    --ew-cat-sleep-recovery: #b18cd9;
+    --ew-cat-nutrition: #4fb3ad;
+    --ew-cat-lifestyle: #c08a63;
+    --ew-cat-preventive-health: #9aa6f0;
+    --ew-cat-general-health: #e07fb0;
+    --ew-cat-wellness: #4fb8d6;
+    --ew-cat-other: #a3adb8;
 
     /* A cast shadow is invisible on a near-black ground; on dark the elevation
        has to come from depth of field instead. */

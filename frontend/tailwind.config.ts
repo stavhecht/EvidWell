@@ -67,11 +67,15 @@ export default {
 
         // The only chromatic axis in the product. Subject, never verdict.
         subject: {
-          supplement: "var(--ew-cat-supplement)",
-          device: "var(--ew-cat-device)",
-          protocol: "var(--ew-cat-protocol)",
-          food: "var(--ew-cat-food)",
-          topical: "var(--ew-cat-topical)",
+          fitness: "var(--ew-cat-fitness)",
+          nutrition: "var(--ew-cat-nutrition)",
+          supplements: "var(--ew-cat-supplements)",
+          "sleep-recovery": "var(--ew-cat-sleep-recovery)",
+          lifestyle: "var(--ew-cat-lifestyle)",
+          "preventive-health": "var(--ew-cat-preventive-health)",
+          "general-health": "var(--ew-cat-general-health)",
+          wellness: "var(--ew-cat-wellness)",
+          other: "var(--ew-cat-other)",
         },
       },
 

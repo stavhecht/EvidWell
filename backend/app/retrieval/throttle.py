@@ -43,6 +43,13 @@ BASE_BACKOFF_SECONDS = 0.5
 #: and immediately throttle each other again.
 MAX_JITTER_SECONDS = 0.25
 
+#: A ``Retry-After`` at least this long is not throttling — the provider's quota
+#: is spent. Measured 2026-10-01: OpenAlex answered a keyless budget running
+#: out with ``Retry-After: 14849`` (until midnight UTC). Waiting the capped few
+#: seconds and asking again cannot succeed, so the call fails at once and the
+#: client sends nothing more to that provider for the rest of its life.
+EXHAUSTED_AFTER_SECONDS = 3600.0
+
 
 class HttpClient(Protocol):
     """The slice of ``httpx.AsyncClient`` the providers actually use.
@@ -138,6 +145,8 @@ class ThrottledClient:
         self._max_retries = max_retries
         self._max_wait_seconds = max_wait_seconds
         self._detect = detect_throttle
+        #: Monotonic time before which the provider said not to come back.
+        self._exhausted_until = 0.0
 
     async def get(
         self,
@@ -156,6 +165,12 @@ class ThrottledClient:
                 wrap these, and a retry loop here would double the one they may
                 add later.
         """
+        remaining = self._exhausted_until - time.monotonic()
+        if remaining > 0:
+            raise RateLimited(
+                f"{self._provider} quota exhausted; not asking again for {remaining:.0f}s",
+                retry_after=remaining,
+            )
         retry_after = 0.0
         for attempt in range(self._max_retries + 1):
             await self._limiter.acquire()
@@ -165,6 +180,18 @@ class ThrottledClient:
             if signal is None:
                 return response
             retry_after = signal
+            if retry_after >= EXHAUSTED_AFTER_SECONDS:
+                self._exhausted_until = time.monotonic() + retry_after
+                logger.warning(
+                    "%s asked us to wait %.0fs: its quota is spent, not throttled; "
+                    "failing its calls instead of retrying",
+                    self._provider,
+                    retry_after,
+                )
+                raise RateLimited(
+                    f"{self._provider} quota exhausted (Retry-After {retry_after:.0f}s)",
+                    retry_after=retry_after,
+                )
 
             if attempt < self._max_retries:
                 delay = self._backoff(attempt, retry_after)

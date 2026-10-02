@@ -9,11 +9,19 @@ from __future__ import annotations
 import logging
 from collections import Counter
 
+from sqlalchemy.exc import InterfaceError, OperationalError
+
 from app.domain.contracts import RankedSource
 from app.domain.enums import Verdict
 from app.evidence.grading import QUORUM_FOR_SUPPORTED, VERDICT_CEILING
+from app.llm.embeddings.base import EmbeddingError
 from app.pipeline.stages import PipelineContext, StageError, StageName
-from app.retrieval.rerank import RerankConfig, SemanticReranker, assign_handles
+from app.retrieval.rerank import (
+    RerankConfig,
+    SemanticReranker,
+    assign_handles,
+    claim_subject,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,11 +58,17 @@ class RankStage:
         if ctx.extraction is None:
             raise StageError(self.name, "extraction stage did not run")
 
+        subject = claim_subject(ctx.extraction.product, ctx.extraction.ingredients)
         ranked_by_claim: dict[str, list[RankedSource]] = {}
-        for claim, candidates in ctx.candidates.items():
-            ranked_by_claim[claim] = await self._reranker.rank_for_claim(
-                claim, candidates, self._config
-            )
+        try:
+            for claim, candidates in ctx.candidates.items():
+                ranked_by_claim[claim] = await self._reranker.rank_for_claim(
+                    claim, candidates, self._config, subject=subject
+                )
+        except (EmbeddingError, OperationalError, InterfaceError) as exc:
+            # The embedding server or the database being unreachable is an
+            # outage: retrying finds every paper already cached and embedded.
+            raise StageError(self.name, f"ranking failed: {exc}", retryable=True) from exc
         ranked_by_claim = assign_handles(ranked_by_claim)
 
         thin = thin_claims(ranked_by_claim)
@@ -79,6 +93,7 @@ class RankStage:
                 "unique_sources": len({entry.source_id for entry in all_ranked}),
                 "refine_round": ctx.refine_round,
                 "thin_claims": thin,
+                "ranked_against": subject,
             },
         )
 

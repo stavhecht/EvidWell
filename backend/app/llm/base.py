@@ -11,8 +11,12 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from app.domain.contracts import (
+    AppraisalInput,
+    AppraisalOutput,
+    DirectionOutput,
     ExtractionInput,
     ExtractionOutput,
+    RelevanceOutput,
     SynthesisInput,
     SynthesisOutput,
 )
@@ -95,6 +99,30 @@ class SynthesisClient(Protocol):
         ...
 
 
+class AppraisalClient(Protocol):
+    """APPRAISE's calls — which way each ranked source points for one claim.
+    ``APPRAISAL_MODE`` decides whether the stage uses ``appraise`` or the
+    ``relevance`` and ``direction`` pair.
+
+    Labels only. What a label is allowed to change (today: nothing but a
+    reviewer warning) is decided in ``evidence/validation.py``, not here.
+    """
+
+    async def appraise(self, payload: AppraisalInput) -> LLMResult[AppraisalOutput]:
+        """``one_call`` mode: label every source in ``payload`` against its claim."""
+        ...
+
+    async def relevance(self, payload: AppraisalInput) -> LLMResult[RelevanceOutput]:
+        """``two_call`` mode, first call: whether each source measured the claim's
+        outcome."""
+        ...
+
+    async def direction(self, payload: AppraisalInput) -> LLMResult[DirectionOutput]:
+        """``two_call`` mode, second call: which way each source points. Given
+        only the sources the first call accepted."""
+        ...
+
+
 class LLMError(RuntimeError):
     """Transport, rate-limit, or schema failure from a generative call.
 
@@ -107,14 +135,26 @@ class LLMError(RuntimeError):
     stage records this before converting the error into a ``StageError``.
 
     Left empty on a transport failure, where nothing was consumed.
+
+    ``retryable`` marks a failure a later attempt can succeed past: the model
+    server unreachable, a timeout, a 5xx or a rate limit. The stages pass it on
+    to ``StageError`` so the worker requeues the run. Everything else — a
+    missing model, output that broke the contract twice, a refusal — stays
+    permanent, since a retry sends the identical request.
     """
 
     def __init__(
-        self, message: str, *, usage: TokenUsage | None = None, model: str = ""
+        self,
+        message: str,
+        *,
+        usage: TokenUsage | None = None,
+        model: str = "",
+        retryable: bool = False,
     ) -> None:
         super().__init__(message)
         self.usage = usage or TokenUsage()
         self.model = model
+        self.retryable = retryable
 
 
 class RefusalError(LLMError):

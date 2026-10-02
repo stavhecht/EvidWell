@@ -65,6 +65,8 @@ REVISABLE_FAILURES = frozenset(
         "uncited_section",
         "verdict_exceeds_grade",
         "malformed_body",
+        "unsourced_number",
+        "no_evidence_with_citations",
     }
 )
 

@@ -1,0 +1,132 @@
+# Evaluation settings. The thresholds below are the pass/fail contract: a
+# `critical` metric that misses its threshold makes `python -m evaluation.run`
+# exit non-zero, so this file is what CI will eventually gate on.
+#
+# Every threshold is a target for the system, chosen before the first run and
+# NOT tuned to whatever the system currently scores. Moving one is a decision
+# about quality, so do it in a commit of its own with the reason.
+
+run:
+  # cached  - replay recorded HTTP/LLM/embedding responses, record misses live (default)
+  # live    - ignore recordings, call everything live, refresh the recordings
+  # replay  - recordings only; a case that needs anything unrecorded is SKIPPED
+  mode: cached
+  # A case still running after this is recorded as TIMEOUT (never-terminating).
+  case_timeout_seconds: 1500
+  cache_path: evaluation/.cache/cassettes.sqlite
+  reports_dir: evaluation/reports
+  baselines_dir: evaluation/baselines
+
+judge:
+  # The judge must not be the model that wrote the article: a model grading its
+  # own output is the circular evaluation this framework exists to avoid. The
+  # run refuses (judge disabled, reason reported) when the two match, unless
+  # allow_same_model_as_generator is set.
+  enabled: true
+  provider: ollama
+  model: llama3.1:8b
+  allow_same_model_as_generator: false
+  num_ctx: 8192
+  # Cited statements checked per article. Each is one judge call.
+  max_citation_checks: 6
+  # Source text shown to the judge per cited source.
+  max_source_words: 380
+
+source_validation:
+  enabled: true
+  # GET every cited URL. Off by default: doi.org redirects to publishers, many of
+  # which refuse non-browser clients, so a failure says little about the source.
+  check_urls: false
+
+failure_suite:
+  # Throttle retries stay real (the count is what is checked) but the waits are
+  # shortened so a 429 case does not take a minute.
+  provider_max_retries: 2
+  provider_max_retry_wait_seconds: 0.2
+
+evaluation:
+  # Papers this many years old or newer count as recent.
+  recency_years: 5
+  retrieval_ks: [1, 3, 5, 10]
+
+suites:
+  # Dataset suites.
+  all:        {datasets: [basic, research, multi_turn, adversarial, failure_cases]}
+  basic:      {datasets: [basic]}
+  research:   {datasets: [research]}
+  multi_turn: {datasets: [multi_turn]}
+  adversarial: {datasets: [adversarial]}
+  failure:    {datasets: [failure_cases]}
+  regression: {datasets: [regression]}
+  # Metric suites. `retrieval` stops after RANK, so it never calls synthesis.
+  retrieval:
+    datasets: [basic, research, multi_turn, adversarial]
+    stop_after: rank
+    groups: [query, agent, retrieval, performance]
+  citations:
+    datasets: [basic, research, adversarial]
+    groups: [citations, sources, answers]
+  answers:
+    datasets: [basic, research, multi_turn, adversarial]
+    groups: [query, answers, citations]
+  agent:
+    datasets: [basic, research, multi_turn, adversarial, failure_cases]
+    groups: [agent, failure]
+
+# direction: min (higher is better) | max (lower is better)
+# critical:  a miss fails the run (exit 1). A non-critical miss is WARN.
+# warn_margin: within this distance of the threshold on the right side is WARN.
+thresholds:
+  # Query understanding and the agent's decisions
+  query_understanding_accuracy:   {direction: min, value: 0.85, critical: true}
+  tool_selection_accuracy:        {direction: min, value: 0.90, critical: true}
+  decision_accuracy:              {direction: min, value: 0.90, critical: false}
+  successful_termination_rate:    {direction: min, value: 0.98, critical: true}
+  agent_loop_rate:                {direction: max, value: 0.0,  critical: true}
+  unnecessary_tool_calls_per_case: {direction: max, value: 0.5, critical: false}
+  # Retrieval
+  retrieval_recall_at_5:          {direction: min, value: 0.85, critical: true}
+  retrieval_recall_at_10:         {direction: min, value: 0.90, critical: false}
+  rank_recall_cap_at_5:           {direction: min, value: 0.80, critical: false}
+  rank_precision_at_5:            {direction: min, value: 0.80, critical: false}
+  rank_precision_at_10:           {direction: min, value: 0.75, critical: false}
+  rank_mrr:                       {direction: min, value: 0.80, critical: false}
+  rank_ndcg_at_10:                {direction: min, value: 0.75, critical: false}
+  empty_retrieval_rate:           {direction: max, value: 0.05, critical: false}
+  duplicate_rate:                 {direction: max, value: 0.02, critical: false}
+  # Citations and sources
+  citation_existence_rate:        {direction: min, value: 0.95, critical: true}
+  citation_precision:             {direction: min, value: 0.90, critical: true}
+  citation_correctness:           {direction: min, value: 0.90, critical: true}
+  citation_completeness:          {direction: min, value: 0.85, critical: false}
+  citation_recall:                {direction: min, value: 0.60, critical: false}
+  citation_quality:               {direction: min, value: 0.70, critical: false}
+  source_existence_rate:          {direction: min, value: 0.99, critical: true}
+  retracted_citation_rate:        {direction: max, value: 0.0,  critical: true}
+  # Answers
+  behavior_accuracy:              {direction: min, value: 0.85, critical: true}
+  verdict_accuracy:               {direction: min, value: 0.80, critical: false}
+  answer_correctness:             {direction: min, value: 0.85, critical: true}
+  answer_relevance:               {direction: min, value: 0.80, critical: false}
+  answer_completeness:            {direction: min, value: 0.70, critical: false}
+  groundedness:                   {direction: min, value: 0.85, critical: true}
+  hallucination_rate:             {direction: max, value: 0.05, critical: true}
+  uncertainty_appropriate_rate:   {direction: min, value: 0.85, critical: false}
+  no_answer_correct_rate:         {direction: min, value: 0.90, critical: true}
+  validation_pass_rate:           {direction: min, value: 0.80, critical: false}
+  recency_cited_fraction:         {direction: min, value: 0.50, critical: false}
+  # Failure handling
+  failure_recovery_rate:          {direction: min, value: 0.95, critical: true}
+  fallback_success_rate:          {direction: min, value: 0.90, critical: true}
+  infinite_loop_rate:             {direction: max, value: 0.0,  critical: true}
+  hallucination_after_tool_failure_rate: {direction: max, value: 0.0, critical: true}
+  retry_classification_accuracy:  {direction: min, value: 0.90, critical: false}
+  # Performance (seconds, wall clock as run)
+  latency_p95_s:                  {direction: max, value: 600,  critical: false}
+
+regression:
+  # A metric that moved the wrong way by more than this (absolute) since the
+  # baseline is reported as a regression.
+  tolerance: 0.02
+  # Regressions are WARN by default; set true to make one fail the run.
+  fail_on_regression: false

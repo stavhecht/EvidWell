@@ -8,7 +8,7 @@
  * the two screens has to see the same words.
  */
 
-import type { StudyType, Verdict } from "@/types/api";
+import type { Stance, StudyType, Verdict } from "@/types/api";
 
 export const VERDICT_LABELS: Record<Verdict, string> = {
   supported: "Supported",
@@ -114,6 +114,23 @@ export const STUDY_TYPE_LABELS: Record<StudyType, string> = {
   rct: "Randomised controlled trial",
   systematic_review: "Systematic review",
   meta_analysis: "Meta-analysis",
+};
+
+/**
+ * What APPRAISE read a source as finding, for one claim — shown on the desk's
+ * source rows. Written as what the *study* found, so a reviewer reads it as a
+ * claim about the paper they can check, not as a verdict.
+ *
+ * These labels come from a model and are not yet measured for accuracy, which
+ * is why the desk shows them as text beside the source and nothing reads them
+ * to decide a verdict.
+ */
+export const STANCE_LABELS: Record<Stance, string> = {
+  supports: "found the effect",
+  no_effect: "found no effect",
+  contradicts: "found the opposite",
+  unclear: "result unclear",
+  off_topic: "does not test this claim",
 };
 
 /** Everything below an observational study. Mirrors `is_weak_evidence` server-side. */

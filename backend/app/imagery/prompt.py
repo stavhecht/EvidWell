@@ -43,8 +43,10 @@ holds the subjects that are activities, and every other subject renders a still
 life exactly as before. Two further guards, both because the cost of being
 wrong here is much higher than the cost of a plain still life:
 
-* **Only a confident activity signal opens the gate** — a reviewer's explicit
-  ``subject``, or a motif matched against ``product`` itself. A motif inferred
+* **Only a confident activity signal opens the gate** — a motif matched
+  against ``product`` itself. (A reviewer's ``subject`` used to open it too,
+  when subjects were kinds of object; they are now editorial categories and
+  none maps to ``PROTOCOL`` — see ``_SUBJECT_MOTIFS``.) A motif inferred
   from the *topic* does not, because topics name outcomes ("magnesium for
   sleep") and ``sleep`` is a protocol word. Uncertainty falls back to objects.
 * **The activity is in progress, never posed**, and ``EXCLUSIONS_WITH_PEOPLE``
@@ -111,11 +113,43 @@ from __future__ import annotations
 
 import operator
 import re
+from enum import StrEnum
 from itertools import accumulate
 
 from app.domain.enums import Subject
 
-#: What the picture shows, per subject — **objects only**, no arrangement.
+
+class Motif(StrEnum):
+    """Which kind of object the picture photographs.
+
+    This used to be ``Subject`` itself, back when a subject named a kind of
+    thing. Subjects are now editorial categories ("Sleep and recovery",
+    "Lifestyle") that say nothing about what is in the frame — a sleep article
+    may be about melatonin or about a bedtime routine — so the picture keeps
+    its own small vocabulary. Never stored, never shown to a reader.
+    """
+
+    SUPPLEMENT = "supplement"
+    DEVICE = "device"
+    PROTOCOL = "protocol"
+    FOOD = "food"
+    TOPICAL = "topical"
+
+
+#: The reviewer categories that settle which objects to photograph.
+#:
+#: **Only these two.** Every other category is an area that spans motifs —
+#: "Fitness" covers a protein powder and a training plan — so it is left to
+#: ``infer_motif_subject`` over ``product``. In particular no category maps to
+#: ``PROTOCOL``: that would let a category, which names an area rather than an
+#: activity, open the people path. Before categories, a reviewer's
+#: ``Subject.PROTOCOL`` did open it; now only ``product`` can.
+_SUBJECT_MOTIFS: dict[Subject, Motif] = {
+    Subject.SUPPLEMENTS: Motif.SUPPLEMENT,
+    Subject.NUTRITION: Motif.FOOD,
+}
+
+#: What the picture shows, per motif — **objects only**, no arrangement.
 #:
 #: Arrangement moved out to ``_ARRANGEMENTS`` so it can vary; a motif that also
 #: fixed the layout was half the reason every render looked alike.
@@ -136,34 +170,34 @@ from app.domain.enums import Subject
 #: re-photograph one still life from five hundred angles, and five hundred
 #: photographs of the same jar still read as one picture. Changing *what is in
 #: the frame* is the only axis with that much amplitude.
-_MOTIFS: dict[Subject, tuple[str, ...]] = {
-    Subject.SUPPLEMENT: (
+_MOTIFS: dict[Motif, tuple[str, ...]] = {
+    Motif.SUPPLEMENT: (
         "loose capsules, a small heap of pale powder and a plain unlabelled "
         "glass jar",
         "a few loose tablets resting beside a plain glass of water",
         "a measuring scoop tipped over, powder spilling into a low pile",
         "dried herb and seed pods in a stone mortar with a wooden pestle",
     ),
-    Subject.DEVICE: (
+    Motif.DEVICE: (
         "a small matte unbranded consumer device and its coiled cable",
         "an unbranded wearable band lying open beside its charging puck",
         "a plain matte panel propped against a wall beside its power brick, "
         "switched off",
         "a simple unlabelled device turned over, its strap coiled loosely",
     ),
-    Subject.PROTOCOL: (
+    Motif.PROTOCOL: (
         "a folded towel, a glass of water and a simple timer",
         "a rolled exercise mat stood on end beside a filled water bottle",
         "plain unbranded trainers set down beside a folded towel",
         "a small kettlebell and a coiled resistance band left on the floor",
     ),
-    Subject.FOOD: (
+    Motif.FOOD: (
         "whole raw ingredients and a shallow ceramic bowl",
         "cut sections of the raw ingredient on a plain wooden board",
         "a simple glass of the prepared drink beside its raw ingredients",
         "loose dried leaves and a plain unglazed cup",
     ),
-    Subject.TOPICAL: (
+    Motif.TOPICAL: (
         "a plain unlabelled tube and a small smear of pale cream",
         "an unlabelled glass dropper bottle laid on its side beside its pipette",
         "a small open jar of balm with a clean spatula across the rim",
@@ -177,7 +211,7 @@ _MOTIFS: dict[Subject, tuple[str, ...]] = {
 #: is a thing someone does, so a body mid-movement depicts the subject. Every
 #: other motif is a thing someone *takes*, where a body in frame can only be
 #: read as the result of taking it. Adding a key here is therefore a content
-#: decision about claims, not a styling choice — ``Subject.DEVICE`` is the one
+#: decision about claims, not a styling choice — ``Motif.DEVICE`` is the one
 #: with a real argument on both sides (a hand holding a massager is use; a
 #: person glowing beside a red-light panel is efficacy) and is deliberately
 #: left out until someone wants to make it.
@@ -185,8 +219,8 @@ _MOTIFS: dict[Subject, tuple[str, ...]] = {
 #: The objects from ``_MOTIFS`` are kept alongside the person on purpose. They
 #: anchor the frame to the same props the still-life path uses, which is most
 #: of why these renders stay in the same magazine as the others.
-_PEOPLE_MOTIFS: dict[Subject, tuple[str, ...]] = {
-    Subject.PROTOCOL: (
+_PEOPLE_MOTIFS: dict[Motif, tuple[str, ...]] = {
+    Motif.PROTOCOL: (
         "one ordinary person in plain unbranded everyday clothing, in the "
         "middle of the activity, with a folded towel and a glass of water "
         "nearby",
@@ -227,33 +261,33 @@ _PEOPLE_MOTIFS: dict[Subject, tuple[str, ...]] = {
 #:
 #: Matched on word starts, so "creatine" hits `supplement` without "cream"
 #: hitting `topical` too.
-_MOTIF_HINTS: tuple[tuple[Subject, tuple[str, ...]], ...] = (
+_MOTIF_HINTS: tuple[tuple[Motif, tuple[str, ...]], ...] = (
     (
-        Subject.TOPICAL,
+        Motif.TOPICAL,
         ("cream", "serum", "gel", "balm", "lotion", "ointment", "patch",
          "sunscreen", "moisturis", "topical", "salve"),
     ),
     (
-        Subject.DEVICE,
+        Motif.DEVICE,
         ("device", "panel", "lamp", "mask", "tracker", "monitor", "wearable",
          "ring", "band", "roller", "massager", "machine", "sauna", "mat",
          "headset", "torch", "led"),
     ),
     (
-        Subject.PROTOCOL,
+        Motif.PROTOCOL,
         ("yoga", "pilates", "plunge", "fasting", "fast", "breathwork",
          "meditation", "sleep", "exercise", "training", "workout", "walking",
          "running", "stretch", "massage", "bathing", "shower", "journaling",
          "grounding", "hiit", "cardio", "therapy"),
     ),
     (
-        Subject.FOOD,
+        Motif.FOOD,
         ("juice", "tea", "coffee", "oil", "honey", "vinegar", "milk", "kefir",
          "yoghurt", "yogurt", "diet", "fruit", "berry", "nut", "seed", "cocoa",
          "chocolate", "egg", "fish", "broth", "kombucha", "water"),
     ),
     (
-        Subject.SUPPLEMENT,
+        Motif.SUPPLEMENT,
         ("capsule", "tablet", "powder", "vitamin", "mineral", "extract",
          "supplement", "creatine", "magnesium", "collagen", "protein",
          "omega", "probiotic", "ashwagandha", "melatonin", "zinc", "iron",
@@ -666,7 +700,7 @@ def depicted_subject(product: str, fallback: str = "") -> str:
     return scrub_subject(product) or scrub_subject(fallback)
 
 
-def infer_motif_subject(*texts: str) -> Subject | None:
+def infer_motif_subject(*texts: str) -> Motif | None:
     """Guess which objects to photograph from whatever text we have.
 
     **Not a classification.** See ``_MOTIF_HINTS``. Returns ``None`` when
@@ -704,10 +738,10 @@ def build_prompt(
     tile and the article picture recognisably part of one shoot.
 
     Args:
-        subject: an explicit, reviewer-set classification. Wins over inference
-            when present, which is why pressing Regenerate after classifying a
-            draft can genuinely improve the picture. ``None`` on every pipeline
-            call — the article row does not exist yet.
+        subject: the reviewer-set category. Wins over inference only for the
+            categories in ``_SUBJECT_MOTIFS``; any other category falls through
+            to inference from ``product``. ``None`` on every pipeline call — the
+            article row does not exist yet.
         seed: selects the four composition axes and the motif variant. The
             pipeline derives it from the run id (stable across retries);
             Regenerate rolls a fresh one. Note this seed does real work *here*
@@ -721,8 +755,9 @@ def build_prompt(
     # docstring — a motif inferred from the topic is exactly the case where
     # "magnesium for sleep" reads as a protocol, and drawing a person there
     # would put a body in a supplement article.
-    if subject is not None:
-        chosen, confident = subject, True
+    chosen: Motif | None
+    if subject is not None and subject in _SUBJECT_MOTIFS:
+        chosen, confident = _SUBJECT_MOTIFS[subject], True
     elif (matched := infer_motif_subject(product)) is not None:
         chosen, confident = matched, True
     else:
@@ -782,5 +817,6 @@ def _draws_a_person(product: str, subject: Subject | None) -> bool:
     ``build_prompt`` does not: only a reviewer's classification or a match
     against ``product`` itself is confident enough to put a body in frame.
     """
-    chosen = subject if subject is not None else infer_motif_subject(product)
-    return chosen in _PEOPLE_MOTIFS
+    if subject is not None and subject in _SUBJECT_MOTIFS:
+        return _SUBJECT_MOTIFS[subject] in _PEOPLE_MOTIFS
+    return infer_motif_subject(product) in _PEOPLE_MOTIFS

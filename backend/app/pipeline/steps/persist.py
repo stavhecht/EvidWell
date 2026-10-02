@@ -17,7 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.contracts import SynthesisInput, ValidationFailure
 from app.domain.enums import ArticleStatus
 from app.domain.models import Article, ArticleSource
-from app.evidence.validation import summarise_failures, validate_draft
+from app.evidence.validation import (
+    STANCE_WARNING_CODES,
+    summarise_failures,
+    validate_draft,
+)
+from app.pipeline.graph import MAX_REVISE_ROUNDS
 from app.pipeline.stages import PipelineContext, StageError, StageName
 from app.services.media import image_node
 from app.services.tiptap import MalformedBodyError, body_text_to_doc
@@ -46,7 +51,14 @@ class ValidateStage:
         if ctx.draft is None or ctx.synthesis_input is None:
             raise StageError(self.name, "synthesis stage did not run")
 
-        report = await validate_draft(self._session, ctx.draft, ctx.synthesis_input)
+        # The last draft this run will write: a soft check becomes a warning
+        # rather than a failure (see ``check_no_evidence_cites_nothing``).
+        report = await validate_draft(
+            self._session,
+            ctx.draft,
+            ctx.synthesis_input,
+            final_round=ctx.revise_round >= MAX_REVISE_ROUNDS,
+        )
 
         ctx.record_metrics(
             self.name,
@@ -56,6 +68,14 @@ class ValidateStage:
                 "citations_total": report.citations_total,
                 "best_evidence_grade": str(report.best_evidence_grade),
                 "failure_codes": sorted({f.code for f in report.failures}),
+                "warning_codes": sorted({w.code for w in report.warnings}),
+                # Whether the draft's verdict disagreed with how APPRAISE read
+                # its sources. None when nothing was appraised.
+                "stance_disagrees": (
+                    None
+                    if report.stance_tally is None
+                    else bool({w.code for w in report.warnings} & STANCE_WARNING_CODES)
+                ),
                 "summary": summarise_failures(report),
             },
         )
@@ -187,6 +207,8 @@ class PersistStage:
                         was_cited=entry.citation_handle in cited,
                         relevance_score=entry.final_score,
                         excerpts=excerpts.get(entry.source_id),
+                        # NULL when not appraised; see migration 0004.
+                        stance=ctx.stances.get(claim, {}).get(entry.source_id),
                     )
                 )
 

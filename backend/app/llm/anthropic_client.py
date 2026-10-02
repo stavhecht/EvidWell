@@ -43,12 +43,24 @@ from anthropic import AsyncAnthropic
 from anthropic.types import TextBlockParam, ThinkingConfigAdaptiveParam
 
 from app.domain.contracts import (
+    AppraisalInput,
+    AppraisalOutput,
+    DirectionOutput,
     ExtractionInput,
     ExtractionOutput,
+    RelevanceOutput,
     SynthesisInput,
     SynthesisOutput,
 )
 from app.llm.base import LLMError, LLMResult, RefusalError, TokenUsage
+from app.llm.prompts.appraisal import (
+    APPRAISAL_SYSTEM_PROMPT,
+    DIRECTION_SYSTEM_PROMPT,
+    RELEVANCE_SYSTEM_PROMPT,
+    build_appraisal_user_prompt,
+    build_direction_user_prompt,
+    build_relevance_user_prompt,
+)
 from app.llm.prompts.extraction import (
     EXTRACTION_SYSTEM_PROMPT,
     build_extraction_user_prompt,
@@ -84,6 +96,8 @@ EXTRACTION_MAX_TOKENS = 4_000
 #: which is why `_check_truncation` names the cause explicitly instead of
 #: letting it surface as a schema failure.
 SYNTHESIS_MAX_TOKENS = 16_000
+#: Twelve short labelled items; like extraction, the budget is for thinking.
+APPRAISAL_MAX_TOKENS = 8_000
 
 #: Passed explicitly on both calls rather than relying on the model default,
 #: because that default is not stable across the model range: Sonnet 5 and
@@ -206,7 +220,7 @@ class AnthropicExtractionClient:
                 output_format=ExtractionOutput,
             )
         except anthropic.APIError as exc:
-            raise LLMError(f"extraction call failed: {exc}") from exc
+            raise LLMError(f"extraction call failed: {exc}", retryable=_transient(exc)) from exc
 
         _check_refusal(response, "extraction", self._model)
         _check_truncation(response, "extraction", self._model)
@@ -266,7 +280,7 @@ class AnthropicSynthesisClient:
                 output_format=SynthesisOutput,
             )
         except anthropic.APIError as exc:
-            raise LLMError(f"synthesis call failed: {exc}") from exc
+            raise LLMError(f"synthesis call failed: {exc}", retryable=_transient(exc)) from exc
 
         _check_refusal(response, "synthesis", self._model)
         _check_truncation(response, "synthesis", self._model)
@@ -292,6 +306,81 @@ class AnthropicSynthesisClient:
         )
 
 
+class AnthropicAppraisalClient:
+    """APPRAISE's calls on the hosted model."""
+
+    def __init__(self, client: AsyncAnthropic, model: str = SYNTHESIS_MODEL) -> None:
+        self._client = client
+        self._model = model
+
+    async def appraise(self, payload: AppraisalInput) -> LLMResult[AppraisalOutput]:
+        """``one_call``: label each source in ``payload`` against its claim.
+
+        Raises:
+            RefusalError: the model declined.
+            LLMError: transport, rate limit, or schema failure.
+        """
+        return await self._call(
+            "appraisal",
+            APPRAISAL_SYSTEM_PROMPT,
+            build_appraisal_user_prompt(payload),
+            AppraisalOutput,
+        )
+
+    async def relevance(self, payload: AppraisalInput) -> LLMResult[RelevanceOutput]:
+        """``two_call``, first call. Raises as ``appraise``."""
+        return await self._call(
+            "appraisal relevance",
+            RELEVANCE_SYSTEM_PROMPT,
+            build_relevance_user_prompt(payload),
+            RelevanceOutput,
+        )
+
+    async def direction(self, payload: AppraisalInput) -> LLMResult[DirectionOutput]:
+        """``two_call``, second call. Raises as ``appraise``."""
+        return await self._call(
+            "appraisal direction",
+            DIRECTION_SYSTEM_PROMPT,
+            build_direction_user_prompt(payload),
+            DirectionOutput,
+        )
+
+    async def _call(
+        self, call: str, system: str, user: str, output_format: type[Any]
+    ) -> LLMResult[Any]:
+        logger.info(
+            "%s prompt -> %s:\n--- system ---\n%s\n--- user ---\n%s",
+            call, self._model, system, user,
+        )
+        try:
+            response = await self._client.messages.parse(
+                model=self._model,
+                max_tokens=APPRAISAL_MAX_TOKENS,
+                thinking=ADAPTIVE_THINKING,
+                system=_system_blocks(system),
+                messages=[{"role": "user", "content": user}],
+                output_format=output_format,
+            )
+        except anthropic.APIError as exc:
+            raise LLMError(f"{call} call failed: {exc}", retryable=_transient(exc)) from exc
+
+        _check_refusal(response, call, self._model)
+        _check_truncation(response, call, self._model)
+
+        parsed = response.parsed_output
+        if parsed is None:
+            raise LLMError(
+                f"{call} returned no parsed output",
+                usage=_usage_from_response(response),
+                model=qualified(self._model),
+            )
+        return LLMResult(
+            output=parsed,
+            usage=_usage_from_response(response),
+            model=qualified(self._model),
+        )
+
+
 def build_anthropic_client(api_key: str) -> AsyncAnthropic:
     """Shared transport for both call sites.
 
@@ -300,3 +389,11 @@ def build_anthropic_client(api_key: str) -> AsyncAnthropic:
     long source block is genuinely slow.
     """
     return AsyncAnthropic(api_key=api_key, max_retries=3, timeout=180.0)
+
+
+def _transient(exc: anthropic.APIError) -> bool:
+    """Connection failures, timeouts, rate limits and 5xx can succeed later."""
+    if isinstance(exc, anthropic.APIConnectionError | anthropic.RateLimitError):
+        return True
+    status = getattr(exc, "status_code", None)
+    return isinstance(status, int) and status >= 500

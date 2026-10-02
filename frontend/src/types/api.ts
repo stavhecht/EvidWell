@@ -11,6 +11,13 @@
 
 export type Verdict = "supported" | "mixed" | "weak" | "no_evidence";
 
+/**
+ * Which way one source's finding points for one claim, as the pipeline's
+ * APPRAISE stage read its abstract. Relative to the claim as written: a trial
+ * finding no harm for "X damages the kidneys" is `no_effect`.
+ */
+export type Stance = "supports" | "no_effect" | "contradicts" | "unclear" | "off_topic";
+
 export type StudyType =
   | "unknown"
   | "in_vitro"
@@ -38,7 +45,16 @@ export type ArticleStatus =
  * unchecked classification. Still optional everywhere: an unclassified article
  * renders in ink, which is the design's resting state rather than a gap.
  */
-export type Subject = "supplement" | "device" | "protocol" | "food" | "topical";
+export type Subject =
+  | "fitness"
+  | "nutrition"
+  | "supplements"
+  | "sleep_recovery"
+  | "lifestyle"
+  | "preventive_health"
+  | "general_health"
+  | "wellness"
+  | "other";
 
 /**
  * TipTap document node.
@@ -241,6 +257,12 @@ export interface ReviewSource extends Source {
    * Empty for most sources; only a few open-access papers get them.
    */
   excerpts: Excerpt[];
+  /**
+   * Which way APPRAISE found this source pointing for `claim`. `null` means
+   * not appraised (an older article, appraisal off, or the call failed), which
+   * is not the same as `unclear`.
+   */
+  stance: Stance | null;
 }
 
 /** A passage from a paper's full text. `section` is its heading, e.g. "Results". */
@@ -271,6 +293,12 @@ export interface ValidationReport {
    */
   verdictCeiling: Verdict | null;
   failures: ValidationFailure[];
+  /**
+   * Problems that did not block the draft but need a reviewer's eye — a
+   * "no evidence" verdict that still cites studies, kept after one rewrite.
+   * Absent on reports written before warnings existed.
+   */
+  warnings?: ValidationFailure[];
 }
 
 export interface ArticleDetail {
@@ -549,17 +577,8 @@ export type ResearchCandidateStatus =
   | "promoted"
   | "dismissed";
 export type EvidenceStatus = "none" | "limited" | "emerging" | "moderate" | "strong";
-export type ResearchCategory =
-  | "fitness"
-  | "exercise"
-  | "nutrition"
-  | "supplements"
-  | "sleep"
-  | "recovery"
-  | "lifestyle"
-  | "preventive_health"
-  | "general_health"
-  | "wellness";
+/** A trending topic's category is the article category it would be filed under. */
+export type ResearchCategory = Subject;
 
 /** Optional overrides; anything omitted uses the server's settings. */
 export interface ResearchRunRequest {

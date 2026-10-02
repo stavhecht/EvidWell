@@ -1,12 +1,13 @@
 /**
- * What kind of thing this article assesses.
+ * Which category this article is filed under.
  *
  * The one field on the review screen a reviewer *adds* rather than checks, and
  * the reason it exists at all: subject is the product's single chromatic axis
  * — it colours the tile, fills the browse drawer and is what a reader's
  * interests are expressed in — and it cannot be derived. `product` is free
- * text, so inferring "supplement" from "Creatine Monohydrate 5g" would put a
- * confident colour on a guess.
+ * text, so inferring "Supplements" from "Creatine Monohydrate 5g" would put a
+ * confident colour on a guess. "Other" is a classification ("none of these
+ * fit"); "None" means nobody has classified it yet.
  *
  * Optional, and staying optional is deliberate. An unclassified article renders
  * in ink and sits under "Everything", which is the design's resting state

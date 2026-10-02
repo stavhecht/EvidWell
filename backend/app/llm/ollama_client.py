@@ -46,12 +46,24 @@ from ollama import AsyncClient, ResponseError
 from pydantic import BaseModel, ValidationError
 
 from app.domain.contracts import (
+    AppraisalInput,
+    AppraisalOutput,
+    DirectionOutput,
     ExtractionInput,
     ExtractionOutput,
+    RelevanceOutput,
     SynthesisInput,
     SynthesisOutput,
 )
 from app.llm.base import LLMError, LLMResult, TokenUsage
+from app.llm.prompts.appraisal import (
+    APPRAISAL_SYSTEM_PROMPT,
+    DIRECTION_SYSTEM_PROMPT,
+    RELEVANCE_SYSTEM_PROMPT,
+    build_appraisal_user_prompt,
+    build_direction_user_prompt,
+    build_relevance_user_prompt,
+)
 from app.llm.prompts.extraction import (
     EXTRACTION_SYSTEM_PROMPT,
     build_extraction_user_prompt,
@@ -81,11 +93,20 @@ SYNTHESIS_MODEL = "llama3.1:8b"
 # 24_576 — the hosted path is unaffected either way.
 EXTRACTION_NUM_CTX = 8_192
 SYNTHESIS_NUM_CTX = 32_768
+#: One claim's ranked sources: up to `retrieval_top_k` (12) abstracts, about
+#: 5,000 tokens at the median length and nearer 8,000 for long ones, plus the
+#: system prompt and the output reserve below. Sized with room because overflow
+#: here would drop the *first* sources silently, and the stage would record
+#: them as not appraised with nothing pointing at the window.
+APPRAISAL_NUM_CTX = 16_384
 
 # Output caps. Unlike the hosted models these count visible output only —
 # there is no thinking budget folded in — so they are sized to the response.
 EXTRACTION_MAX_TOKENS = 2_000
 SYNTHESIS_MAX_TOKENS = 8_000
+#: Per call: twelve items of a handle, a quoted sentence, a boolean and a label
+#: (one_call), or of a few words and a boolean / a finding and a label (two_call).
+APPRAISAL_MAX_TOKENS = 3_000
 
 # Local models accept sampling parameters (the Opus 5 restriction noted in
 # anthropic_client.py does not apply here). Extraction is mechanical, so it is
@@ -93,6 +114,8 @@ SYNTHESIS_MAX_TOKENS = 8_000
 # degrades into repetition.
 EXTRACTION_TEMPERATURE = 0.0
 SYNTHESIS_TEMPERATURE = 0.4
+#: Labelling is classification, so greedy like extraction.
+APPRAISAL_TEMPERATURE = 0.0
 
 #: One repair round trip. The grammar guarantees shape, so a failure here is a
 #: Pydantic *validator* failure — "beat 2 is four sentences" — which a model can
@@ -216,14 +239,19 @@ async def _chat(
                     f"{call}: ollama does not have model {model!r} — run "
                     f"`ollama pull {model}`"
                 ) from exc
-            raise LLMError(f"{call} call failed: {exc}") from exc
+            # A 5xx or 429 from the server is load or a crash, not the request.
+            raise LLMError(
+                f"{call} call failed: {exc}",
+                retryable=exc.status_code >= 500 or exc.status_code == 429,
+            ) from exc
         except (ConnectionError, httpx.HTTPError) as exc:
             # The SDK turns a refused connection into a builtin ConnectionError
             # and lets httpx timeouts through untouched; neither is a
             # ResponseError, so both are caught here rather than escaping the
             # stage as an unrecognised exception type.
             raise LLMError(
-                f"{call} call failed: {exc} — is `ollama serve` running?"
+                f"{call} call failed: {exc} — is `ollama serve` running?",
+                retryable=True,
             ) from exc
 
         usage = usage + _usage_from_response(response)
@@ -370,6 +398,94 @@ class OllamaSynthesisClient:
             len(payload.sources),
         )
         return LLMResult(output=parsed, usage=result.usage, model=result.model)
+
+
+class OllamaAppraisalClient:
+    """APPRAISE's calls, run locally. Labels; checks nothing."""
+
+    def __init__(self, client: AsyncClient, model: str = EXTRACTION_MODEL) -> None:
+        self._client = client
+        self._model = model
+
+    async def appraise(self, payload: AppraisalInput) -> LLMResult[AppraisalOutput]:
+        """``one_call``: label each source in ``payload`` against its claim.
+
+        Raises:
+            LLMError: transport, missing model, or output that fails the
+                contract twice.
+        """
+        result = await self._call(
+            "appraisal",
+            APPRAISAL_SYSTEM_PROMPT,
+            build_appraisal_user_prompt(payload),
+            AppraisalOutput,
+        )
+        parsed: AppraisalOutput = result.output
+        logger.info(
+            "appraised %d/%d sources for claim=%r",
+            len(parsed.items),
+            len(payload.sources),
+            payload.claim,
+        )
+        return LLMResult(output=parsed, usage=result.usage, model=result.model)
+
+    async def relevance(self, payload: AppraisalInput) -> LLMResult[RelevanceOutput]:
+        """``two_call``, first call: whether each source measured the claim's outcome.
+
+        Raises:
+            LLMError: as ``appraise``.
+        """
+        result = await self._call(
+            "appraisal relevance",
+            RELEVANCE_SYSTEM_PROMPT,
+            build_relevance_user_prompt(payload),
+            RelevanceOutput,
+        )
+        parsed: RelevanceOutput = result.output
+        logger.info(
+            "relevance: %d/%d sources measured %r for claim=%r",
+            sum(item.measures_claim_outcome for item in parsed.items),
+            len(payload.sources),
+            parsed.claim_outcome,
+            payload.claim,
+        )
+        return LLMResult(output=parsed, usage=result.usage, model=result.model)
+
+    async def direction(self, payload: AppraisalInput) -> LLMResult[DirectionOutput]:
+        """``two_call``, second call: which way each (relevant) source points.
+
+        Raises:
+            LLMError: as ``appraise``.
+        """
+        result = await self._call(
+            "appraisal direction",
+            DIRECTION_SYSTEM_PROMPT,
+            build_direction_user_prompt(payload),
+            DirectionOutput,
+        )
+        parsed: DirectionOutput = result.output
+        logger.info(
+            "direction: labelled %d/%d sources for claim=%r",
+            len(parsed.items),
+            len(payload.sources),
+            payload.claim,
+        )
+        return LLMResult(output=parsed, usage=result.usage, model=result.model)
+
+    async def _call(
+        self, call: str, system: str, user: str, output_format: type[BaseModel]
+    ) -> LLMResult[Any]:
+        return await _chat(
+            self._client,
+            call=call,
+            model=self._model,
+            system=system,
+            user=user,
+            output_format=output_format,
+            num_ctx=APPRAISAL_NUM_CTX,
+            max_tokens=APPRAISAL_MAX_TOKENS,
+            temperature=APPRAISAL_TEMPERATURE,
+        )
 
 
 def build_ollama_client(base_url: str, timeout_seconds: float) -> AsyncClient:
