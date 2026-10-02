@@ -349,6 +349,10 @@ counts sources by direction, and it waits on the labels' measured accuracy. Six 
   while trials and reviews that found nothing are at least as many as those that found the effect)
   and `refutation_understated` (`no_evidence`/`weak` while ≥2 of them found nothing and outnumber
   the rest) as *warnings* in every round, because the labels come from a model and are unmeasured.
+  A third, `verdict_on_off_topic_sources`, fires on any verdict but `no_evidence` when every
+  source cited for a claim was labelled `off_topic`. `off_topic` counts in neither direction, so
+  that case left the tally at 0/0 and read as no conflict (2026-10-02: a `supported` article
+  citing three cardiovascular meta-analyses for "increases antioxidant intake").
   `ValidationReport.stance_tally` records the per-claim counts on every report (None when nothing
   was appraised), so phase 2's effect can be read off real articles before anyone builds it.
 - **`Stance` has no docstring** — it is part of `AppraisalOutput`, the appraisal model's grammar,
@@ -1052,6 +1056,9 @@ Six things about it that are load-bearing:
   21-day window yielded four usable angles across the whole corpus, all on two papers; sixty days
   yielded caffeine against strength, endurance, cognition and heart rate. A sub-topic is a slice of
   an already-small count, so a short window structurally cannot see one. Costs no API requests.
+  An angle's outcome must be a descriptor whose current `kind` is `outcome`, not merely an
+  observation with `is_substance` false: stoplisted descriptors carry that flag too, and
+  "Antioxidants" became "dietary fiber for antioxidants" that way.
 - **The trend is counted over the trailing `discovery_window_days` only, not over everything
   harvested.** The harvest spans the overlap so late-indexed records reach the ledger; counting
   them into `current` compares a 21-to-35-day span against 14-day baseline buckets and inflates

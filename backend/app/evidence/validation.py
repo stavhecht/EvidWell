@@ -371,7 +371,9 @@ def check_no_evidence_cites_nothing(output: SynthesisOutput) -> list[ValidationF
 
 #: The warnings ``check_verdict_against_stance`` raises. Named together so the
 #: VALIDATE metrics can say whether a draft disagreed with its appraisal.
-STANCE_WARNING_CODES = frozenset({"verdict_against_stance", "refutation_understated"})
+STANCE_WARNING_CODES = frozenset(
+    {"verdict_against_stance", "refutation_understated", "verdict_on_off_topic_sources"}
+)
 
 
 def check_verdict_against_stance(
@@ -384,7 +386,7 @@ def check_verdict_against_stance(
     something generated — and their accuracy is not measured yet. Until it is,
     they may tell a reviewer where to look and nothing more.
 
-    Two disagreements are worth a reviewer's eye:
+    Three disagreements are worth a reviewer's eye:
 
     * ``supported`` while, for some claim, the cited trials and reviews that
       found no effect are at least as many as those that found it.
@@ -393,6 +395,16 @@ def check_verdict_against_stance(
       effect, and outnumber those that found one. That is a refuted claim
       written up as an untested one — the readers' gloss for ``no_evidence``
       says no study tested it — and there is no verdict for it yet.
+    * Any verdict but ``no_evidence`` while every source cited for some claim
+      was appraised ``off_topic``. ``off_topic`` counts in neither direction
+      of the tally, so without this the tally reads 0 for, 0 against: a claim
+      resting entirely on papers about something else looks like a claim with
+      no conflict. Measured 2026-10-02: "Three systematic reviews and
+      meta-analyses reported a significant increase in antioxidant intake from
+      dietary fiber", ``supported``, cited three cardiovascular meta-analyses,
+      all three appraised off-topic, and the report was clean. Every cited
+      source must be labelled, so a claim APPRAISE skipped is never flagged.
+      (``no_evidence`` citing anything is ``no_evidence_with_citations``'s case.)
 
     Returns the per-claim tally (see ``grading.strong_by_direction``) for the
     report, or None when nothing in the payload was appraised, which must read
@@ -406,6 +418,9 @@ def check_verdict_against_stance(
         claim: [] for claim in payload.target_claims
     }
     against: dict[str, list[str]] = {claim: [] for claim in payload.target_claims}
+    cited_stances: dict[str, dict[str, Stance | None]] = {
+        claim: {} for claim in payload.target_claims
+    }
     for source in payload.sources:
         if source.source_id not in cited:
             continue
@@ -414,12 +429,43 @@ def check_verdict_against_stance(
                 continue
             stance = source.stances.get(claim)
             pairs[claim].append((source.study_type, stance))
+            cited_stances[claim][source.handle] = stance
             if stance in AGAINST_STANCES:
                 against[claim].append(source.handle)
 
     tally = {claim: strong_by_direction(cited_pairs) for claim, cited_pairs in pairs.items()}
 
     warnings: list[ValidationFailure] = []
+    if output.verdict is not Verdict.NO_EVIDENCE:
+        off_topic = sorted(
+            claim
+            for claim, stances in cited_stances.items()
+            if stances and all(stance is Stance.OFF_TOPIC for stance in stances.values())
+        )
+        if off_topic:
+            warnings.append(
+                ValidationFailure(
+                    code="verdict_on_off_topic_sources",
+                    message=(
+                        f"the verdict is {output.verdict}, but "
+                        + "; ".join(
+                            f"every source cited for “{claim}” "
+                            f"({_format_handles(set(cited_stances[claim]))}) was appraised "
+                            "as not reporting the claim's outcome"
+                            for claim in off_topic
+                        )
+                        + ". Check whether what the article says those sources found is "
+                        "what they studied."
+                    ),
+                    detail={
+                        "claims": off_topic,
+                        "cited": {
+                            claim: sorted(cited_stances[claim], key=_handle_sort_key)
+                            for claim in off_topic
+                        },
+                    },
+                )
+            )
     if output.verdict is Verdict.SUPPORTED:
         conflicted = sorted(
             claim

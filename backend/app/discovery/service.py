@@ -400,6 +400,16 @@ class DiscoveryService:
 
         Costs no API requests: every observation was written by an earlier scan.
 
+        **An outcome is a descriptor whose current kind is ``OUTCOME``**, not any
+        observation with ``is_substance`` false. That flag is frozen when the row
+        is written and is false for stoplisted descriptors too, so filtering on it
+        alone admitted the stoplist as outcomes. Measured 2026-10-02: "Antioxidants"
+        (stoplisted as a category abstraction) became the angle of "dietary fiber
+        for antioxidants". Extraction turned that into the claim "increases
+        antioxidant intake", and APPRAISE judged 11 of the 12 ranked papers
+        off-topic. The resulting one-sentence article went to review as
+        ``supported``, resting on fiber and cardiovascular meta-analyses.
+
         Returns:
             ``(cooccurrence, names)`` — substance UI → outcome UI → distinct
             papers, and the descriptor names both halves need.
@@ -435,6 +445,7 @@ class DiscoveryService:
             .select_from(substances)
             .join(outcomes, outcomes.c.pmid == substances.c.pmid)
             .join(DiscoveryDescriptor, DiscoveryDescriptor.ui == outcomes.c.descriptor_ui)
+            .where(DiscoveryDescriptor.kind == DiscoveryDescriptorKind.OUTCOME)
             .group_by(
                 substances.c.descriptor_ui,
                 outcomes.c.descriptor_ui,
