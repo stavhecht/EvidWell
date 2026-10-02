@@ -71,23 +71,34 @@ EVIDENCE_RANK: dict[StudyType, int] = {
 
 
 class Subject(StrEnum):
-    """What kind of thing an article assesses.
+    """The editorial category an article is filed under.
 
-    The one chromatic axis in the product: colour says *what is being
-    assessed*, never how it scored (see the frontend's ``subject.ts``). Set by
-    a reviewer at publish time and deliberately not inferred — ``product`` is
-    free text, and a guessed subject would put a confident colour on an
-    unchecked classification.
+    The one chromatic axis in the product: colour says *what area* an article
+    belongs to, never how it scored (see the frontend's ``subject.ts``). It is
+    also the feed's browse axis — the drawer narrows the feed to one category,
+    and a reader's interests lift categories to the top. Set by a reviewer and
+    deliberately not inferred — ``product`` is free text, and a guessed
+    category would put a confident colour on an unchecked classification.
 
-    Nullable everywhere it appears. An unclassified article renders in ink,
-    which is the design's resting state rather than a broken one.
+    ``OTHER`` is a reviewer's answer ("none of these fit") and is distinct from
+    ``NULL``, which means nobody has classified the article yet. Nullable
+    everywhere it appears. An unclassified article renders in ink, which is the
+    design's resting state rather than a broken one.
+
+    These are areas, not kinds of object, so they do not choose the generated
+    picture's props — ``imagery/prompt.py`` has its own ``Motif`` for that and
+    maps only the categories that settle it.
     """
 
-    SUPPLEMENT = "supplement"
-    DEVICE = "device"
-    PROTOCOL = "protocol"
-    FOOD = "food"
-    TOPICAL = "topical"
+    FITNESS = "fitness"
+    NUTRITION = "nutrition"
+    SUPPLEMENTS = "supplements"
+    SLEEP_RECOVERY = "sleep_recovery"
+    LIFESTYLE = "lifestyle"
+    PREVENTIVE_HEALTH = "preventive_health"
+    GENERAL_HEALTH = "general_health"
+    WELLNESS = "wellness"
+    OTHER = "other"
 
 
 class ImageFrame(StrEnum):

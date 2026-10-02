@@ -206,7 +206,7 @@ class AnthropicExtractionClient:
                 output_format=ExtractionOutput,
             )
         except anthropic.APIError as exc:
-            raise LLMError(f"extraction call failed: {exc}") from exc
+            raise LLMError(f"extraction call failed: {exc}", retryable=_transient(exc)) from exc
 
         _check_refusal(response, "extraction", self._model)
         _check_truncation(response, "extraction", self._model)
@@ -266,7 +266,7 @@ class AnthropicSynthesisClient:
                 output_format=SynthesisOutput,
             )
         except anthropic.APIError as exc:
-            raise LLMError(f"synthesis call failed: {exc}") from exc
+            raise LLMError(f"synthesis call failed: {exc}", retryable=_transient(exc)) from exc
 
         _check_refusal(response, "synthesis", self._model)
         _check_truncation(response, "synthesis", self._model)
@@ -300,3 +300,11 @@ def build_anthropic_client(api_key: str) -> AsyncAnthropic:
     long source block is genuinely slow.
     """
     return AsyncAnthropic(api_key=api_key, max_retries=3, timeout=180.0)
+
+
+def _transient(exc: anthropic.APIError) -> bool:
+    """Connection failures, timeouts, rate limits and 5xx can succeed later."""
+    if isinstance(exc, anthropic.APIConnectionError | anthropic.RateLimitError):
+        return True
+    status = getattr(exc, "status_code", None)
+    return isinstance(status, int) and status >= 500

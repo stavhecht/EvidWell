@@ -102,10 +102,17 @@ def build_providers(
                     )
                 )
             case "openalex":
+                if not settings.openalex_api_key:
+                    logger.warning(
+                        "openalex has no OPENALEX_API_KEY: keyless requests share a small "
+                        "daily budget per IP (about 100 searches), after which every call "
+                        "is refused until midnight UTC. Keys are free."
+                    )
                 providers.append(
                     OpenAlexProvider(
                         throttled_client(settings, http, "openalex", OPENALEX_RPS),
                         settings.openalex_mailto or None,
+                        settings.openalex_api_key or None,
                     )
                 )
             case unknown:
@@ -131,16 +138,22 @@ def build_pubmed_provider(settings: Settings, http: httpx.AsyncClient) -> PubMed
     caller, so each gets its own limiter — safe only because the worker runs a
     research run and a pipeline run one after the other, never together.
     """
+    return PubMedProvider(build_pubmed_client(settings, http), settings.pubmed_api_key or None)
+
+
+def build_pubmed_client(settings: Settings, http: httpx.AsyncClient) -> HttpClient:
+    """A throttled E-utilities client, keyed or anonymous.
+
+    RETRIEVE's retraction screen uses its own: it runs after the stage's
+    searches have returned, so the two limiters never pace requests at once.
+    """
     api_key = settings.pubmed_api_key or None
-    return PubMedProvider(
-        throttled_client(
-            settings,
-            http,
-            "pubmed",
-            PUBMED_KEYED_RPS if api_key else PUBMED_ANONYMOUS_RPS,
-            detect_throttle=detect_throttle,
-        ),
-        api_key,
+    return throttled_client(
+        settings,
+        http,
+        "pubmed",
+        PUBMED_KEYED_RPS if api_key else PUBMED_ANONYMOUS_RPS,
+        detect_throttle=detect_throttle,
     )
 
 

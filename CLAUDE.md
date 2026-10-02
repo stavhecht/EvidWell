@@ -19,7 +19,9 @@ python -m scripts.migrate                # applies migrations via asyncpg; no ps
                                          # old one is kept as evidwell_backup_20260930. Squashing
                                          # is only free while every database holding the schema
                                          # can be rebuilt; the file's header states that
-                                         # condition. Next is 0002.
+                                         # condition. 0002 swaps the subject enum
+                                         # for editorial categories; 0003 moves the
+                                         # research agent onto them. Next is 0004.
 python -m scripts.migrate --status
 python -m scripts.seed_admin --email you@example.com --name "Your Name"
 
@@ -47,9 +49,14 @@ docker compose exec n8n n8n import:workflow --separate --input=/workflows
 
 # check
 pytest tests/ -q
-pytest tests/test_invariants.py::test_name -q     # single test
-ruff check app tests scripts             # clean; treat as a gate
+pytest tests/unitTest/test_invariants.py::test_name -q     # single test
+ruff check app tests scripts evaluation  # clean; treat as a gate
 mypy app                                 # NOT clean — see below
+
+# evaluate — quality metrics over 143 cases; see evaluation/README.md
+python -m evaluation.run                 # exits 1 when a critical metric misses its threshold
+python -m evaluation.run --suite retrieval --limit 20   # stops after RANK, no synthesis
+python -m evaluation.run --test basic_002 --save-baseline
 
 # frontend, from frontend/
 npm run dev            # :5173, public site at /, review desk at /review
@@ -171,7 +178,7 @@ worker's poll loop, leaving the run neither failed nor completed. The offset kee
 monotonic in execution order (0..7 for an ordinary run; with one refinement 0..2, then 9, 10,
 then 11..15) and is a no-op on round 0, so an ordinary run records exactly what it always did. The **commit** boundary still keys on list
 position: "is this the last stage" is a question about the pipeline's shape, not about how many
-times it has looped. `tests/test_orchestrator_transactions.py::test_a_refinement_pass_does_not_collide_with_its_own_stage_row`
+times it has looped. `tests/unitTest/test_orchestrator_transactions.py::test_a_refinement_pass_does_not_collide_with_its_own_stage_row`
 fails with an `IntegrityError` without the offset.
 
 **The one branch is RANK → RETRIEVE, and it is why this is a graph at all.** `rank.py::thin_claims`
@@ -200,7 +207,15 @@ transaction is held open across a model call. The one exception is the last stag
 commits together with the run's completion row, which is what stops a killed worker from
 leaving an article whose run still says `running` (it would be requeued as stale and written
 twice). A retryable `StageError` requeues the run with a backoff up to
-`PIPELINE_MAX_ATTEMPTS`; anything else fails it permanently.
+`PIPELINE_MAX_ATTEMPTS`; anything else fails it permanently. **Outages are retryable,
+contract failures are not** (since 2026-10-02): `LLMError.retryable` is set by the clients for a
+model server that is unreachable, times out, 429s or 5xxs, and EXTRACT/SYNTHESIZE pass it on;
+RETRIEVE and RANK turn `EmbeddingError` and SQLAlchemy `OperationalError`/`InterfaceError` into
+retryable `StageError`s. A missing model, a refusal, or output that broke the contract twice
+still fails for good — the retry would send the identical request. One narrow exception, inside
+SYNTHESIZE: a *first* draft that broke the contract (a nine-word section heading) gets **one**
+fresh draft before the run fails (`fresh_draft_after_contract_failure`), because synthesis
+samples at 0.4 and one sample's overrun is not a property of the request.
 
 **A `running` run proves nothing; its heartbeat does.** The worker pings
 `pipeline_runs.heartbeat_at` on a timer while a run is in flight, and a periodic sweep in the
@@ -232,6 +247,14 @@ abstract when needed), and a paper's similarity
 to a claim is its **best** chunk's — not the mean, which lets the rest of a long abstract
 dilute the one passage that answers the claim, and not the sum, which rewards length. The
 model is still shown the whole abstract; chunks exist only for ranking.
+
+**RANK scores against the subject plus the claim** (`rerank.py::ranking_text`, e.g. "magnesium
+improves sleep quality"), with the subject chosen the way the query chose it — ingredients,
+else product (`claim_subject`). The bare claim names only the outcome, so every paper about the
+outcome scored alike whatever it studied; measured 2026-10-01, 13 known-relevant papers reached
+a pool and missed its top 12 that way, beaten by off-subject papers that loose providers
+(OpenAlex, Europe PMC's full-text fallback) let in. FULL_TEXT keeps the bare claim for excerpts
+on purpose — see below.
 
 `sources.embedding_model` and `sources.chunk_settings` record which model
 embedded a paper's chunks and how they were cut, and a paper is current only when **both**
@@ -288,6 +311,15 @@ evidence. Five things about it:
   claim. The filter needs two distinct search phrases and deliberately omits "were screened" and
   "eligibility criteria", which also describe a trial's recruitment and its sample size.
 
+**A question is not a product.** Extraction was copying the user's question into `product`
+("Is it bad for you?"), which then searched as a quoted phrase, found nothing, and published
+`no_evidence` on a well-studied question. The extraction prompt now says to name the substance
+or practice a question asks about (or `unspecified`), and `query_builder._is_a_name` refuses a
+question, a sentence of more than eight words, or `unspecified` as an anchor — after
+`_mesh_within` has had its chance to find a known substance inside it. **Identical searches
+run once per RETRIEVE** (`searches_shared`): two claims reducing to the same terms used to send
+every provider the same request twice.
+
 **Every query must name a substance, and failing to is a stage failure — not a warning.**
 `QueryStrategy.build()` takes `product` and `ingredients` separately: ingredients name the
 actives but are optional, `product` is required, so the product is the fallback anchor when a
@@ -343,7 +375,7 @@ loop made it the most expensive path instead of the cheapest.
 
 **The re-rank is exact and there is no HNSW index.** Top-k
 is applied in Python after the grade bonus, so no `LIMIT` reaches SQL and the planner cannot
-choose an approximate scan — `tests/test_rerank_plan.py` pins this with `EXPLAIN`. That holds
+choose an approximate scan — `tests/unitTest/test_rerank_plan.py` pins this with `EXPLAIN`. That holds
 for `source_chunks` exactly as it did for the old `sources.embedding`: creating an index there
 means revisiting `rank_for_claim` first. `0001_initial.sql` records the statement and the
 condition that would justify one, commented beside the index it declines to create.
@@ -521,7 +553,11 @@ paragraph.
 
 **A retracted paper is refused, not downgraded — and `retraction_checked_at IS NULL` means
 nobody asked, not "clean".** Three mechanisms, and mixing them up is how this breaks:
-`is_retracted()` drops the paper in `RetrieveStage` before the cache; `classify_study_type`
+`is_retracted()` drops the paper in `RetrieveStage` before the cache — and since 2026-10-02
+RETRIEVE also asks PubMed (`esummary`, via `PubMedRetractionSource`) about every paper with a
+PMID that a *non-PubMed* provider supplied, because an OpenAlex record of a retracted trial is
+typed `article` and was cited with a `supported` verdict; that screen fails open
+(`retraction_screen_failed`); `classify_study_type`
 returns `UNKNOWN` for one already cached; `scripts/check_retractions.py` re-checks cited sources
 against PubMed + Crossref on a schedule, because retractions land *after* publication and the
 ingest screen only ever catches what was already withdrawn when we first saw it.
@@ -652,6 +688,15 @@ listing rather than a word the reader was shown. An unclassified article renders
 sits under "Everything" — the design's resting state, not a broken cell — so it must never
 block publishing.
 
+**Subjects are editorial categories, not kinds of object** (migration 0002, 2026-10-01): Fitness,
+Nutrition, Supplements, Sleep and recovery, Lifestyle, Preventive health, General health,
+Wellness, Other. `other` is a reviewer's answer ("none of these fit") and is not `NULL`
+(unclassified). They are the drawer's filter, the readers' interests and the tile hue, so a
+new category is an enum value in `domain/enums.py`, a migration swapping the Postgres type,
+and a hue in both themes of `youth.css` plus `tailwind.config.ts` and `subject.ts`. They no
+longer choose the generated picture's props: `imagery/prompt.py` keeps its own `Motif`, and
+`_SUBJECT_MOTIFS` maps only Supplements and Nutrition onto it.
+
 **The feed tile's picture is derived, like its headline and excerpt.** `derive_card()` takes
 the first `image` node from the approved body into `articles.card_image` at publish time, so a
 tile cannot show a picture the article does not contain. `youtube` nodes are excluded on
@@ -720,7 +765,8 @@ A body beside a jar, a bowl or a tube is the other case — nothing in frame is 
 the only thing the person can be communicating is an outcome. So people are gated on the motif
 (`_PEOPLE_MOTIFS`, currently `PROTOCOL` alone) rather than switched on globally, and adding a key
 there is a decision about claims, not styling. Two guards go with it. **Only a confident signal
-opens the gate** — a reviewer's `subject`, or a motif matched against `product` itself; a motif
+opens the gate** — a motif matched against `product` itself (a reviewer's category maps to
+no `PROTOCOL` motif, so it cannot open the gate on its own); a motif
 inferred from the *topic* does not, because topics name outcomes and "magnesium for sleep"
 matches `sleep`. And `EXCLUSIONS_WITH_PEOPLE` replaces the body ban rather than dropping it: the
 clinic, text, branding and before-and-after clauses are **identical** in both, because none of
@@ -946,7 +992,7 @@ Six things about it that are load-bearing:
 The sharpest risk is `UnanchoredQuery`: a promoted topic that leads extraction to return an empty
 `ingredients` and a vague `product` dies at a **non-retryable** stage failure, having spent the
 extraction call. Topics are composed as `"<substance> for <outcome>"` with the substance bare and
-first for that reason, and `tests/test_discovery_topics.py` pins that every botanical still anchors
+first for that reason, and `tests/unitTest/test_discovery_topics.py` pins that every botanical still anchors
 a query. It fails *visibly* — the run shows `failed` — so it costs one call, not a wrong article.
 
 **The research agent (`app/research`) is the second proposer, and it proposes too.** The MeSH
@@ -990,6 +1036,12 @@ when editing:
   or the same subject and outcome). Batches cannot see each other, so one run proposed
   "gut health" beside "Gut Health". A query equal to its own seed ("sleep" under "sleep") is
   dropped as the category rather than a trend in it.
+- **Research categories are the article categories.** `research/contracts.py::Category` lists
+  exactly `Subject`'s values, checked at import, so the desk's trending-topics filter and the
+  feed drawer cannot drift. It is a separate class, not an alias, and has **no docstring**:
+  `TriageOutput`'s schema is the triage model's grammar, and `Subject`'s docstring would reach
+  it as the enum's `description`. `other` has no seeds; asked for alone it searches every
+  seed and keeps what triage files under `other`.
 - **Deep research reuses the article pipeline's extraction and `TemplateQueryStrategy`**, so an
   `UnanchoredQuery` topic is discarded before anyone can promote it.
 - **pytrends is archived and its `retries=` option crashes under urllib3 2**
@@ -1003,7 +1055,7 @@ The four are stated with their enforcement mechanisms in [DESIGN.md](./DESIGN.md
 matters when editing:
 
 1. `ReviewService.approve()` is the **only** assignment of `published` in the codebase.
-   `tests/test_publish_path.py` greps the AST and fails when a second one appears. If a change
+   `tests/unitTest/test_publish_path.py` greps the AST and fails when a second one appears. If a change
    seems to need another publish path, that is a design conversation, not a fix.
 2. Citation validation runs after synthesis, before persistence. A failing draft is written as
    `validation_failed` and never enters the review queue — do not soften it to a warning.
@@ -1016,6 +1068,19 @@ matters when editing:
    rewrite is validated like any draft. That is a second chance, not a softening: a second
    failure is stored `validation_failed` as before. Stage-row ordinals are offset by
    `refine_round + revise_round`, for the same `IntegrityError` reason as refinement.
+   Two checks were added 2026-10-02, both revisable, both after the evaluation measured the
+   failure: **`unsourced_number`** (`evidence/numbers.py`) — every number in a cited sentence
+   must appear in the title, year, abstract or excerpts of the sources it cites, since 14% of
+   articles quoted a real statistic cited to the wrong paper — and
+   **`no_evidence_with_citations`**, since `no_evidence` is exempt from the cited-beat rule and
+   drafts were citing studies under it. That second one blocks **only the first draft**: a
+   refuted claim honestly reads `no_evidence` while citing the trials that found no effect, so a
+   rewrite that keeps the pairing passes with a `ValidationReport.warnings` entry the desk shows
+   the reviewer (`validate_draft(..., final_round=True)`). A revision is now shown the draft it
+   is correcting (`revision_feedback(report, draft)`): told to "keep everything else" without
+   it, 10 of 12 rewrites came back with a new misattribution elsewhere. `count_sentences` now
+   strips citation markers first: ". [S5]" was counted as a sentence and failed correct
+   five-sentence beats.
 3. Evidence grade **and quantity** cap verdict confidence (`evidence/grading.py`). Exceeding
    the cap is a validation failure, not a style note. Two rules, both **per claim**, with the
    article inheriting its weakest claim's ceiling: the study-type ceiling, and a quorum of
@@ -1176,7 +1241,7 @@ generated by a separate model call, so card and article cannot contradict each o
     from the app's own origin. A document may only reference media the store wrote; checked on
     autosave *and* again in `ReviewService.approve()`. Do not relax either check to make a
     paste work. `media.py::image_node` builds the node the pipeline writes and
-    `tests/test_media.py` pins that `assert_media_is_ours` accepts it, because a writer and a
+    `tests/unitTest/test_media.py` pins that `assert_media_is_ours` accepts it, because a writer and a
     checker that disagree produce an article whose *first* autosave is refused.
   - `store_image` still has **no size gate**: the upload route enforces `MEDIA_MAX_BYTES`, and
     a generated image never passes through it, so `services/illustration.py` is the only
@@ -1203,9 +1268,19 @@ generated by a separate model call, so card and article cannot contradict each o
   repo-root `.env`. Unset, `/api/automation/*` answers 404 throughout, so n8n cannot start a
   run and nothing is exposed. It must be 32+ characters (validator). The n8n container gets
   that variable, not the whole `.env`.
+- **OpenAlex needs `OPENALEX_API_KEY` (free) for real volume.** Keyless requests share a small
+  daily budget per IP; measured 2026-10-01 it ran out after ~100 searches, and every later call
+  was a 429 with `Retry-After` of hours, until midnight UTC — runs carried on with two providers
+  and less recall, and nothing flagged it. `OPENALEX_MAILTO` no longer buys the polite pool on
+  its own. `ThrottledClient` now treats a `Retry-After` of an hour or more as a spent quota:
+  it fails the call at once and sends that provider nothing more for the rest of the run.
 - **`NEWS_API_KEY` is optional, and its free plan is for development only**: 100 requests a
   day, delayed 24 h. A run uses up to 50. When it is unset or out of quota, DuckDuckGo news
   answers instead, and the candidate's `signals.news.source` says which one.
+- **Testing phase (since 2026-10-01): image generation and News API are switched off in the
+  root `.env`, keys kept.** `IMAGE_PROVIDER=none` makes drafts text-only (illustrate cause
+  `disabled`; the console's Regenerate answers 503). `NEWS_API_ENABLED=false` makes research
+  use DuckDuckGo news. To turn either back on, flip the line and `--force-recreate` (below).
 - **`IMAGE_GEN_KEY` must be a fine-grained HF token with "Make calls to Inference Providers".**
   A plain read token authenticates and then 403s on the first render, which reads nothing like
   a permissions problem until you see the message. No key at all is a supported state, not a
@@ -1263,8 +1338,19 @@ tells you which code to trust):
   it took 198 s and 18.4 GB of peak GPU memory for one 1216×832 image, with swap growing from
   6.2 to 16.8 GB. Hosted FLUX with crop mode (one render per article) was chosen instead.
 - **Not exercised.** Anthropic: the client and its token accounting are written against
-  documented response shapes only. Europe PMC *search* and Semantic Scholar are wired as
-  retrieval providers but have not been enabled in a run (`ENABLED_PROVIDERS=pubmed`).
+  documented response shapes only. Semantic Scholar is wired as a retrieval provider but has
+  not been enabled in a run.
+- **Exercised 2026-10-01: Europe PMC as a search provider** (`ENABLED_PROVIDERS` is
+  `pubmed, openalex, europe_pmc` in the root `.env`). On "Ashwagandha for stress" it returned
+  50 hits, most of them papers PubMed had already found (59 duplicates merged across the three
+  providers), and added 3 new ones. Its queries are the pipeline's PubMed terms with the field
+  tags stripped and scoped to `TITLE_ABS` (`providers.py::europe_pmc_query`). Unscoped, Europe
+  PMC searches open-access *full text*: creatine plus sleep matched 13,693 papers, led by
+  brain-imaging studies where creatine is a measured metabolite, against 336 in title and
+  abstract. It falls back to full text only when the scoped search is empty ("zone 2
+  training": 0 against 20). Its study-type tags are coarser than PubMed's, so a paper only it
+  finds can grade lower. A paper PubMed also returns cannot be lowered by it:
+  `dedup.merge_group` keeps the strongest study type any provider gave.
 - **Resolved 2026-09-04: FLUX.1-schnell.** It was blocked on a token permission, not code —
   `403 Forbidden: This authentication method does not have sufficient permissions to call
   Inference Providers` against a correctly routed call (HF's router reached `nscale`). A

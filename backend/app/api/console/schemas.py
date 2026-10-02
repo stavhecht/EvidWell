@@ -152,6 +152,8 @@ class ValidationReportOut(CamelModel):
     #: "not recorded" rather than as any particular verdict.
     verdict_ceiling: Verdict | None = None
     failures: list[ValidationFailureOut] = Field(default_factory=list)
+    #: Non-blocking problems for the reviewer; empty on older reports.
+    warnings: list[ValidationFailureOut] = Field(default_factory=list)
 
 
 class ArticleDetailOut(CamelModel):

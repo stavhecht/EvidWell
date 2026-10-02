@@ -91,7 +91,8 @@ topics cover one or two queries. Never make a catch-all topic. For each topic \
 return:
 - ids: the ids of the queries it covers. Every id belongs to exactly one topic.
 - canonical_topic: a short topic in plain words, like "Creatine before bed".
-- category: one of {", ".join(c.value for c in Category)}.
+- category: one of {", ".join(c.value for c in Category)}. Use other \
+only for a wellness topic that fits none of the rest.
 - is_wellness_topic: true only when a science-based article on wellness, \
 fitness, nutrition, sleep, recovery or health could address it. False for \
 celebrities, brands, products for sale, shopping queries ("best running \

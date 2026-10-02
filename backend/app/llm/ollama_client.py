@@ -216,14 +216,19 @@ async def _chat(
                     f"{call}: ollama does not have model {model!r} — run "
                     f"`ollama pull {model}`"
                 ) from exc
-            raise LLMError(f"{call} call failed: {exc}") from exc
+            # A 5xx or 429 from the server is load or a crash, not the request.
+            raise LLMError(
+                f"{call} call failed: {exc}",
+                retryable=exc.status_code >= 500 or exc.status_code == 429,
+            ) from exc
         except (ConnectionError, httpx.HTTPError) as exc:
             # The SDK turns a refused connection into a builtin ConnectionError
             # and lets httpx timeouts through untouched; neither is a
             # ResponseError, so both are caught here rather than escaping the
             # stage as an unrecognised exception type.
             raise LLMError(
-                f"{call} call failed: {exc} — is `ollama serve` running?"
+                f"{call} call failed: {exc} — is `ollama serve` running?",
+                retryable=True,
             ) from exc
 
         usage = usage + _usage_from_response(response)

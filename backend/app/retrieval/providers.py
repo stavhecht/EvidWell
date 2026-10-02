@@ -18,6 +18,7 @@ alone. Role of each (DESIGN.md §4):
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, cast
 
 import httpx
@@ -81,6 +82,17 @@ def _clean_doi(doi: str | None) -> str | None:
     return cleaned or None
 
 
+#: PubMed field tags in the pipeline's terms, which Europe PMC does not use.
+_PUBMED_FIELD_TAG_RE = re.compile(
+    r"\[(?:mesh|mh|tiab|ti|ab|pt|majr)(?::noexp)?\]", re.IGNORECASE
+)
+
+
+def europe_pmc_query(terms: str) -> str:
+    """PubMed-syntax terms as a Europe PMC query: field tags removed."""
+    return " ".join(_PUBMED_FIELD_TAG_RE.sub("", terms).split())
+
+
 class EuropePMCProvider:
     def __init__(self, http: HttpClient) -> None:
         self._http = http
@@ -110,25 +122,22 @@ class EuropePMCProvider:
         return hits
 
     async def search(self, query: SearchQuery) -> list[CandidatePaper]:
-        terms = query.terms
-        if query.reviews_only:
-            terms = f'({terms}) AND PUB_TYPE:"review"'
-        if query.min_year:
-            terms = f"({terms}) AND PUB_YEAR:[{query.min_year} TO 3000]"
+        """Title-and-abstract search, falling back to full text when that is empty.
 
-        payload = await _get_json(
-            self._http,
-            EUROPE_PMC_URL,
-            {
-                "query": terms,
-                "format": "json",
-                # 'core' is what includes abstracts; the default result type
-                # omits them, which makes every record unusable here.
-                "resultType": "core",
-                "pageSize": query.max_results,
-            },
-            "europe_pmc",
-        )
+        The pipeline's terms are PubMed syntax. Europe PMC has no ``[MeSH]`` or
+        ``[tiab]`` tags (it ignores them and searches the phrase), so they are
+        stripped, and the query is scoped to ``TITLE_ABS`` — Europe PMC's default
+        searches the *full text* of open-access papers. Measured 2026-10-01:
+        creatine + sleep matched 13,693 papers in full text, led by brain-imaging
+        studies where creatine is a measured metabolite, against 336 in title
+        and abstract. The scoped search can come back empty for a narrow term
+        ("zone 2 training": 0, against 20 in full text), and only then is the
+        full text searched — RANK's similarity scoring is what filters that.
+        """
+        plain = europe_pmc_query(query.terms)
+        payload = await self._search(f"TITLE_ABS:({plain})", query)
+        if not payload.get("resultList", {}).get("result"):
+            payload = await self._search(plain, query)
 
         papers: list[CandidatePaper] = []
         for record in payload.get("resultList", {}).get("result", []):
@@ -166,6 +175,25 @@ class EuropePMCProvider:
                 )
             )
         return papers
+
+    async def _search(self, terms: str, query: SearchQuery) -> dict[str, Any]:
+        if query.reviews_only:
+            terms = f'({terms}) AND PUB_TYPE:"review"'
+        if query.min_year:
+            terms = f"({terms}) AND PUB_YEAR:[{query.min_year} TO 3000]"
+        return await _get_json(
+            self._http,
+            EUROPE_PMC_URL,
+            {
+                "query": terms,
+                "format": "json",
+                # 'core' is what includes abstracts; the default result type
+                # omits them, which makes every record unusable here.
+                "resultType": "core",
+                "pageSize": query.max_results,
+            },
+            "europe_pmc",
+        )
 
 
 class SemanticScholarProvider:
@@ -237,11 +265,18 @@ class SemanticScholarProvider:
 
 
 class OpenAlexProvider:
-    def __init__(self, http: HttpClient, mailto: str | None = None) -> None:
+    def __init__(
+        self, http: HttpClient, mailto: str | None = None, api_key: str | None = None
+    ) -> None:
         self._http = http
         # OpenAlex gives the polite pool — materially better latency — in
         # exchange for a contact address. Worth setting.
         self._mailto = mailto
+        # Since 2026 keyless requests draw on a small free budget shared by
+        # everyone on the IP; measured 2026-10-01, it ran out after about 100
+        # searches and every later call was a 429 until midnight UTC. A key
+        # (free) carries its own budget.
+        self._api_key = api_key
 
     @property
     def source_api(self) -> SourceApi:
@@ -261,6 +296,8 @@ class OpenAlexProvider:
         }
         if self._mailto:
             params["mailto"] = self._mailto
+        if self._api_key:
+            params["api_key"] = self._api_key
 
         payload = await _get_json(self._http, OPENALEX_URL, params, "openalex")
 

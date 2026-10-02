@@ -43,6 +43,13 @@ if the input gives one, since that is what the reader will recognise.
 6. Return fewer claims rather than padding. Each claim triggers a separate \
 literature search, so a vague or duplicated claim costs accuracy downstream.
 
+7. The input may be a question. Then `product` is the substance, food, \
+supplement or practice the question asks about, as a short name, never the \
+question itself: "Does stretching before exercise prevent injuries?" has \
+product "stretching before exercise" and claim "prevents injuries". If the \
+question names no substance or practice ("Is it bad for you?"), set `product` \
+to "unspecified" and do not guess one.
+
 Return only the structured object. No commentary."""
 
 

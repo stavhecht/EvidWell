@@ -1,0 +1,845 @@
+{
+  "case_status": {
+    "acad_001": {
+      "outcome": "no_evidence",
+      "passed": false
+    },
+    "acad_002": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "acad_003": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "acad_004": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "acad_005": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "acad_006": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "acad_007": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "acad_008": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "acad_009": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "acad_010": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "acad_011": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "acad_012": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "adv_001": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "adv_002": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "adv_003": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "adv_004": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "adv_005": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "adv_006": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "adv_007": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "adv_008": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "adv_009": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "adv_010": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "adv_011": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "adv_012": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "adv_013": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "adv_014": {
+      "outcome": "no_evidence",
+      "passed": false
+    },
+    "adv_015": {
+      "outcome": "no_evidence",
+      "passed": false
+    },
+    "adv_016": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "adv_017": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "adv_018": {
+      "outcome": "answered",
+      "passed": true
+    },
+    "adv_019": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "adv_020": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "adv_021": {
+      "outcome": "no_evidence",
+      "passed": false
+    },
+    "adv_022": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "adv_023": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "adv_024": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "adv_025": {
+      "outcome": "no_evidence",
+      "passed": true
+    },
+    "adv_026": {
+      "outcome": "no_evidence",
+      "passed": true
+    },
+    "amb_001": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "amb_002": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "amb_003": {
+      "outcome": "no_evidence",
+      "passed": false
+    },
+    "amb_004": {
+      "outcome": "no_evidence",
+      "passed": false
+    },
+    "amb_005": {
+      "outcome": "no_evidence",
+      "passed": false
+    },
+    "amb_006": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "amb_007": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "amb_008": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_001": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_002": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_003": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_004": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_005": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_006": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_007": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_008": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_009": {
+      "outcome": "answered",
+      "passed": true
+    },
+    "basic_010": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_011": {
+      "outcome": "failed_permanent",
+      "passed": false
+    },
+    "basic_012": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_013": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_014": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_015": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_016": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_017": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_018": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_019": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_020": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_021": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_022": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_023": {
+      "outcome": "no_evidence",
+      "passed": false
+    },
+    "basic_024": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_025": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_026": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_027": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "basic_028": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "conf_001": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "conf_002": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "conf_003": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "conf_004": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "conf_005": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "conf_006": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "conf_007": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "conf_008": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "fail_001": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "fail_002": {
+      "outcome": "answered",
+      "passed": true
+    },
+    "fail_003": {
+      "outcome": "answered",
+      "passed": true
+    },
+    "fail_004": {
+      "outcome": "answered",
+      "passed": true
+    },
+    "fail_005": {
+      "outcome": "answered",
+      "passed": true
+    },
+    "fail_006": {
+      "outcome": "answered",
+      "passed": true
+    },
+    "fail_007": {
+      "outcome": "answered",
+      "passed": true
+    },
+    "fail_008": {
+      "outcome": "failed_retryable",
+      "passed": true
+    },
+    "fail_009": {
+      "outcome": "failed_retryable",
+      "passed": true
+    },
+    "fail_010": {
+      "outcome": "no_evidence",
+      "passed": true
+    },
+    "fail_011": {
+      "outcome": "failed_permanent",
+      "passed": false
+    },
+    "fail_012": {
+      "outcome": "failed_permanent",
+      "passed": false
+    },
+    "fail_013": {
+      "outcome": "failed_unexpected",
+      "passed": false
+    },
+    "fail_014": {
+      "outcome": "failed_unexpected",
+      "passed": false
+    },
+    "fail_015": {
+      "outcome": "answered_unvalidated",
+      "passed": true
+    },
+    "fail_016": {
+      "outcome": "answered",
+      "passed": true
+    },
+    "fail_017": {
+      "outcome": "answered",
+      "passed": true
+    },
+    "fail_018": {
+      "outcome": "answered",
+      "passed": true
+    },
+    "fail_019": {
+      "outcome": "answered",
+      "passed": true
+    },
+    "fail_r01": {
+      "outcome": "research_completed",
+      "passed": true
+    },
+    "fail_r02": {
+      "outcome": "research_completed",
+      "passed": true
+    },
+    "fail_r03": {
+      "outcome": "research_completed",
+      "passed": true
+    },
+    "fail_r04": {
+      "outcome": "research_completed",
+      "passed": true
+    },
+    "fail_r05": {
+      "outcome": "research_completed",
+      "passed": true
+    },
+    "fail_r06": {
+      "outcome": "research_completed",
+      "passed": true
+    },
+    "fail_r07": {
+      "outcome": "research_failed",
+      "passed": true
+    },
+    "fail_r08": {
+      "outcome": "research_failed",
+      "passed": true
+    },
+    "fail_r09": {
+      "outcome": "research_completed",
+      "passed": true
+    },
+    "fail_r10": {
+      "outcome": "research_completed",
+      "passed": true
+    },
+    "latest_001": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "latest_002": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "latest_003": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "latest_004": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "latest_005": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "latest_006": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "latest_007": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "latest_008": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "mp_001": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "mp_002": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "mp_003": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "mp_004": {
+      "outcome": "no_evidence",
+      "passed": false
+    },
+    "mp_005": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "mp_006": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "mp_007": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "mp_008": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "mt_001": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "mt_002": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "mt_003": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "mt_004": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "mt_005": {
+      "outcome": "no_evidence",
+      "passed": false
+    },
+    "mt_006": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "mt_007": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "mt_008": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "noans_001": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "noans_002": {
+      "outcome": "no_evidence",
+      "passed": false
+    },
+    "noans_003": {
+      "outcome": "no_evidence",
+      "passed": false
+    },
+    "noans_004": {
+      "outcome": "no_evidence",
+      "passed": false
+    },
+    "noans_005": {
+      "outcome": "no_evidence",
+      "passed": true
+    },
+    "noans_006": {
+      "outcome": "no_evidence",
+      "passed": true
+    },
+    "noans_007": {
+      "outcome": "answered",
+      "passed": false
+    },
+    "noans_008": {
+      "outcome": "no_evidence",
+      "passed": true
+    }
+  },
+  "cases": {
+    "executed": 143,
+    "failed": 112,
+    "outcomes": {
+      "answered": 106,
+      "answered_unvalidated": 1,
+      "failed_permanent": 3,
+      "failed_retryable": 2,
+      "failed_unexpected": 2,
+      "no_evidence": 19,
+      "research_completed": 8,
+      "research_failed": 2
+    },
+    "passed": 31,
+    "selected": 143,
+    "skipped": 0
+  },
+  "created_at": "2026-10-02T08:10:11+00:00",
+  "environment": {
+    "embedding_model": "ollama/mxbai-embed-large",
+    "enabled_providers": [
+      "pubmed",
+      "openalex",
+      "europe_pmc"
+    ],
+    "extraction_model": "llama3.1:8b",
+    "full_text_max_papers": 6,
+    "llm_provider": "ollama",
+    "mode": "cached",
+    "retrieval_min_year": null,
+    "retrieval_top_k": 12,
+    "synthesis_model": "qwen2.5:7b-instruct"
+  },
+  "git": "07009f5+dirty",
+  "metrics": {
+    "agent_loop_rate": {
+      "n": 143,
+      "value": 0.0
+    },
+    "answer_completeness": {
+      "n": 113,
+      "value": 0.7831858407079646
+    },
+    "answer_correctness": {
+      "n": 113,
+      "value": 0.6371681415929203
+    },
+    "answer_correctness_judge": {
+      "n": 113,
+      "value": 0.911504424778761
+    },
+    "answer_relevance": {
+      "n": 113,
+      "value": 0.9336283185840708
+    },
+    "behavior_accuracy": {
+      "n": 114,
+      "value": 0.9298245614035088
+    },
+    "citation_completeness": {
+      "n": 714,
+      "value": 0.8165266106442577
+    },
+    "citation_correctness": {
+      "n": 469,
+      "value": 0.5618336886993603
+    },
+    "citation_correctness_lexical_proxy": {
+      "n": 105,
+      "value": 0.9789009085623371
+    },
+    "citation_existence_rate": {
+      "n": 79,
+      "value": 0.9873417721518988
+    },
+    "citation_precision": {
+      "n": 105,
+      "value": 0.9179389312977099
+    },
+    "citation_quality": {
+      "n": 105,
+      "value": 0.9390120937263795
+    },
+    "citation_recall": {
+      "n": 91,
+      "value": 0.36994571424321526
+    },
+    "context_carryover_rate": {
+      "n": 8,
+      "value": 0.25
+    },
+    "decision_accuracy": {
+      "n": 503,
+      "value": 1.0
+    },
+    "draft_hallucination_rate": {
+      "n": 113,
+      "value": 0.2831858407079646
+    },
+    "duplicate_rate": {
+      "n": 114,
+      "value": 0.009659379766141332
+    },
+    "empty_retrieval_rate": {
+      "n": 80,
+      "value": 0.0125
+    },
+    "expected_claims_present_rate": {
+      "n": 19,
+      "value": 0.8947368421052632
+    },
+    "failure_recovery_rate": {
+      "n": 29,
+      "value": 0.9655172413793104
+    },
+    "fallback_success_rate": {
+      "n": 13,
+      "value": 1.0
+    },
+    "forbidden_claim_rate": {
+      "n": 42,
+      "value": 0.047619047619047616
+    },
+    "groundedness": {
+      "n": 105,
+      "value": 0.7439554889554889
+    },
+    "hallucination_after_tool_failure_rate": {
+      "n": 29,
+      "value": 0.034482758620689655
+    },
+    "hallucination_rate": {
+      "n": 113,
+      "value": 0.2831858407079646
+    },
+    "infinite_loop_rate": {
+      "n": 29,
+      "value": 0.0
+    },
+    "invented_number_rate": {
+      "n": 113,
+      "value": 0.035398230088495575
+    },
+    "irrelevant_in_top_k_per_case": {
+      "n": 99,
+      "value": 2.8585858585858586
+    },
+    "latency_mean_s": {
+      "n": 133,
+      "value": 128.3768491709854
+    },
+    "latency_median_s": {
+      "n": 133,
+      "value": 137.74120400001993
+    },
+    "latency_p95_s": {
+      "n": 133,
+      "value": 232.22576533301617
+    },
+    "latency_p99_s": {
+      "n": 133,
+      "value": 547.8869293329772
+    },
+    "misattributed_number_rate": {
+      "n": 113,
+      "value": 0.1415929203539823
+    },
+    "no_answer_correct_rate": {
+      "n": 8,
+      "value": 0.875
+    },
+    "query_understanding_accuracy": {
+      "n": 99,
+      "value": 0.9595959595959596
+    },
+    "rank_mrr": {
+      "n": 93,
+      "value": 0.9000896057347669
+    },
+    "rank_ndcg_at_10": {
+      "n": 95,
+      "value": 0.8201127602053784
+    },
+    "rank_precision_at_10": {
+      "n": 93,
+      "value": 0.8057347670250896
+    },
+    "rank_precision_at_5": {
+      "n": 93,
+      "value": 0.8252688172043011
+    },
+    "rank_recall_cap_at_10": {
+      "n": 93,
+      "value": 0.8084229390681004
+    },
+    "rank_recall_cap_at_5": {
+      "n": 93,
+      "value": 0.8252688172043011
+    },
+    "recency_cited_fraction": {
+      "n": 8,
+      "value": 0.7875
+    },
+    "retracted_citation_rate": {
+      "n": 524,
+      "value": 0.003816793893129771
+    },
+    "retrieval_recall_at_1": {
+      "n": 49,
+      "value": 0.08843537414965985
+    },
+    "retrieval_recall_at_10": {
+      "n": 49,
+      "value": 0.45918367346938777
+    },
+    "retrieval_recall_at_3": {
+      "n": 49,
+      "value": 0.227891156462585
+    },
+    "retrieval_recall_at_5": {
+      "n": 49,
+      "value": 0.2789115646258503
+    },
+    "retry_classification_accuracy": {
+      "n": 6,
+      "value": 0.3333333333333333
+    },
+    "source_existence_rate": {
+      "n": 524,
+      "value": 0.9980916030534351
+    },
+    "source_title_match_rate": {
+      "n": 524,
+      "value": 1.0
+    },
+    "successful_termination_rate": {
+      "n": 143,
+      "value": 1.0
+    },
+    "tool_call_count": {
+      "n": 133,
+      "value": 28.62406015037594
+    },
+    "tool_selection_accuracy": {
+      "n": 133,
+      "value": 0.9924812030075187
+    },
+    "uncertainty_appropriate_rate": {
+      "n": 113,
+      "value": 0.8584070796460177
+    },
+    "unnecessary_tool_calls_per_case": {
+      "n": 133,
+      "value": 1.0676691729323309
+    },
+    "unsupported_citation_rate": {
+      "n": 469,
+      "value": 0.18763326226012794
+    },
+    "validation_pass_rate": {
+      "n": 113,
+      "value": 1.0
+    },
+    "verdict_accuracy": {
+      "n": 100,
+      "value": 0.79
+    }
+  },
+  "suite": "all"
+}

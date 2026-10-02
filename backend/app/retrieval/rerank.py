@@ -92,8 +92,14 @@ class SemanticReranker:
         claim: str,
         candidates: list[CachedCandidate],
         config: RerankConfig | None = None,
+        *,
+        subject: str | None = None,
     ) -> list[RankedSource]:
         """Score this run's candidates against one claim and keep the top k.
+
+        ``subject`` is what the claim is about ("magnesium"); the papers are
+        scored against ``ranking_text(claim, subject)``. See that function for
+        why the bare claim is not enough.
 
         Three rules:
 
@@ -106,7 +112,7 @@ class SemanticReranker:
         * **Top-k is cut in Python, after the bonuses.** A SQL ``LIMIT`` on
           similarity alone would drop exactly the reviews the grade bonus
           exists to promote. So the query has no ``LIMIT``, and Postgres
-          scores every candidate exactly (``tests/test_rerank_plan.py``).
+          scores every candidate exactly (``tests/unitTest/test_rerank_plan.py``).
 
         Handles are placeholders here; ``assign_handles`` numbers them across
         the whole article.
@@ -115,7 +121,7 @@ class SemanticReranker:
         if not candidates:
             return []
 
-        claim_vector = await self._embedder.embed_query(claim)
+        claim_vector = await self._embedder.embed_query(ranking_text(claim, subject))
         similarity = (1 - SourceChunk.embedding.cosine_distance(claim_vector)).cast(Float)
         statement = (
             select(
@@ -166,6 +172,37 @@ class SemanticReranker:
             top[0].final_score if top else 0.0,
         )
         return top
+
+
+def ranking_text(claim: str, subject: str | None) -> str:
+    """What a claim's candidates are scored against: the subject, then the claim.
+
+    The bare claim ("improves sleep quality", "treats depression") names the
+    outcome and not the substance, so every paper about the outcome scores the
+    same whichever substance it studied. Measured 2026-10-01 over 143 cases:
+    13 known-relevant papers reached a claim's candidate pool and still missed
+    its top 12, each beaten by papers on the outcome alone — a herbal-medicine
+    trial outranking the magnesium trial for magnesium and sleep, general
+    depression reviews outranking the vitamin D meta-analysis. The search had
+    the subject in it; providers that match loosely (OpenAlex, Europe PMC's
+    full-text fallback) let off-subject papers into the pool, and ranking on
+    the bare claim could not tell them apart.
+
+    ``FULL_TEXT`` deliberately keeps the bare claim when it picks excerpts: there
+    every passage already comes from an on-subject paper, and the subject name
+    was measured pulling literature-search boilerplate up instead.
+    """
+    return f"{subject.strip()} {claim.strip()}" if subject and subject.strip() else claim
+
+
+def claim_subject(product: str, ingredients: list[str]) -> str:
+    """The subject a claim is about, chosen the way the search query chose it.
+
+    Ingredients first, since they name the actives and a multi-ingredient
+    product's name is a brand; the product when there are none.
+    """
+    names = [name.strip() for name in ingredients if name.strip()]
+    return " and ".join(names[:3]) if names else product.strip()
 
 
 RankedByClaim = dict[str, list[RankedSource]]

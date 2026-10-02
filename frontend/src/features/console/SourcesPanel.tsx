@@ -193,6 +193,16 @@ export function ValidationSummary({
         </ul>
       ) : null}
 
+      {report.warnings?.length ? (
+        <ul className={VALIDATION_FAILURES}>
+          {report.warnings.map((warning, index) => (
+            <li key={index} className={WEAK_EVIDENCE_WARNING}>
+              {warning.message}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
       <GradeBar grade={grade} showLabel className={PANEL_GRADE_BAR} />
       <p className={PANEL_GRADE_NOTE}>{GRADE_NOTES[grade]}</p>
 

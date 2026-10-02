@@ -71,7 +71,7 @@ _HANDLE_IN_MARKER_RE = re.compile(r"S\d+")
 #: into a GBNF grammar and its converter does not understand the ``\d`` escape:
 #: with ``\d`` the whole request fails at 400 "failed to parse grammar", which
 #: breaks every synthesis call rather than just a malformed one. Verified
-#: against llama3.1:8b — see tests/test_content.py.
+#: against llama3.1:8b — see tests/unitTest/test_content.py.
 CitationHandle = Annotated[str, StringConstraints(pattern=r"^S[0-9]+$")]
 
 #: The shorthand a model reaches for when every source backs the same claim:
@@ -92,7 +92,17 @@ _SENTENCE_RE = re.compile(r"[.!?](?:\s|$)")
 
 
 def count_sentences(text: str) -> int:
-    return len([s for s in _SENTENCE_RE.split(text.strip()) if s.strip()])
+    """Sentences, counted with citation markers removed.
+
+    A marker after the full stop ("…fell. [S5]") would otherwise be split off
+    as a sentence of its own, and models place markers there often. Measured
+    2026-10-01: a correct five-sentence evidence beat ending ". [S5]" counted
+    as six, failed the contract twice, and the whole run failed with no
+    article. Removing a marker never merges two sentences, so this still never
+    under-counts.
+    """
+    stripped = CITATION_MARKER_RE.sub("", text)
+    return len([s for s in _SENTENCE_RE.split(stripped.strip()) if s.strip()])
 
 
 def extract_handles(text: str) -> set[str]:
@@ -630,7 +640,8 @@ class Illustration(BaseModel):
 class ValidationFailure(BaseModel):
     code: str = Field(
         description="hallucinated_handle | unresolvable_source | uncited_beat "
-        "| verdict_exceeds_grade | malformed_body"
+        "| uncited_section | verdict_exceeds_grade | malformed_body | unsourced_number "
+        "| no_evidence_with_citations"
     )
     message: str
     detail: dict[str, object] = Field(default_factory=dict)
@@ -663,6 +674,11 @@ class ValidationReport(BaseModel):
     #: could say here.
     verdict_ceiling: Verdict | None = None
     failures: list[ValidationFailure] = Field(default_factory=list)
+    #: Problems a reviewer should look at that do not block the draft. A check
+    #: that is usually a mistake but sometimes honest — a ``no_evidence``
+    #: verdict citing studies that found *no effect* — fails the first draft so
+    #: the model is asked once, and lands here if the rewrite keeps it.
+    warnings: list[ValidationFailure] = Field(default_factory=list)
 
     @property
     def badge(self) -> str:

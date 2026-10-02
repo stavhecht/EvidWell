@@ -106,6 +106,7 @@ class SynthesizeStage:
         if not payload.sources:
             return self._no_evidence(ctx, payload)
 
+        fresh_draft = False
         try:
             result = await self._client.synthesize(payload)
         except LLMError as exc:
@@ -113,7 +114,22 @@ class SynthesizeStage:
             # failure here is the most expensive thing that can happen and the
             # one least worth reporting as free. See LLMError.usage.
             ctx.record_usage(self.name, exc.model, exc.usage)
-            raise StageError(self.name, str(exc)) from exc
+            if exc.retryable:
+                raise StageError(self.name, str(exc), retryable=True) from exc
+            # The draft broke a field limit and the client's repair round did
+            # not fix it — a nine-word section heading, a six-sentence beat.
+            # That is a property of one sample, not of the request: synthesis
+            # samples at temperature 0.4, and a fresh draft usually fits.
+            # Measured 2026-10-02, it failed an otherwise complete run outright.
+            # Exactly one more draft, never a loop; if it breaks the contract
+            # too, the run fails as before.
+            logger.warning("first draft broke the output contract; writing one fresh draft")
+            fresh_draft = True
+            try:
+                result = await self._client.synthesize(payload)
+            except LLMError as again:
+                ctx.record_usage(self.name, again.model, again.usage)
+                raise StageError(self.name, str(again), retryable=again.retryable) from again
 
         ctx.record_usage(self.name, result.model, result.usage)
 
@@ -131,6 +147,7 @@ class SynthesizeStage:
                 "verdict": str(result.output.verdict),
                 "sources_in_prompt": len(payload.sources),
                 "coverage_retry": retried,
+                "fresh_draft_after_contract_failure": fresh_draft,
                 "first_draft_handles_cited": first_cited,
                 # What the re-prompt gate counts: sources given a citation of
                 # their own. Kept beside ``handles_cited`` because the gap
@@ -178,7 +195,7 @@ class SynthesizeStage:
         codes = sorted({failure.code for failure in ctx.validation.failures})
         try:
             result = await self._client.synthesize(
-                payload, feedback=revision_feedback(ctx.validation)
+                payload, feedback=revision_feedback(ctx.validation, ctx.draft)
             )
         except LLMError as exc:
             ctx.record_usage(self.name, exc.model, exc.usage)
@@ -472,13 +489,37 @@ def _is_revision(ctx: PipelineContext) -> bool:
 _MAX_FAILURES_FED_BACK = 12
 
 
-def revision_feedback(report: ValidationReport) -> str:
+def _draft_as_text(draft: SynthesisOutput) -> str:
+    """The failed draft, laid out so each part can be copied back unchanged."""
+    body = draft.body
+    parts = [
+        f"Headline: {draft.headline}",
+        f"Verdict: {draft.verdict.value}"
+        + (f" ({draft.verdict_qualifier})" if draft.verdict_qualifier else ""),
+        f"Summary: {draft.summary}",
+        f"Beat 1 (the claim): {body.beat_1_claim}",
+        f"Beat 2 (what the research shows): {body.beat_2_evidence}",
+    ]
+    parts += [f"Section \"{s.heading}\": {s.body}" for s in body.sections]
+    parts.append(f"Beat 3 (bottom line): {body.beat_3_bottom_line}")
+    return "\n\n".join(parts)
+
+
+def revision_feedback(report: ValidationReport, draft: SynthesisOutput | None = None) -> str:
     """The note appended to the user turn when a draft is sent back.
 
     It names the failures VALIDATE found, verbatim, and asks for those fixed
     and nothing else — a rewrite told only "try again" is a fresh draft with
     fresh mistakes. The verdict ceiling is stated when known, because
     ``verdict_exceeds_grade`` cannot be fixed without it.
+
+    **The failed draft is included.** "Keep everything else" meant nothing to a
+    model that could not see what "everything else" was: measured 2026-10-02,
+    10 of 12 drafts sent back for a misattributed number came back with a new
+    misattribution in a different sentence, having been rewritten from scratch.
+    The coverage re-prompt deliberately does *not* show its draft (that one asks
+    for more of the sources, and a draft to extend invites padding); a revision
+    asks for a correction, which needs the text being corrected.
     """
     lines = [f"- {failure.message}" for failure in report.failures[:_MAX_FAILURES_FED_BACK]]
     ceiling = (
@@ -487,10 +528,15 @@ def revision_feedback(report: ValidationReport) -> str:
         if report.verdict_ceiling is not None
         else ""
     )
+    shown = (
+        f"Your previous draft was:\n\n{_draft_as_text(draft)}\n\n" if draft is not None else ""
+    )
     return (
-        "That draft failed the citation checks, so it cannot be published as written:\n"
+        shown
+        + "That draft failed the citation checks, so it cannot be published as written:\n"
         + "\n".join(lines)
-        + "\n\nRewrite it to fix exactly these problems and keep everything else. "
+        + "\n\nRewrite it to fix exactly these problems and keep everything else: copy every "
+        "sentence the problems do not name unchanged, with its citations. "
         "Cite only the handles listed with the sources above, one handle per source "
         "in square brackets like [S1], and use square brackets for nothing else. "
         "Every sentence of the evidence beat and every section must carry at least "

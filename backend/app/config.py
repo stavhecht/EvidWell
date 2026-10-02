@@ -92,6 +92,9 @@ class Settings(BaseSettings):
     pubmed_api_key: str = ""
     semantic_scholar_api_key: str = ""
     openalex_mailto: str = ""
+    #: Free from openalex.org. Without one, OpenAlex requests share a small
+    #: daily budget per IP and fail with 429 once it is spent.
+    openalex_api_key: str = ""
     #: Providers enabled for retrieval. Phase 1 runs PubMed alone by design —
     #: one API learned properly beats four half-integrated.
     enabled_providers: list[str] = ["pubmed"]
@@ -356,6 +359,10 @@ class Settings(BaseSettings):
     ]
     #: newsapi.org key. Empty means the keyless DuckDuckGo news fallback.
     news_api_key: str = ""
+    #: Off means DuckDuckGo news even when a key is set — a switch, so pausing
+    #: News API (its free plan is 100 requests a day) does not mean deleting
+    #: the key from `.env`.
+    news_api_enabled: bool = True
     #: Candidates nobody promoted or dismissed are deleted this long after their
     #: run finished. Novelty reads only decided candidates, so undecided ones
     #: from an old run are never read again — and a run writes ~45 of them.

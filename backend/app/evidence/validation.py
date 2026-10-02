@@ -32,6 +32,7 @@ from app.domain.contracts import (
 )
 from app.domain.enums import StudyType, Verdict
 from app.domain.models import Source
+from app.evidence import numbers
 from app.evidence.grading import (
     QUORUM_FOR_SUPPORTED,
     VERDICT_STRENGTH,
@@ -289,6 +290,83 @@ def check_verdict_within_grade(
     return grade, ceiling, []
 
 
+def check_numbers_are_sourced(
+    output: SynthesisOutput, payload: SynthesisInput
+) -> list[ValidationFailure]:
+    """Check 6 — every number beside a citation is in the sources it cites.
+
+    See ``evidence/numbers.py``. The handle checks above prove a citation
+    points at a real, provided source; this proves the sentence's figures came
+    from it. A statistic cited to the wrong paper passes every other check.
+    """
+    failures = []
+    for sentence, handles, missing, elsewhere in numbers.unsupported(output, payload.sources):
+        cited = ", ".join(handles)
+        figures = ", ".join(missing)
+        many = len(missing) > 1
+        them = "them" if many else "it"
+        hint = (
+            f"; {'they appear' if many else 'it appears'} in {', '.join(elsewhere)}, "
+            f"so cite that source for {them}"
+            if elsewhere
+            else f"; no source provided contains {them}, so remove {them}"
+        )
+        failures.append(
+            ValidationFailure(
+                code="unsourced_number",
+                message=(
+                    f"the sentence “{sentence[:160]}” gives {figures} and cites {cited}, but "
+                    f"{cited} {'do' if len(handles) > 1 else 'does'} not contain "
+                    f"{'those numbers' if many else 'that number'}{hint}"
+                ),
+                detail={
+                    "sentence": sentence,
+                    "handles": handles,
+                    "numbers": missing,
+                    "found_in": elsewhere,
+                },
+            )
+        )
+    return failures
+
+
+def check_no_evidence_cites_nothing(output: SynthesisOutput) -> list[ValidationFailure]:
+    """Check 7 — a ``no_evidence`` verdict cites no source (once).
+
+    ``no_evidence`` says no study met the criteria. A body citing studies
+    contradicts it: either they bear on the claims, and the verdict is at least
+    ``weak``, or they do not, and citing them is decoration. Measured
+    2026-10-01, drafts did exactly this — a stretching article citing a
+    Cochrane review under ``no_evidence`` — and nothing caught it, because
+    ``no_evidence`` is exempt from the cited-beat rule and sits below every
+    ceiling. The deterministic no-evidence template cites nothing and passes.
+
+    **It blocks only the first draft.** The verdict scale measures support, so
+    a claim the studies *refute* ("creatine damages the kidneys") honestly
+    reads ``no_evidence`` while citing the trials that found no harm — and
+    deterministic code cannot tell that from the stretching case. Measured
+    2026-10-02, blocking a rewrite as well rejected eight such articles. So
+    the first draft is sent back once with the question; a rewrite that keeps
+    the pairing passes with a warning for the reviewer (``final_round``).
+    """
+    if output.verdict is not Verdict.NO_EVIDENCE:
+        return []
+    cited = sorted(output.body.cited_handles(), key=_handle_sort_key)
+    if not cited:
+        return []
+    return [
+        ValidationFailure(
+            code="no_evidence_with_citations",
+            message=(
+                f"the verdict is no_evidence but the article cites {', '.join(cited)}: if "
+                "those sources bear on the claims the verdict is at least weak, and if they "
+                "do not, do not cite them"
+            ),
+            detail={"cited": cited},
+        )
+    ]
+
+
 def check_body_parses(output: SynthesisOutput) -> list[ValidationFailure]:
     """Check 5 — the body can be turned into a document.
 
@@ -318,6 +396,8 @@ async def validate_draft(
     session: AsyncSession,
     output: SynthesisOutput,
     payload: SynthesisInput,
+    *,
+    final_round: bool = False,
 ) -> ValidationReport:
     """Run every check and produce the report stored on the article.
 
@@ -341,6 +421,12 @@ async def validate_draft(
 
     failures.extend(check_body_parses(output))
 
+    failures.extend(check_numbers_are_sourced(output, payload))
+
+    warnings: list[ValidationFailure] = []
+    no_evidence_cited = check_no_evidence_cites_nothing(output)
+    (warnings if final_round else failures).extend(no_evidence_cited)
+
     grade, ceiling, verdict_failures = check_verdict_within_grade(
         output, resolved, payload
     )
@@ -353,6 +439,7 @@ async def validate_draft(
         best_evidence_grade=grade,
         verdict_ceiling=ceiling,
         failures=failures,
+        warnings=warnings,
     )
 
     if report.passed:
@@ -390,6 +477,8 @@ def summarise_failures(report: ValidationReport) -> str:
         "uncited_section": "uncited section",
         "verdict_exceeds_grade": "verdict exceeds evidence grade",
         "malformed_body": "unparseable body",
+        "unsourced_number": "number not in its cited source",
+        "no_evidence_with_citations": "no-evidence verdict citing sources",
     }
     parts = [
         f"{count} {labels.get(code, code)}{'s' if count > 1 else ''}"

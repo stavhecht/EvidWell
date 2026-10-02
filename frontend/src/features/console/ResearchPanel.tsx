@@ -37,6 +37,7 @@ import {
   startResearchRun,
 } from "@/lib/api/console";
 import { ApiError } from "@/lib/api/client";
+import { SUBJECTS, SUBJECT_LABELS } from "@/features/evidence/subject";
 import type {
   ResearchCandidate,
   ResearchCategory,
@@ -78,18 +79,10 @@ import {
   candidatesChevron,
 } from "./styles";
 
-const CATEGORIES: { value: ResearchCategory; label: string }[] = [
-  { value: "fitness", label: "Fitness" },
-  { value: "exercise", label: "Exercise" },
-  { value: "nutrition", label: "Nutrition" },
-  { value: "supplements", label: "Supplements" },
-  { value: "sleep", label: "Sleep" },
-  { value: "recovery", label: "Recovery" },
-  { value: "lifestyle", label: "Lifestyle" },
-  { value: "preventive_health", label: "Preventive health" },
-  { value: "general_health", label: "General health" },
-  { value: "wellness", label: "Wellness" },
-];
+// The article categories, so the filter here and the feed's drawer cannot drift.
+const CATEGORIES: { value: ResearchCategory; label: string }[] = SUBJECTS.map(
+  (value) => ({ value, label: SUBJECT_LABELS[value] }),
+);
 
 const STAGE_WORDS: Record<string, string> = {
   queued: "waiting for the worker",

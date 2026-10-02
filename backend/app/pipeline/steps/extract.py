@@ -28,7 +28,7 @@ class ExtractStage:
             # like a success, and the context is mutated in place so the
             # orchestrator still sees it on a run that never returns one.
             ctx.record_usage(self.name, exc.model, exc.usage)
-            raise StageError(self.name, str(exc)) from exc
+            raise StageError(self.name, str(exc), retryable=exc.retryable) from exc
 
         ctx.record_usage(self.name, result.model, result.usage)
 

@@ -50,11 +50,13 @@ from app.retrieval.factory import (
     build_europe_pmc_client,
     build_http_client,
     build_providers,
+    build_pubmed_client,
 )
 from app.retrieval.full_text import EuropePMCFullText
 from app.retrieval.identifiers import EuropePMCIdentifiers
 from app.retrieval.query_builder import TemplateQueryStrategy
 from app.retrieval.rerank import RerankConfig, SemanticReranker
+from app.retrieval.retractions import PubMedRetractionSource
 
 logger = logging.getLogger(__name__)
 
@@ -559,6 +561,9 @@ def build_default_pipeline(session: AsyncSession, settings: Settings) -> list[St
             cache,
             settings.retrieval_max_candidates_per_claim,
             resolver=EuropePMCIdentifiers(europe_pmc),
+            retraction_screen=PubMedRetractionSource(
+                build_pubmed_client(settings, http), settings.pubmed_api_key or None
+            ),
         ),
         RankStage(reranker, rerank_config),
         # After RANK so it reads only papers that already made the cut, and

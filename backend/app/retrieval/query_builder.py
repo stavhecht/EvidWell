@@ -87,6 +87,21 @@ _STOPWORDS = frozenset(
     }
 )  # fmt: skip
 
+#: Words a question opens with. A product "name" starting with one of these is
+#: the user's question copied into the field, not a substance.
+_INTERROGATIVES = frozenset(
+    {
+        "does", "do", "is", "are", "can", "could", "should", "would", "will", "what",
+        "which", "how", "why", "when", "where", "who",
+    }
+)  # fmt: skip
+
+#: What extraction is told to write when a question names no substance.
+_NO_SUBJECT = frozenset({"unspecified", "none", "unknown", "n/a", "na"})
+
+#: More words than any substance or practice name, unless it maps to a known one.
+_MAX_NAME_WORDS = 8
+
 #: Reviews are scarce, so their pass needs fewer results; the general pass
 #: carries the breadth.
 REVIEW_PASS_MAX_RESULTS = 15
@@ -194,10 +209,33 @@ def _subject_group(substances: list[str]) -> str:
             names.append(re.sub(r"\s*\([^)]*\)", "", name).strip())
 
         mapped = next((MESH_HINTS[n] for n in names if n in MESH_HINTS), None)
-        terms.append(mapped or _mesh_within(name) or f'"{names[-1]}"')
+        mapped = mapped or _mesh_within(name)
+        if mapped is None and not _is_a_name(name):
+            continue
+        terms.append(mapped or f'"{names[-1]}"')
 
     unique = list(dict.fromkeys(term for term in terms if term))
     return f"({' OR '.join(unique)})" if unique else ""
+
+
+def _is_a_name(phrase: str) -> bool:
+    """False for something that cannot be a substance or practice name.
+
+    Extraction sometimes copies the user's question into ``product``
+    ("Is it bad for you?", or the eleven-word "Meta-analytic evidence on weekly
+    resistance training volume and muscle hypertrophy"). Searched as a quoted
+    phrase, that finds nothing, and the run publishes a confident "no
+    evidence" verdict — measured 2026-10-01 on a question with a large
+    literature. Refusing it makes the query unanchored instead: a visible
+    failure rather than a false verdict. A known substance inside such a phrase
+    is still found by ``_mesh_within`` first.
+    """
+    words = phrase.split()
+    if not words or phrase.strip() in _NO_SUBJECT:
+        return False
+    if phrase.rstrip().endswith("?") or words[0] in _INTERROGATIVES:
+        return False
+    return len(words) <= _MAX_NAME_WORDS
 
 
 def _mesh_within(phrase: str) -> str | None:

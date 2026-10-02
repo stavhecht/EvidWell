@@ -50,7 +50,7 @@ def build_news_provider(
 ) -> NewsProvider:
     """News API with DuckDuckGo news behind it, or DuckDuckGo news alone."""
     ddg = DuckDuckGoNewsProvider(region=region)
-    if not settings.news_api_key:
+    if not settings.news_api_enabled or not settings.news_api_key:
         return ddg
     news_api = NewsApiProvider(
         throttled_client(settings, http, "news_api", NEWS_API_RPS), settings.news_api_key

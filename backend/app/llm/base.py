@@ -107,14 +107,26 @@ class LLMError(RuntimeError):
     stage records this before converting the error into a ``StageError``.
 
     Left empty on a transport failure, where nothing was consumed.
+
+    ``retryable`` marks a failure a later attempt can succeed past: the model
+    server unreachable, a timeout, a 5xx or a rate limit. The stages pass it on
+    to ``StageError`` so the worker requeues the run. Everything else — a
+    missing model, output that broke the contract twice, a refusal — stays
+    permanent, since a retry sends the identical request.
     """
 
     def __init__(
-        self, message: str, *, usage: TokenUsage | None = None, model: str = ""
+        self,
+        message: str,
+        *,
+        usage: TokenUsage | None = None,
+        model: str = "",
+        retryable: bool = False,
     ) -> None:
         super().__init__(message)
         self.usage = usage or TokenUsage()
         self.model = model
+        self.retryable = retryable
 
 
 class RefusalError(LLMError):

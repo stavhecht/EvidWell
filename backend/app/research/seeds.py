@@ -14,13 +14,15 @@ from __future__ import annotations
 
 from app.research.contracts import Category
 
+#: ``OTHER`` has no seeds of its own: it is where triage files a wellness topic
+#: that fits none of the rest, and such a topic can surface under any seed.
 SEEDS: dict[Category, tuple[str, ...]] = {
-    Category.FITNESS: ("workout", "fitness"),
-    Category.EXERCISE: ("exercise", "running", "strength training"),
+    Category.FITNESS: (
+        "workout", "fitness", "exercise", "running", "strength training",
+    ),
     Category.NUTRITION: ("diet", "protein", "nutrition"),
     Category.SUPPLEMENTS: ("supplement", "creatine", "magnesium"),
-    Category.SLEEP: ("sleep",),
-    Category.RECOVERY: ("muscle recovery", "sauna"),
+    Category.SLEEP_RECOVERY: ("sleep", "muscle recovery", "sauna"),
     Category.LIFESTYLE: ("stress", "fasting"),
     Category.PREVENTIVE_HEALTH: ("blood pressure", "cholesterol"),
     Category.GENERAL_HEALTH: ("gut health", "inflammation"),
@@ -29,7 +31,14 @@ SEEDS: dict[Category, tuple[str, ...]] = {
 
 
 def seeds_for(categories: list[Category]) -> list[tuple[str, Category]]:
-    """(seed, category) pairs for the requested categories, deduplicated."""
+    """(seed, category) pairs for the requested categories, deduplicated.
+
+    Asking for ``OTHER`` alone searches every seed — there is nowhere else for
+    an uncategorised topic to come from — and triage then keeps only what it
+    files under ``OTHER``.
+    """
+    if list(categories) == [Category.OTHER]:
+        categories = list(SEEDS)
     seen: set[str] = set()
     pairs: list[tuple[str, Category]] = []
     for category in categories:
